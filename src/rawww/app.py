@@ -943,12 +943,64 @@ class Workspace(QMainWindow):
         self.dir_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Drives)
         self.dir_model.setRootPath(QDir.rootPath())
 
+        # Create a custom model that correctly reports children only for folders with subdirectories
+        class CleanDirModel(QFileSystemModel):
+            def hasChildren(self, parent=None):
+                # Only show expand arrows if the folder actually contains other folders
+                if not parent or not parent.isValid():
+                    return super().hasChildren(parent)
+                    
+                path = self.filePath(parent)
+                if not path:
+                    return super().hasChildren(parent)
+                    
+                # Check if this directory contains any subdirectories
+                qdir = QDir(path)
+                subdirs = qdir.entryList(QDir.Filter.Dirs | QDir.Filter.NoDotAndDotDot)
+                if len(subdirs) == 0:
+                    # This folder has no subfolders, don't show expand arrow
+                    return False
+                    
+                # Otherwise use the default behavior
+                return super().hasChildren(parent)
+        
+        self.dir_model = CleanDirModel(self)
+        self.dir_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Drives)
+        self.dir_model.setRootPath(QDir.rootPath())
+        
         self.dir_tree = QTreeView()
         self.dir_tree.setModel(self.dir_model)
         self._set_tree_root_for_path(self.current_dir.anchor or QDir.rootPath())
         for column in range(1, self.dir_model.columnCount()):
             self.dir_tree.hideColumn(column)
         self.dir_tree.clicked.connect(self._directory_selected)
+        # Hide expand arrows on folders that don't have any subfolders
+        def update_node_flags():
+            root = self.dir_tree.rootIndex()
+            rows = self.dir_model.rowCount(root)
+            # BFS through all items to check if they have subdirectories
+            from collections import deque
+            queue = deque()
+            for i in range(rows):
+                queue.append(self.dir_model.index(i, 0, root))
+            while queue:
+                index = queue.popleft()
+                path = self.dir_model.filePath(index)
+                qdir = QDir(path)
+                subdirs = qdir.entryList(QDir.Filter.Dirs | QDir.Filter.NoDotAndDotDot)
+                if len(subdirs) == 0:
+                    # No subfolders, set flag to never have children (hides expand icon)
+                    item_flags = self.dir_model.flags(index)
+                    self.dir_model.setData(index, item_flags | Qt.ItemNeverHasChildren, Qt.ItemDataRole.EditRole)
+                else:
+                    # Add children to queue to check them
+                    child_rows = self.dir_model.rowCount(index)
+                    for i in range(child_rows):
+                        queue.append(self.dir_model.index(i, 0, index))
+        # Refresh flags when the tree expands
+        self.dir_tree.expanded.connect(update_node_flags)
+        # Update once at startup
+        QTimer.singleShot(100, update_node_flags)
         self.dir_tree.setHeaderHidden(True)
         self.dir_tree.setMinimumWidth(260)
 
