@@ -9,7 +9,7 @@ import subprocess
 from collections import OrderedDict, deque
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from typing import Callable
 
 from PySide6.QtCore import QDir, QFileInfo, QFileSystemWatcher, QPoint, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal, QObject, QStorageInfo
@@ -39,6 +39,8 @@ from PySide6.QtWidgets import (
     QTreeView,
     QVBoxLayout,
     QWidget,
+    QInputDialog,
+    QMessageBox,
 )
 
 from .cache import FolderCache
@@ -202,22 +204,54 @@ class PhotoCardDelegate(QStyledItemDelegate):
 
         top, side, bottom = (14, 4, 15) if self.compact else (20, 4, 16)
         image_rect = rect.adjusted(side, top, -side, -bottom)
-        painter.fillRect(image_rect, QColor("#8f8f8f"))
+        # Check if this item is a directory
+        path = index.data(Qt.ItemDataRole.UserRole)
+        path_obj = Path(path) if path else None
+        if path_obj and path_obj.is_dir():
+             # Use system folder icon from Qt file icon provider
+             icon_provider = QFileIconProvider()
+             folder_icon = icon_provider.icon(QFileInfo(str(path_obj)))
+             if not folder_icon.isNull():
+                 # Clear any background first (remove old gray background)
+                 painter.fillRect(image_rect, Qt.GlobalColor.transparent)
+                 # Scale icon to fill the entire image area like we do for photos
+                 scaled = folder_icon.pixmap(image_rect.size()).size().scaled(
+                     image_rect.size(), 
+                     Qt.AspectRatioMode.KeepAspectRatio
+                 )
+                 target = QRect(
+                     image_rect.left() + (image_rect.width() - scaled.width()) // 2,
+                     image_rect.top() + (image_rect.height() - scaled.height()) // 2,
+                     scaled.width(),
+                     scaled.height(),
+                 )
+                 painter.drawPixmap(target, folder_icon.pixmap(scaled))
+        else:
+            painter.fillRect(image_rect, QColor("#8f8f8f"))
 
-        preview = index.data(PREVIEW_ROLE)
-        if isinstance(preview, QImage) and not preview.isNull():
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-            scaled = preview.size().scaled(image_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
-            target = QRect(
-                image_rect.left() + (image_rect.width() - scaled.width()) // 2,
-                image_rect.top() + (image_rect.height() - scaled.height()) // 2,
-                scaled.width(),
-                scaled.height(),
-            )
-            painter.drawImage(target, preview)
+            preview = index.data(PREVIEW_ROLE)
+            if isinstance(preview, QImage) and not preview.isNull():
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                scaled = preview.size().scaled(image_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
+                target = QRect(
+                    image_rect.left() + (image_rect.width() - scaled.width()) // 2,
+                    image_rect.top() + (image_rect.height() - scaled.height()) // 2,
+                    scaled.width(),
+                    scaled.height(),
+                )
+                painter.drawImage(target, preview)
 
-        text_rect = QRect(rect.left() + 5, rect.bottom() - bottom + 2, rect.width() * (3 if self.compact else 2) // 5, bottom - 2)
-        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        # For folders: full width text, no ratings/badges
+        if path_obj and path_obj.is_dir():
+            text_rect = QRect(rect.left() + 5, rect.bottom() - bottom + 2, rect.width() - 10, bottom - 2)
+        else:
+            # For photos: normal layout with space for rating
+            text_rect = QRect(rect.left() + 5, rect.bottom() - bottom + 2, rect.width() * (3 if self.compact else 2) // 5, bottom - 2)
+        # For folders always use just the folder name, never full path
+        if path_obj and path_obj.is_dir():
+            text = path_obj.name
+        else:
+            text = index.data(Qt.ItemDataRole.DisplayRole) or ""
         color = QColor("#242424")
         painter.setPen(color)
         font = painter.font()
@@ -229,26 +263,28 @@ class PhotoCardDelegate(QStyledItemDelegate):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideMiddle, text_rect.width()),
         )
-        rating = detail.get("rating")
-        if rating:
-            badge = QRect(rect.right() - (43 if self.compact else 50), rect.bottom() - bottom + 2, 39 if self.compact else 45, bottom - 2)
-            painter.setPen(QColor("#3a3123"))
-            painter.drawText(badge, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "★" * int(rating))
-        series = index.data(SERIES_ROLE) or {}
-        count = int(series.get("count", 0) or 0)
-        if count > 1:
-            badge_rect = QRect(rect.right() - 48, rect.top() + 3, 44, 15)
-            painter.fillRect(badge_rect, QColor("#d5d5d5"))
-            painter.setPen(QColor("#262626"))
-            icon_font = QFont(FOMANTIC_ICON_FAMILY or option.font.family())
-            icon_font.setPixelSize(9)
-            painter.setFont(icon_font)
-            painter.drawText(QRect(badge_rect.left() + 3, badge_rect.top(), 12, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, FOMANTIC_ICON_CODES["images"] if FOMANTIC_ICON_FAMILY else "▣")
-            font = painter.font()
-            font.setPixelSize(9)
-            painter.setFont(font)
-            marker = "−" if series.get("expanded") else "+"
-            painter.drawText(QRect(badge_rect.left() + 16, badge_rect.top(), 26, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, f"{count} {marker}")
+        # Only render ratings and series badges for photos, not folders
+        if not (path_obj and path_obj.is_dir()):
+            rating = detail.get("rating")
+            if rating:
+                badge = QRect(rect.right() - (43 if self.compact else 50), rect.bottom() - bottom + 2, 39 if self.compact else 45, bottom - 2)
+                painter.setPen(QColor("#3a3123"))
+                painter.drawText(badge, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "★" * int(rating))
+            series = index.data(SERIES_ROLE) or {}
+            count = int(series.get("count", 0) or 0)
+            if count > 1:
+                badge_rect = QRect(rect.right() - 48, rect.top() + 3, 44, 15)
+                painter.fillRect(badge_rect, QColor("#d5d5d5"))
+                painter.setPen(QColor("#262626"))
+                icon_font = QFont(FOMANTIC_ICON_FAMILY or option.font.family())
+                icon_font.setPixelSize(9)
+                painter.setFont(icon_font)
+                painter.drawText(QRect(badge_rect.left() + 3, badge_rect.top(), 12, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, FOMANTIC_ICON_CODES["images"] if FOMANTIC_ICON_FAMILY else "▣")
+                font = painter.font()
+                font.setPixelSize(9)
+                painter.setFont(font)
+                marker = "−" if series.get("expanded") else "+"
+                painter.drawText(QRect(badge_rect.left() + 16, badge_rect.top(), 26, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, f"{count} {marker}")
         painter.restore()
 
     def sizeHint(self, option, index) -> QSize:
@@ -945,24 +981,58 @@ class Workspace(QMainWindow):
 
         # Create a custom model that correctly reports children only for folders with subdirectories
         class CleanDirModel(QFileSystemModel):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self._new_folder_path: Path | None = None
+
             def hasChildren(self, parent=None):
                 # Only show expand arrows if the folder actually contains other folders
                 if not parent or not parent.isValid():
                     return super().hasChildren(parent)
-                    
                 path = self.filePath(parent)
                 if not path:
                     return super().hasChildren(parent)
-                    
-                # Check if this directory contains any subdirectories
                 qdir = QDir(path)
                 subdirs = qdir.entryList(QDir.Filter.Dirs | QDir.Filter.NoDotAndDotDot)
-                if len(subdirs) == 0:
-                    # This folder has no subfolders, don't show expand arrow
+                if not subdirs:
                     return False
-                    
-                # Otherwise use the default behavior
                 return super().hasChildren(parent)
+
+            def flags(self, index):
+                default_flags = super().flags(index)
+                if not index.isValid():
+                    return default_flags
+                # Разрешаем редактирование только для свежесозданной папки
+                if self._new_folder_path and self.filePath(index) == str(self._new_folder_path):
+                    return default_flags | Qt.ItemFlag.ItemIsEditable
+                # Для всех остальных запрещаем
+                return default_flags & ~Qt.ItemFlag.ItemIsEditable
+
+            def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
+                if role == Qt.ItemDataRole.EditRole:
+                    old_path_str = self.filePath(index)
+                    old_path = Path(old_path_str)
+                    new_name = str(value).strip()
+
+                    # Если имя не изменилось или пустое, отменяем
+                    if not new_name or new_name == old_path.name:
+                        self._new_folder_path = None # Сбрасываем в любом случае
+                        return False
+
+                    new_path = old_path.parent / new_name
+                    if new_path.exists():
+                        QMessageBox.warning(None, "Ошибка", "Папка с таким именем уже существует.")
+                        self._new_folder_path = None # Сбрасываем
+                        return False
+
+                    # Переименовываем
+                    if QDir().rename(old_path_str, str(new_path)):
+                        self._new_folder_path = None # Успех, сбрасываем
+                        return True
+
+                    self._new_folder_path = None # Ошибка, сбрасываем
+                    return False
+                return super().setData(index, value, role)
         
         self.dir_model = CleanDirModel(self)
         self.dir_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Drives)
@@ -970,6 +1040,8 @@ class Workspace(QMainWindow):
         
         self.dir_tree = QTreeView()
         self.dir_tree.setModel(self.dir_model)
+        # Включаем возможность редактирования элементов дерева
+        self.dir_tree.setEditTriggers(QTreeView.EditTrigger.DoubleClicked | QTreeView.EditTrigger.EditKeyPressed)
         self._set_tree_root_for_path(self.current_dir.anchor or QDir.rootPath())
         for column in range(1, self.dir_model.columnCount()):
             self.dir_tree.hideColumn(column)
@@ -1032,6 +1104,31 @@ class Workspace(QMainWindow):
         self.drive_button_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         sidebar_layout.addLayout(self.drive_button_layout)
         self._refresh_volume_buttons()
+
+        # Создаем тулбар с кнопками навигации над деревом папок
+        folder_toolbar = QWidget()
+        folder_toolbar_layout = QHBoxLayout(folder_toolbar)
+        folder_toolbar_layout.setContentsMargins(0, 0, 0, 8)
+        folder_toolbar_layout.setSpacing(4)
+        
+        # Кнопка "На уровень вверх"
+        self.up_button = QToolButton()
+        self.up_button.setIcon(qApp.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogToParent))
+        self.up_button.setToolTip("На уровень вверх")
+        self.up_button.clicked.connect(self._go_up_directory)
+        folder_toolbar_layout.addWidget(self.up_button)
+        
+        # Кнопка "Создать папку"
+        self.new_folder_button = QToolButton()
+        self.new_folder_button.setIcon(qApp.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder))
+        self.new_folder_button.setToolTip("Создать папку")
+        self.new_folder_button.clicked.connect(self._create_new_folder)
+        folder_toolbar_layout.addWidget(self.new_folder_button)
+        
+        # Выравниваем кнопки по левому краю
+        folder_toolbar_layout.addStretch()
+        
+        sidebar_layout.addWidget(folder_toolbar)
         sidebar_layout.addWidget(self.dir_tree, 1)
 
         content = QWidget()
@@ -1044,6 +1141,8 @@ class Workspace(QMainWindow):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(10, 8, 10, 8)
         toolbar_layout.setSpacing(7)
+
+        
         self.rating_filter = QComboBox()
         self.rating_filter.addItem("Все рейтинги", None)
         for rating in range(5, 0, -1):
@@ -1241,6 +1340,55 @@ class Workspace(QMainWindow):
             action.triggered.connect(lambda _checked=False, value=rating: self._set_selected_rating(value or None))
             self.addAction(action)
 
+
+    def _go_up_directory(self) -> None:
+        """Перейти на уровень вверх от текущей директории"""
+        if self.current_dir and self.current_dir.parent != self.current_dir:
+            self.load_directory(self.current_dir.parent)
+    
+    def _create_new_folder(self) -> None:
+        """Создать новую папку в текущей директории с inline-редактированием."""
+        if not self.current_dir:
+            return
+
+        parent_index = self.dir_model.index(str(self.current_dir))
+
+        # Создаем временное имя для папки
+        i = 1
+        while True:
+            temp_name = f"Новая папка {i}"
+            temp_path = self.current_dir / temp_name
+            if not temp_path.exists():
+                break
+            i += 1
+
+        try:
+            # Устанавливаем путь к новой папке в модели ПЕРЕД ее созданием
+            self.dir_model._new_folder_path = temp_path
+
+            # Слот для обработки добавления строк в модель
+            def on_rows_inserted(parent, first, last):
+                # Проверяем, что папка добавлена в нужную родительскую директорию
+                if parent == parent_index:
+                    new_index = self.dir_model.index(first, 0, parent)
+                    # Убедимся, что это именно та папка, которую мы создали
+                    if self.dir_model.filePath(new_index) == str(temp_path):
+                        self.dir_tree.edit(new_index)
+                        # Отключаем сигнал после использования
+                        self.dir_model.rowsInserted.disconnect(on_rows_inserted)
+
+            # Подключаем сигнал
+            self.dir_model.rowsInserted.connect(on_rows_inserted)
+
+            # Создаем папку на диске, что вызовет обновление модели и сигнал rowsInserted
+            temp_path.mkdir()
+
+        except OSError as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать папку: {e}")
+            self.dir_model._new_folder_path = None # Очищаем в случае ошибки
+            # Если сигнал был подключен, лучше его отключить
+            if 'on_rows_inserted' in locals() and self.dir_model.receivers(self.dir_model.rowsInserted) > 0:
+                    self.dir_model.rowsInserted.disconnect(on_rows_inserted)
     def _directory_selected(self, index) -> None:
         path = Path(self.dir_model.filePath(index))
         self.load_directory(path)
@@ -1355,6 +1503,16 @@ class Workspace(QMainWindow):
         self.thumb_priority.clear()
         self.thumb_priority_set.clear()
         self.visible_thumb_pending.clear()
+        
+        # Synchronize the left tree view with the current directory
+        index = self.dir_model.index(str(directory))
+        if index.isValid():
+            # Expand all parent directories to show the current folder in the tree
+            self.dir_tree.expand(index.parent())
+            # Select and scroll to the current directory
+            self.dir_tree.setCurrentIndex(index)
+            self.dir_tree.scrollTo(index)
+            
         request = self.workspace_state.begin_directory(directory)
         future = self.directory_scan_executor.submit(_scan_directory, directory)
         future.add_done_callback(lambda done, r=request, d=directory: self._directory_scanned(r, d, done))
@@ -1369,7 +1527,14 @@ class Workspace(QMainWindow):
             return
         try:
             self.all_paths = future.result()
-            self.paths = _build_photo_view(self.all_paths)
+            # Separate subdirectories and image files
+            subfolders = [p for p in self.all_paths if p.is_dir()]
+            images = [p for p in self.all_paths if p.is_file()]
+            # Sort both groups alphabetically
+            sorted_subfolders = sorted(subfolders, key=lambda p: p.name.lower())
+            sorted_images = sorted(images, key=lambda p: p.name.lower())
+            # Combine: folders first, then images
+            self.paths = sorted_subfolders + sorted_images
             self.view_paths = list(self.paths)
             self.view_generation += 1
         except Exception as exc:
@@ -1660,6 +1825,10 @@ class Workspace(QMainWindow):
         needle = self.search_edit.text().strip().casefold()
 
         def visible(path: Path) -> bool:
+            # Always keep directories - never filter out folders, no matter what
+            if path.is_dir():
+                return True
+            # All filters only apply to actual image files
             detail = self.photo_details.get(path.name, {})
             if rating is not None and detail.get("rating") != rating:
                 return False
@@ -2047,6 +2216,11 @@ class Workspace(QMainWindow):
         self.grid_full_request_timer.start(70)
 
     def open_full(self, path: Path) -> None:
+        # If this is a directory, navigate into it instead of opening it as an image
+        if path.is_dir():
+            self.load_directory(path)
+            return
+            
         now = monotonic()
         rapid_navigation = now - self.last_navigation_at < 0.14
         self.last_navigation_at = now
@@ -2197,12 +2371,14 @@ class Workspace(QMainWindow):
                 self.visible_thumb_pending.discard(key)
 
     def _photo_mode_paths(self) -> list[Path]:
-        """Collapse each adjacent CLIP series to its leading photograph."""
+        """Collapse each adjacent CLIP series to its leading photograph. Exclude folders from strip."""
+        # Filter out directories - only show actual image files in the viewer strip
+        image_only_paths = [p for p in self.view_paths if p.is_file()]
         if not self.series_toggle.isChecked():
-            return list(self.view_paths)
+            return list(image_only_paths)
         result: list[Path] = []
         previous: Path | None = None
-        for path in self.view_paths:
+        for path in image_only_paths:
             if previous is None or self._embedding_similarity(previous, path) < 0.92:
                 result.append(path)
             previous = path
@@ -3213,7 +3389,12 @@ def _macos_volume_is_removable(path: Path) -> bool:
 
 def _scan_directory(directory: Path) -> list[Path]:
     try:
-        return [entry for entry in directory.iterdir() if entry.is_file() and is_supported_image(entry)]
+        entries = []
+        # Collect both subdirectories and supported image files
+        for entry in directory.iterdir():
+            if entry.is_dir() or (entry.is_file() and is_supported_image(entry)):
+                entries.append(entry)
+        return entries
     except OSError:
         return []
 
