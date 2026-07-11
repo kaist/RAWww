@@ -1330,16 +1330,17 @@ class Workspace(QMainWindow):
         for parent in reversed(parents):
             self.dir_tree.expand(parent)
 
-    def _begin_directory_inline_rename(self, path: Path, attempts_left: int = 20) -> None:
-        """Дождаться появления узла в модели и только потом запускать inline-rename."""
-        index = self.dir_model.index(str(path))
+    def _begin_directory_inline_rename(self, path: Path, index=None, attempts_left: int = 20) -> None:
+        """Запустить inline-rename по индексу модели с несколькими повторами."""
+        if index is None or not index.isValid():
+            index = self.dir_model.index(str(path))
         if not index.isValid():
             if attempts_left <= 0:
                 self.dir_model._new_folder_path = None
                 return
             QTimer.singleShot(
                 50,
-                lambda target=path, attempts=attempts_left - 1: self._begin_directory_inline_rename(target, attempts),
+                lambda target=path, attempts=attempts_left - 1: self._begin_directory_inline_rename(target, None, attempts),
             )
             return
 
@@ -1347,7 +1348,15 @@ class Workspace(QMainWindow):
         self.dir_tree.setCurrentIndex(index)
         self.dir_tree.scrollTo(index, QTreeView.ScrollHint.EnsureVisible)
         self.dir_tree.setFocus(Qt.FocusReason.OtherFocusReason)
-        QTimer.singleShot(0, lambda idx=index: self.dir_tree.edit(idx))
+        if self.dir_tree.edit(index):
+            return
+        if attempts_left <= 0:
+            self.dir_model._new_folder_path = None
+            return
+        QTimer.singleShot(
+            50,
+            lambda target=path, idx=index, attempts=attempts_left - 1: self._begin_directory_inline_rename(target, idx, attempts),
+        )
 
     def _create_new_folder(self) -> None:
         """Создать новую папку в текущей директории с inline-редактированием."""
@@ -1367,9 +1376,15 @@ class Workspace(QMainWindow):
             # Устанавливаем путь к новой папке в модели ПЕРЕД ее созданием
             self.dir_model._new_folder_path = temp_path
 
-            # Сначала создаем папку, затем ждем, пока QFileSystemModel ее увидит.
-            temp_path.mkdir()
-            self._begin_directory_inline_rename(temp_path)
+            parent_index = self.dir_model.index(str(self.current_dir))
+            if not parent_index.isValid():
+                raise OSError("Текущая директория еще не готова в модели дерева.")
+
+            new_index = self.dir_model.mkdir(parent_index, temp_name)
+            if not new_index.isValid():
+                raise OSError("QFileSystemModel не смог создать папку.")
+
+            self._begin_directory_inline_rename(temp_path, new_index)
 
         except OSError as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось создать папку: {e}")
