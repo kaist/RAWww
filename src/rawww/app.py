@@ -1351,7 +1351,7 @@ class Workspace(QMainWindow):
         if not self.current_dir:
             return
 
-        parent_index = self.dir_model.index(str(self.current_dir))
+        parent_path = str(self.current_dir)
 
         # Создаем временное имя для папки
         i = 1
@@ -1366,16 +1366,30 @@ class Workspace(QMainWindow):
             # Устанавливаем путь к новой папке в модели ПЕРЕД ее созданием
             self.dir_model._new_folder_path = temp_path
 
+            def begin_inline_rename(index) -> None:
+                if not index.isValid():
+                    return
+                # The new folder may be inserted under a collapsed parent, so
+                # make it visible before starting the editor.
+                self.dir_tree.expand(index.parent())
+                self.dir_tree.setCurrentIndex(index)
+                self.dir_tree.scrollTo(index, QTreeView.ScrollHint.EnsureVisible)
+                self.dir_tree.setFocus(Qt.FocusReason.OtherFocusReason)
+                self.dir_tree.edit(index)
+
             # Слот для обработки добавления строк в модель
             def on_rows_inserted(parent, first, last):
                 # Проверяем, что папка добавлена в нужную родительскую директорию
-                if parent == parent_index:
-                    new_index = self.dir_model.index(first, 0, parent)
+                if self.dir_model.filePath(parent) != parent_path:
+                    return
+                for row in range(first, last + 1):
+                    new_index = self.dir_model.index(row, 0, parent)
                     # Убедимся, что это именно та папка, которую мы создали
                     if self.dir_model.filePath(new_index) == str(temp_path):
-                        self.dir_tree.edit(new_index)
+                        QTimer.singleShot(0, lambda idx=new_index: begin_inline_rename(idx))
                         # Отключаем сигнал после использования
                         self.dir_model.rowsInserted.disconnect(on_rows_inserted)
+                        break
 
             # Подключаем сигнал
             self.dir_model.rowsInserted.connect(on_rows_inserted)
