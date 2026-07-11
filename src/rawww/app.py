@@ -1346,13 +1346,40 @@ class Workspace(QMainWindow):
         """Перейти на уровень вверх от текущей директории"""
         if self.current_dir and self.current_dir.parent != self.current_dir:
             self.load_directory(self.current_dir.parent)
-    
+
+    def _expand_tree_path(self, index) -> None:
+        """Раскрыть все родительские узлы, чтобы индекс точно стал видимым."""
+        parents = []
+        current = index.parent()
+        while current.isValid():
+            parents.append(current)
+            current = current.parent()
+        for parent in reversed(parents):
+            self.dir_tree.expand(parent)
+
+    def _begin_directory_inline_rename(self, path: Path, attempts_left: int = 20) -> None:
+        """Дождаться появления узла в модели и только потом запускать inline-rename."""
+        index = self.dir_model.index(str(path))
+        if not index.isValid():
+            if attempts_left <= 0:
+                self.dir_model._new_folder_path = None
+                return
+            QTimer.singleShot(
+                50,
+                lambda target=path, attempts=attempts_left - 1: self._begin_directory_inline_rename(target, attempts),
+            )
+            return
+
+        self._expand_tree_path(index)
+        self.dir_tree.setCurrentIndex(index)
+        self.dir_tree.scrollTo(index, QTreeView.ScrollHint.EnsureVisible)
+        self.dir_tree.setFocus(Qt.FocusReason.OtherFocusReason)
+        QTimer.singleShot(0, lambda idx=index: self.dir_tree.edit(idx))
+
     def _create_new_folder(self) -> None:
         """Создать новую папку в текущей директории с inline-редактированием."""
         if not self.current_dir:
             return
-
-        parent_path = str(self.current_dir)
 
         # Создаем временное имя для папки
         i = 1
@@ -1367,43 +1394,13 @@ class Workspace(QMainWindow):
             # Устанавливаем путь к новой папке в модели ПЕРЕД ее созданием
             self.dir_model._new_folder_path = temp_path
 
-            def begin_inline_rename(index) -> None:
-                if not index.isValid():
-                    return
-                # The new folder may be inserted under a collapsed parent, so
-                # make it visible before starting the editor.
-                self.dir_tree.expand(index.parent())
-                self.dir_tree.setCurrentIndex(index)
-                self.dir_tree.scrollTo(index, QTreeView.ScrollHint.EnsureVisible)
-                self.dir_tree.setFocus(Qt.FocusReason.OtherFocusReason)
-                self.dir_tree.edit(index)
-
-            # Слот для обработки добавления строк в модель
-            def on_rows_inserted(parent, first, last):
-                # Проверяем, что папка добавлена в нужную родительскую директорию
-                if self.dir_model.filePath(parent) != parent_path:
-                    return
-                for row in range(first, last + 1):
-                    new_index = self.dir_model.index(row, 0, parent)
-                    # Убедимся, что это именно та папка, которую мы создали
-                    if self.dir_model.filePath(new_index) == str(temp_path):
-                        QTimer.singleShot(0, lambda idx=new_index: begin_inline_rename(idx))
-                        # Отключаем сигнал после использования
-                        self.dir_model.rowsInserted.disconnect(on_rows_inserted)
-                        break
-
-            # Подключаем сигнал
-            self.dir_model.rowsInserted.connect(on_rows_inserted)
-
-            # Создаем папку на диске, что вызовет обновление модели и сигнал rowsInserted
+            # Сначала создаем папку, затем ждем, пока QFileSystemModel ее увидит.
             temp_path.mkdir()
+            self._begin_directory_inline_rename(temp_path)
 
         except OSError as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось создать папку: {e}")
             self.dir_model._new_folder_path = None # Очищаем в случае ошибки
-            # Если сигнал был подключен, лучше его отключить
-            if 'on_rows_inserted' in locals() and self.dir_model.receivers(self.dir_model.rowsInserted) > 0:
-                    self.dir_model.rowsInserted.disconnect(on_rows_inserted)
 
     def _directory_editor_closed(self, _editor, _hint) -> None:
         """Сбрасывать состояние новой папки даже при отмене inline-rename."""
