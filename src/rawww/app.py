@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import math
 from collections import OrderedDict, deque
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
@@ -9,7 +10,7 @@ from time import monotonic
 from typing import Callable
 
 from PySide6.QtCore import QDir, QFileSystemWatcher, QPoint, QRect, QSettings, QSize, Qt, QTimer, Signal, QObject
-from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (
     QApplication,
@@ -17,12 +18,15 @@ from PySide6.QtWidgets import (
     QFileSystemModel,
     QFrame,
     QHBoxLayout,
+    QLineEdit,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
     QProgressBar,
     QPushButton,
+    QButtonGroup,
+    QToolButton,
     QStyledItemDelegate,
     QStyle,
     QSplitter,
@@ -46,6 +50,7 @@ RAM_CACHE_LIMIT = 96
 FULL_PRELOAD_RADIUS = 10
 FULL_RAM_CACHE_LIMIT = FULL_PRELOAD_RADIUS * 2 + 1
 PREVIEW_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+DETAIL_ROLE = PREVIEW_ROLE + 1
 CURRENT_DECODE_WORKERS = 2
 BACKGROUND_DECODE_WORKERS = 3
 VISIBLE_THUMB_DECODE_WORKERS = 1
@@ -81,7 +86,8 @@ class PhotoGrid(QListWidget):
         self.setViewMode(QListWidget.ViewMode.IconMode)
         self.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.setMovement(QListWidget.Movement.Static)
-        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.card_size = 1
+        self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.setUniformItemSizes(True)
         self.setWordWrap(False)
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
@@ -102,7 +108,9 @@ class PhotoGrid(QListWidget):
 
     def _update_card_size(self) -> None:
         available = max(CARD_MIN_WIDTH, self.viewport().width() - 28)
-        columns = max(1, round(available / CARD_TARGET_WIDTH))
+        targets = (150, CARD_TARGET_WIDTH, 280)
+        target_width = targets[self.card_size]
+        columns = max(1, round(available / target_width))
         width = (available - ((columns - 1) * self.spacing())) // columns
         width = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, width))
         height = int(width / CARD_ASPECT)
@@ -113,6 +121,11 @@ class PhotoGrid(QListWidget):
         self.setIconSize(icon_size)
         self.setGridSize(QSize(width + 22, height + 48))
 
+    def change_card_size(self, delta: int) -> None:
+        self.card_size = max(0, min(2, self.card_size + delta))
+        self._last_icon_size = QSize()
+        self._update_card_size()
+
 
 class PhotoCardDelegate(QStyledItemDelegate):
     def paint(self, painter: QPainter, option, index) -> None:
@@ -121,8 +134,11 @@ class PhotoCardDelegate(QStyledItemDelegate):
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
-        bg = QColor("#3f6db5") if selected else QColor("#303030" if hovered else "#292929")
+        bg = QColor("#505050") if selected else QColor("#303030" if hovered else "#292929")
         painter.fillRect(rect, bg)
+        if selected:
+            painter.setPen(QPen(QColor("#f0f0f0"), 2))
+            painter.drawRect(rect.adjusted(1, 1, -1, -1))
 
         image_rect = QRect(rect.left() + 8, rect.top() + 8, rect.width() - 16, int((rect.width() - 16) / CARD_ASPECT))
         painter.fillRect(image_rect, QColor("#1d1d1d"))
@@ -152,6 +168,17 @@ class PhotoCardDelegate(QStyledItemDelegate):
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
             option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideMiddle, text_rect.width()),
         )
+        detail = index.data(DETAIL_ROLE) or {}
+        rating = detail.get("rating")
+        color = detail.get("color_label", "")
+        if color:
+            colors = {"red": "#db5555", "yellow": "#d6b84b", "green": "#55a86b", "blue": "#5182cc", "purple": "#956bc4"}
+            painter.fillRect(QRect(image_rect.left(), image_rect.top(), 6, image_rect.height()), QColor(colors.get(color, "#888")))
+        if rating:
+            badge = QRect(image_rect.right() - 42, image_rect.top() + 5, 36, 20)
+            painter.fillRect(badge, QColor(20, 20, 20, 190))
+            painter.setPen(QColor("#f1c453"))
+            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, f"★ {rating}")
         painter.restore()
 
     def sizeHint(self, option, index) -> QSize:
@@ -309,6 +336,10 @@ class MainWindow(QMainWindow):
         self.items_by_path: dict[Path, QListWidgetItem] = {}
         self.all_paths: list[Path] = []
         self.paths: list[Path] = []
+        self.photo_details: dict[str, dict] = {}
+        self.quick_mark: tuple[str, object] = ("rating", 5)
+        self.auto_advance = False
+        self.face_reference: list[float] | None = None
         self.last_move_direction = 1
         self.settings = QSettings("RAWww", "RAWww")
         self.current_dir = self._initial_directory()
@@ -400,12 +431,13 @@ class MainWindow(QMainWindow):
         self.dir_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Drives)
         self.dir_model.setRootPath(QDir.rootPath())
 
-        self.drive_combo = QComboBox()
-        self.drive_combo.setMinimumHeight(30)
-        for root in QDir.drives():
-            drive_path = root.absolutePath()
-            self.drive_combo.addItem(drive_path, drive_path)
-        self.drive_combo.currentIndexChanged.connect(self._drive_selected)
+        # Replace dropdown with disk icons
+        self.drive_combo.deleteLater()  # remove QComboBox
+        self.drive_button = QPushButton()
+        self.drive_button.setIcon(QIcon(":/icons/disk.png"))
+        self.drive_button.setToolTip("Select disk")
+        self.drive_button.clicked.connect(self._drive_selected)
+        layout.addWidget(self.drive_button)
 
         self.dir_tree = QTreeView()
         self.dir_tree.setModel(self.dir_model)
@@ -419,6 +451,7 @@ class MainWindow(QMainWindow):
         self.grid = PhotoGrid()
         self.grid.openRequested.connect(self.open_full)
         self.grid.currentItemChanged.connect(self._grid_current_item_changed)
+        self.grid.itemSelectionChanged.connect(self._selection_changed)
         self.grid.verticalScrollBar().valueChanged.connect(self._schedule_visible_thumb_priority)
         self.grid.viewportChanged.connect(self._schedule_visible_thumb_priority)
 
@@ -438,8 +471,91 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.ai_progress)
         sidebar_layout.addWidget(self.dir_tree, 1)
 
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
+        toolbar = QWidget()
+        toolbar.setObjectName("viewerToolbar")
+        toolbar_layout = QHBoxLayout(toolbar)
+        toolbar_layout.setContentsMargins(10, 8, 10, 8)
+        toolbar_layout.setSpacing(7)
+        self.rating_filter = QComboBox()
+        self.rating_filter.addItem("Все рейтинги", None)
+        for rating in range(5, 0, -1):
+            self.rating_filter.addItem(f"{rating} ★", rating)
+        self.color_filter = QComboBox()
+        for label, value in (("Все цвета", None), ("Без цвета", ""), ("Красный", "red"), ("Жёлтый", "yellow"), ("Зелёный", "green"), ("Синий", "blue"), ("Фиолетовый", "purple")):
+            self.color_filter.addItem(label, value)
+        self.shot_filter = QComboBox()
+        for label, value in (("Все планы", None), ("Крупный", "closeup"), ("Средний", "medium"), ("Общий", "wide"), ("Без лиц", "no_face")):
+            self.shot_filter.addItem(label, value)
+        self.sort_combo = QComboBox()
+        for label, value in (("По имени ↑", "name"), ("По имени ↓", "name_desc"), ("По времени ↑", "time"), ("По времени ↓", "time_desc"), ("По рейтингу", "rating")):
+            self.sort_combo.addItem(label, value)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Поиск по имени или комментарию")
+        self.search_edit.setClearButtonEnabled(True)
+        for control in (self.rating_filter, self.color_filter, self.shot_filter, self.sort_combo):
+            control.currentIndexChanged.connect(self._apply_view)
+            toolbar_layout.addWidget(control)
+        self.search_edit.textChanged.connect(self._apply_view)
+        toolbar_layout.addWidget(self.search_edit, 1)
+        self.face_search_button = QPushButton("Найти лицо")
+        self.face_search_button.setToolTip("Найти фото с лицом из выбранной карточки")
+        self.face_search_button.clicked.connect(self._search_selected_face)
+        toolbar_layout.addWidget(self.face_search_button)
+        self.face_clear_button = QToolButton()
+        self.face_clear_button.setText("×")
+        self.face_clear_button.setToolTip("Сбросить поиск по лицу")
+        self.face_clear_button.setEnabled(False)
+        self.face_clear_button.clicked.connect(self._clear_face_search)
+        toolbar_layout.addWidget(self.face_clear_button)
+        for text, delta in (("−", -1), ("+", 1)):
+            button = QToolButton()
+            button.setText(text)
+            button.setToolTip("Размер превью")
+            button.clicked.connect(lambda _checked=False, d=delta: self.grid.change_card_size(d))
+            toolbar_layout.addWidget(button)
+
+        meta = QWidget()
+        meta.setObjectName("viewerMeta")
+        meta_layout = QHBoxLayout(meta)
+        meta_layout.setContentsMargins(10, 7, 10, 7)
+        meta_layout.setSpacing(6)
+        self.selection_label = QLabel("Не выбрано")
+        meta_layout.addWidget(self.selection_label)
+        self.quick_button = QPushButton("M  Быстрая: ★ 5")
+        self.quick_button.clicked.connect(self._apply_quick_mark)
+        meta_layout.addWidget(self.quick_button)
+        self.auto_button = QPushButton("Автопереход")
+        self.auto_button.setCheckable(True)
+        self.auto_button.toggled.connect(lambda value: setattr(self, "auto_advance", value))
+        meta_layout.addWidget(self.auto_button)
+        for color, title in (("", "×"), ("red", "●"), ("yellow", "●"), ("green", "●"), ("blue", "●"), ("purple", "●")):
+            button = QToolButton()
+            button.setText(title)
+            button.setProperty("colorLabel", color or "none")
+            button.setToolTip("Сбросить цвет" if not color else color)
+            button.clicked.connect(lambda _checked=False, value=color: self._set_selected_color(value))
+            meta_layout.addWidget(button)
+        for rating in range(0, 6):
+            button = QToolButton()
+            button.setText("☆" if rating == 0 else str(rating))
+            button.setToolTip("Сбросить рейтинг" if rating == 0 else f"Рейтинг {rating}")
+            button.clicked.connect(lambda _checked=False, value=rating: self._set_selected_rating(value or None))
+            meta_layout.addWidget(button)
+        self.comment_edit = QLineEdit()
+        self.comment_edit.setPlaceholderText("Комментарий")
+        self.comment_edit.editingFinished.connect(self._save_comment)
+        meta_layout.addWidget(self.comment_edit, 1)
+
+        content_layout.addWidget(toolbar)
+        content_layout.addWidget(self.grid, 1)
+        content_layout.addWidget(meta)
         splitter.addWidget(sidebar)
-        splitter.addWidget(self.grid)
+        splitter.addWidget(content)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([320, 1120])
@@ -471,6 +587,22 @@ class MainWindow(QMainWindow):
         fullscreen.setShortcut(QKeySequence(Qt.Key.Key_F11))
         fullscreen.triggered.connect(self.toggle_fullscreen)
         self.addAction(fullscreen)
+
+        quick = QAction("Quick mark", self)
+        quick.setShortcut(QKeySequence(Qt.Key.Key_M))
+        quick.triggered.connect(self._apply_quick_mark)
+        self.addAction(quick)
+
+        comment = QAction("Comment", self)
+        comment.setShortcut(QKeySequence(Qt.Key.Key_C))
+        comment.triggered.connect(lambda: (self.comment_edit.setFocus(), self.comment_edit.selectAll()))
+        self.addAction(comment)
+
+        for rating in range(0, 6):
+            action = QAction(f"Rating {rating}", self)
+            action.setShortcut(QKeySequence(str(rating)))
+            action.triggered.connect(lambda _checked=False, value=rating: self._set_selected_rating(value or None))
+            self.addAction(action)
 
     def _directory_selected(self, index) -> None:
         path = Path(self.dir_model.filePath(index))
@@ -574,6 +706,10 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, str(path))
             item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
             item.setToolTip(str(path))
+            item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
+            cached = self._cache_get((path, THUMB_SIZE))
+            if cached is not None:
+                item.setData(PREVIEW_ROLE, QPixmap.fromImage(cached.image))
             self.grid.addItem(item)
             self.items_by_path[path] = item
         self.populate_index = end
@@ -638,6 +774,7 @@ class MainWindow(QMainWindow):
         if self.ai_pipeline.pending_count() == 0:
             self.ai_progress_timer.stop()
             self.ai_pipeline.release_analysis_workers()
+            self._reload_photo_details()
             self.ai_button.setEnabled(remaining > 0)
             if remaining:
                 self.ai_progress.setFormat(f"Готово {completed}/{self.ai_progress_total}, ошибок: {remaining}")
@@ -662,6 +799,14 @@ class MainWindow(QMainWindow):
         self.ai_progress.setRange(0, 1)
         self.ai_progress.setValue(0 if waiting else 1)
         self.ai_progress.setFormat(f"Ожидают анализа: {waiting}" if waiting else "Все фото обработаны")
+
+    def _reload_photo_details(self) -> None:
+        if self.folder_cache is None or not self.cache_ready:
+            return
+        self.photo_details = self.folder_cache.load_photo_details()
+        for path, item in self.items_by_path.items():
+            item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
+        self.grid.viewport().update()
 
     def _prioritize_visible_thumbs(self) -> None:
         if self.folder_cache is None or not self.cache_ready or self.grid.count() == 0:
@@ -750,12 +895,164 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.bridge.failed.emit(str(self.current_dir), str(exc))
         self.cache_ready = True
+        if self.folder_cache is not None:
+            self.photo_details = self.folder_cache.load_photo_details()
+            for path, item in self.items_by_path.items():
+                item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
         self._refresh_ai_status()
         if self.folder_cache is not None:
             self.ai_pipeline.scan_exif(self.paths, self.folder_cache, self._background_decode_executor())
         self.thumb_index = 0
         self._schedule_visible_thumb_priority()
         self.thumb_timer.start()
+
+    def _apply_view(self, *_args) -> None:
+        if not hasattr(self, "rating_filter"):
+            return
+        rating = self.rating_filter.currentData()
+        color = self.color_filter.currentData()
+        shot = self.shot_filter.currentData()
+        needle = self.search_edit.text().strip().casefold()
+
+        def visible(path: Path) -> bool:
+            detail = self.photo_details.get(path.name, {})
+            if rating is not None and detail.get("rating") != rating:
+                return False
+            if self.color_filter.currentIndex() > 0 and detail.get("color_label", "") != color:
+                return False
+            faces = detail.get("faces") or []
+            if shot is not None and self._shot_size(detail) != shot:
+                return False
+            if self.face_reference is not None and not any(
+                self._face_similarity(self.face_reference, face.get("embedding", [])) >= 0.42
+                for face in faces if isinstance(face, dict)
+            ):
+                return False
+            return not needle or needle in path.name.casefold() or needle in str(detail.get("comment", "")).casefold()
+
+        order = self.sort_combo.currentData()
+        if order == "rating":
+            key = lambda path: (-(self.photo_details.get(path.name, {}).get("rating") or 0), path.name.casefold())
+            reverse = False
+        elif order and order.startswith("time"):
+            key = lambda path: path.stat().st_mtime_ns
+            reverse = order.endswith("desc")
+        else:
+            key = lambda path: path.name.casefold()
+            reverse = order == "name_desc"
+        self.paths = _build_photo_view(self.all_paths, predicate=visible, sort_key=key, reverse=reverse)
+        self.populate_timer.stop()
+        self.grid.clear()
+        self.items_by_path.clear()
+        self.populate_index = 0
+        self.thumb_index = 0
+        self.thumb_priority.clear()
+        self.thumb_priority_set.clear()
+        self.populate_timer.start()
+
+    def _selected_paths(self) -> list[Path]:
+        return [Path(item.data(Qt.ItemDataRole.UserRole)) for item in self.grid.selectedItems()]
+
+    def _selection_changed(self) -> None:
+        selected = self._selected_paths()
+        self.selection_label.setText(f"Выбрано: {len(selected)}" if selected else f"Фото: {len(self.paths)}")
+        if len(selected) == 1:
+            self.comment_edit.setText(str(self.photo_details.get(selected[0].name, {}).get("comment", "")))
+        elif not selected:
+            self.comment_edit.clear()
+
+    def _update_selection(self, **changes) -> None:
+        paths = self._selected_paths()
+        if not paths and self.current_path is not None and self.stack.currentWidget() is self.full_view:
+            paths = [self.current_path]
+        for path in paths:
+            detail = self.photo_details.setdefault(path.name, {})
+            detail.update(changes)
+            item = self.items_by_path.get(path)
+            if item is not None:
+                item.setData(DETAIL_ROLE, dict(detail))
+            if self.folder_cache is not None and self.cache_ready:
+                self.folder_cache.store_photo_selection(
+                    path.name,
+                    rating=detail.get("rating"),
+                    color_label=detail.get("color_label", ""),
+                    comment=detail.get("comment", ""),
+                )
+        self.grid.viewport().update()
+        if self.auto_advance and len(paths) == 1:
+            if self.stack.currentWidget() is self.full_view:
+                self._move(1)
+            else:
+                item = self.items_by_path.get(paths[0])
+                row = self.grid.row(item) if item is not None else -1
+                if 0 <= row + 1 < self.grid.count():
+                    self.grid.clearSelection()
+                    self.grid.setCurrentRow(row + 1)
+
+    def _set_selected_rating(self, rating: int | None) -> None:
+        self._update_selection(rating=rating)
+
+    def _set_selected_color(self, color: str) -> None:
+        self._update_selection(color_label=color)
+
+    def _save_comment(self) -> None:
+        self._update_selection(comment=self.comment_edit.text().strip())
+
+    def _apply_quick_mark(self) -> None:
+        kind, value = self.quick_mark
+        paths = self._selected_paths()
+        if not paths:
+            return
+        current = self.photo_details.get(paths[0].name, {}).get(kind)
+        self._update_selection(**{kind: None if current == value else value})
+
+    @staticmethod
+    def _face_similarity(left: list[float], right: list[float]) -> float:
+        if not left or len(left) != len(right):
+            return -1.0
+        dot = sum(a * b for a, b in zip(left, right))
+        norm = math.sqrt(sum(a * a for a in left) * sum(b * b for b in right))
+        return dot / norm if norm else -1.0
+
+    @staticmethod
+    def _shot_size(detail: dict) -> str:
+        faces = detail.get("faces") or []
+        if not faces:
+            return "no_face"
+        exif = detail.get("exif") or {}
+        width = next((exif.get(key) for key in ("EXIF:ExifImageWidth", "ExifImageWidth", "ImageWidth") if exif.get(key)), 0)
+        try:
+            width = float(width)
+            largest = max(float(face.get("bbox", [0, 0, 0, 0])[2]) - float(face.get("bbox", [0, 0, 0, 0])[0]) for face in faces)
+            ratio = largest / width if width else 0.0
+        except (TypeError, ValueError, IndexError):
+            ratio = 0.0
+        if ratio >= 0.32:
+            return "closeup"
+        if ratio >= 0.14:
+            return "medium"
+        return "wide"
+
+    def _search_selected_face(self) -> None:
+        paths = self._selected_paths()
+        if not paths:
+            return
+        faces = self.photo_details.get(paths[0].name, {}).get("faces") or []
+        if not faces:
+            self.selection_label.setText("На выбранном фото лица не найдены")
+            return
+        best = max(faces, key=lambda face: float(face.get("confidence", 0)))
+        embedding = best.get("embedding")
+        if not isinstance(embedding, list) or not embedding:
+            return
+        self.face_reference = embedding
+        self.face_clear_button.setEnabled(True)
+        self._apply_view()
+
+    def _clear_face_search(self) -> None:
+        self.face_reference = None
+        self.face_clear_button.setEnabled(False)
+        self._apply_view()
 
     def _submit_decode(
         self,

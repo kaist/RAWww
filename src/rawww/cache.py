@@ -44,6 +44,13 @@ CREATE TABLE IF NOT EXISTS photo_metadata (
     name TEXT PRIMARY KEY, file_size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
     metadata_json TEXT NOT NULL, processed_ns INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS photo_selection (
+    name TEXT PRIMARY KEY,
+    rating INTEGER,
+    color_label TEXT NOT NULL DEFAULT '',
+    comment TEXT NOT NULL DEFAULT '',
+    updated_ns INTEGER NOT NULL
+);
 """
 
 
@@ -179,6 +186,45 @@ class FolderCache:
     def store_photo_metadata(self, results: list[tuple[str, str]]) -> None:
         self._store_ai_results("photo_metadata", "metadata_json", results)
 
+    def load_photo_details(self) -> dict[str, dict]:
+        """Return cached EXIF/AI metadata and the user's local selection state."""
+        import json
+
+        details: dict[str, dict] = {}
+        with self._lock:
+            db = self._db_or_raise()
+            for name, payload in db.execute("SELECT name, metadata_json FROM photo_metadata"):
+                try:
+                    details[name] = json.loads(payload)
+                except (TypeError, ValueError):
+                    details[name] = {}
+            for name, payload in db.execute("SELECT name, faces_json FROM face_analysis"):
+                try:
+                    faces = json.loads(payload)
+                except (TypeError, ValueError):
+                    faces = []
+                details.setdefault(name, {})["faces"] = faces if isinstance(faces, list) else []
+            for name, rating, color, comment in db.execute(
+                "SELECT name, rating, color_label, comment FROM photo_selection"
+            ):
+                details.setdefault(name, {}).update(
+                    rating=rating, color_label=color or "", comment=comment or ""
+                )
+        return details
+
+    def store_photo_selection(
+        self, name: str, *, rating: int | None, color_label: str, comment: str
+    ) -> None:
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute(
+                """INSERT OR REPLACE INTO photo_selection
+                   (name, rating, color_label, comment, updated_ns)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (name, rating, color_label, comment, time.time_ns()),
+            )
+            db.commit()
+
     def _store_ai_results(self, table: str, value_column: str, results: list[tuple[str, object]]) -> None:
         with self._lock:
             db = self._db_or_raise()
@@ -235,6 +281,7 @@ class FolderCache:
             db.execute("DELETE FROM image_embeddings WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = image_embeddings.name)")
             db.execute("DELETE FROM face_analysis WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = face_analysis.name)")
             db.execute("DELETE FROM photo_metadata WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_metadata.name)")
+            db.execute("DELETE FROM photo_selection WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_selection.name)")
         finally:
             db.execute("DROP TABLE live_names")
 

@@ -17,6 +17,10 @@ uv run rawww
 ## Viewer
 
 - Grid mode: drive selector and directory tree on the left, adaptive 3:2 photo cards on the right.
+- ShotSync-style selection toolbar: filter by rating, color label, shot size, filename/comment, and change the sort order or card size.
+- Use Ctrl/Shift to select multiple cards, then assign a 0-5 rating, color label, comment, or the 5-star quick mark. Selection metadata is stored in the central folder cache and survives restarts.
+- Select a processed photo and press **Find face** to show photos containing a matching face; the × button clears face search. **No faces** is available in the shot-size filter.
+- Hotkeys: `1`-`5` assign a rating, `0` clears it, `M` toggles the quick mark, and `C` focuses the comment field.
 - Full view: double-click a photo or press `F`.
 - Back to grid: `Esc`, `Enter`, or `G`.
 - Toggle fullscreen: `F11`.
