@@ -4,6 +4,7 @@ import os
 import sys
 import math
 import ctypes
+from hashlib import sha1
 import plistlib
 import subprocess
 from collections import OrderedDict, deque
@@ -12,8 +13,10 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Callable
 
-from PySide6.QtCore import QDir, QFileInfo, QFileSystemWatcher, QPoint, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal, QObject, QStorageInfo
+from PySide6.QtCore import QDir, QEvent, QFileInfo, QFileSystemWatcher, QPoint, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal, QObject, QStorageInfo, QItemSelectionModel, QUrl
 from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygon
+from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
+from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -33,6 +36,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyle,
     QSplitter,
+    QSlider,
     QSizePolicy,
     QStackedWidget,
     QTabBar,
@@ -45,14 +49,15 @@ from PySide6.QtWidgets import (
 
 from .cache import FolderCache
 from .ai import AiPipeline
-from .imaging import DecodedImage, PixelImage, decode_pixels, decode_thumbnail_pixels, is_supported_image, pixel_to_decoded
+from .imaging import DecodedImage, PixelImage, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
 from .workspace import WorkspaceRequest, WorkspaceState
 
 
 THUMB_SIZE = 256
-CARD_MIN_WIDTH = 150
+CARD_HARD_MIN_WIDTH = 96
 CARD_TARGET_WIDTH = 200
 CARD_MAX_WIDTH = 280
+CARD_SIZE_TARGETS = (120, 150, CARD_TARGET_WIDTH, 280)
 CARD_ASPECT = 3 / 2
 RAM_CACHE_LIMIT = 96
 THUMBNAIL_RAM_CACHE_LIMIT_BYTES = 700 * 1024 * 1024
@@ -85,7 +90,7 @@ FOMANTIC_ICON_CODES = {
     "chevron-down": "\uf078", "chevron-up": "\uf077", "bookmark": "\uf02e",
     "step-forward": "\uf051", "keyboard": "\uf11c", "folder": "\uf07c",
     "filter": "\uf0b0", "lightbulb": "\uf0eb", "volume": "\uf028", "close": "\uf00d",
-    "expand": "\uf065", "zoom": "\uf00e", "zoom-out": "\uf010",
+    "expand": "\uf065", "zoom": "\uf00e", "zoom-out": "\uf010", "play": "\uf04b", "pause": "\uf04c", "film": "\uf008",
 }
 FOMANTIC_ICON_FAMILY = ""
 
@@ -95,6 +100,93 @@ class DecodeBridge(QObject):
     failed = Signal(str, str)
     cacheLoaded = Signal(int, object)
     directoryScanned = Signal(object, Path, object)
+
+
+class VideoThumbnailer(QObject):
+    """Decode one representative video frame at a time through Qt Multimedia."""
+
+    previewReady = Signal(Path, QImage)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._queue: deque[Path] = deque()
+        self._queued: set[Path] = set()
+        self._current: Path | None = None
+        self._active = True
+        self._player = QMediaPlayer(self)
+        self._sink = QVideoSink(self)
+        self._player.setVideoOutput(self._sink)
+        self._sink.videoFrameChanged.connect(self._frame_ready)
+        self._player.errorOccurred.connect(lambda *_args: self._finish_current())
+
+    def request(self, path: Path) -> None:
+        if not self._active:
+            return
+        if path == self._current or path in self._queued:
+            return
+        self._queue.append(path)
+        self._queued.add(path)
+        if self._current is None:
+            self._start_next()
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        if not active:
+            self._queue.clear()
+            self._queued.clear()
+            self._player.stop()
+            self._current = None
+
+    def _start_next(self) -> None:
+        if not self._active:
+            self._current = None
+            return
+        if not self._queue:
+            self._current = None
+            return
+        self._current = self._queue.popleft()
+        self._queued.discard(self._current)
+        self._player.setSource(QUrl.fromLocalFile(str(self._current)))
+        # Playing briefly is the portable way to make all Qt backends deliver
+        # a frame; the first frame is enough for a grid thumbnail.
+        self._player.play()
+
+    def _frame_ready(self, frame) -> None:
+        if self._current is None or not frame.isValid():
+            return
+        image = frame.toImage()
+        if image.isNull():
+            return
+        path = self._current
+        self._player.stop()
+        self._current = None
+        self.previewReady.emit(path, image)
+        QTimer.singleShot(0, self._start_next)
+
+    def _finish_current(self) -> None:
+        if self._current is None:
+            return
+        self._player.stop()
+        self._current = None
+        QTimer.singleShot(0, self._start_next)
+
+
+class FolderNameEditor(QLineEdit):
+    accepted = Signal()
+    cancelled = Signal()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.accepted.emit()
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            self.cancelled.emit()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        super().focusOutEvent(event)
+        self.accepted.emit()
 
 
 class PhotoGrid(QListWidget):
@@ -107,18 +199,31 @@ class PhotoGrid(QListWidget):
         super().__init__()
         self.setObjectName("photoGrid")
         self._last_icon_size = QSize()
+        self._last_grid_size = QSize()
+        self._last_spacing = -1
         self.setViewMode(QListWidget.ViewMode.IconMode)
         self.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.setMovement(QListWidget.Movement.Static)
+        # A stable scrollbar gutter prevents QListView from laying out against
+        # a width that changes depending on the resulting number of rows.
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.card_size = 1
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
-        self.setUniformItemSizes(True)
+        # Adjacent columns can differ by one pixel so their total always equals
+        # the viewport width.  A uniform grid cannot represent that remainder.
+        self.setUniformItemSizes(False)
         self.setWordWrap(False)
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        self.setSpacing(5)
+        self.setSpacing(0)
         self.setItemDelegate(PhotoCardDelegate(self))
         self.itemActivated.connect(self._emit_open)
+        self.verticalScrollBar().rangeChanged.connect(self._queue_card_size_update)
         self._update_card_size()
+
+    def _queue_card_size_update(self, _minimum: int, _maximum: int) -> None:
+        # The vertical scrollbar changes the viewport width after QListView has
+        # laid out its contents.  Recalculate once that geometry has settled.
+        QTimer.singleShot(0, self._update_card_size)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -146,22 +251,50 @@ class PhotoGrid(QListWidget):
         super().mouseReleaseEvent(event)
 
     def _update_card_size(self) -> None:
-        available = max(CARD_MIN_WIDTH, self.viewport().width() - 28)
-        targets = (150, CARD_TARGET_WIDTH, 280)
-        target_width = targets[self.card_size]
-        columns = max(1, round(available / target_width))
-        width = (available - ((columns - 1) * self.spacing())) // columns
-        width = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, width))
-        height = int(width / CARD_ASPECT)
-        icon_size = QSize(width, height)
-        if icon_size == self._last_icon_size:
+        available = max(CARD_HARD_MIN_WIDTH, self.viewport().width())
+        target_width = CARD_SIZE_TARGETS[self.card_size]
+        min_columns = max(1, math.ceil(available / CARD_MAX_WIDTH))
+        max_columns = max(1, available // CARD_HARD_MIN_WIDTH)
+        columns = max(min_columns, min(max_columns, round(available / target_width)))
+        # QListView's icon layout reserves its rightmost viewport coordinate
+        # when deciding whether to wrap.  Keep two layout pixels free; the
+        # delegate extends the last column over them when painting.
+        layout_width = max(1, available - 2)
+        width, remainder = divmod(layout_width, columns)
+        height = int((available / columns) / CARD_ASPECT)
+        icon_size = QSize(width + bool(remainder), height)
+        # An invalid grid size tells QListView to use the per-item size hints.
+        grid_size = QSize()
+        spacing = 0
+        self._column_count = columns
+        self._column_width = width
+        self._wide_column_count = remainder
+        self._card_height = height + 32
+        if (
+            icon_size == self._last_icon_size
+            and grid_size == self._last_grid_size
+            and spacing == self._last_spacing
+        ):
             return
         self._last_icon_size = icon_size
+        self._last_grid_size = grid_size
+        self._last_spacing = spacing
+        self.setSpacing(spacing)
+        self.setViewportMargins(0, 0, 0, 0)
         self.setIconSize(icon_size)
-        self.setGridSize(QSize(width + 10, height + 42))
+        self.setGridSize(grid_size)
+        self.scheduleDelayedItemsLayout()
+
+    def card_size_hint(self, row: int) -> QSize:
+        column = row % self._column_count
+        width = self._column_width + (1 if column < self._wide_column_count else 0)
+        return QSize(width, self._card_height)
+
+    def is_last_grid_column(self, row: int) -> bool:
+        return row % self._column_count == self._column_count - 1
 
     def change_card_size(self, delta: int) -> None:
-        new_size = max(0, min(2, self.card_size + delta))
+        new_size = max(0, min(3, self.card_size + delta))
         if new_size == self.card_size:
             return
         self.card_size = new_size
@@ -179,27 +312,30 @@ class PhotoCardDelegate(QStyledItemDelegate):
 
     def paint(self, painter: QPainter, option, index) -> None:
         painter.save()
-        inset = 3 if self.compact else 5
-        rect = option.rect.adjusted(inset, inset, -inset, -inset)
+        inset = 2 if self.compact else 2
+        item_rect = option.rect
+        if isinstance(option.widget, PhotoGrid) and option.widget.is_last_grid_column(index.row()):
+            item_rect = item_rect.adjusted(0, 0, 2, 0)
+        rect = item_rect.adjusted(inset, inset, -inset, -inset)
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         detail = index.data(DETAIL_ROLE) or {}
         label = str(detail.get("color_label") or "")
-        colors = {"red": "#9a5d5d", "yellow": "#a8924f", "green": "#4f8b5a", "blue": "#5b82ba", "purple": "#8e63a8"}
+        colors = {"red": "#a25555", "yellow": "#af9440", "green": "#4d9660", "blue": "#537fc2", "purple": "#9760b2"}
         tints = {
-            "red": QColor(140, 78, 78, 46), "yellow": QColor(148, 131, 71, 46),
-            "green": QColor(73, 130, 84, 42), "blue": QColor(77, 112, 160, 48),
-            "purple": QColor(125, 88, 148, 44),
+            "red": QColor(170, 88, 88, 86), "yellow": QColor(181, 151, 63, 84),
+            "green": QColor(75, 154, 97, 82), "blue": QColor(83, 127, 194, 88),
+            "purple": QColor(151, 96, 178, 84),
         }
 
         bg = QColor("#c4c4c4") if selected else QColor("#b3b3b3" if hovered else "#a7a7a7")
         painter.fillRect(rect, bg)
         if label in tints:
             painter.fillRect(rect, tints[label])
-        painter.setPen(QPen(QColor(colors.get(label, "#454545")), 2 if not self.compact else 1))
+        painter.setPen(QPen(QColor(colors.get(label, "#767676")), 1))
         painter.drawRect(rect.adjusted(1, 1, -1, -1))
         if selected:
-            painter.setPen(QPen(QColor("#f1f1f1"), 3))
+            painter.setPen(QPen(QColor("#ececec"), 2))
             painter.drawRect(rect.adjusted(2, 2, -2, -2))
 
         top, side, bottom = (14, 4, 15) if self.compact else (20, 4, 16)
@@ -208,20 +344,28 @@ class PhotoCardDelegate(QStyledItemDelegate):
         path = index.data(Qt.ItemDataRole.UserRole)
         path_obj = Path(path) if path else None
         if path_obj and path_obj.is_dir():
+             text_height = 20 if self.compact else 24
+             text_rect = QRect(rect.left() + 8, rect.bottom() - text_height - 1, rect.width() - 16, text_height)
+             folder_rect = QRect(
+                 image_rect.left(),
+                 image_rect.top(),
+                 image_rect.width(),
+                 max(24, text_rect.top() - image_rect.top() - 2),
+             )
              # Use system folder icon from Qt file icon provider
              icon_provider = QFileIconProvider()
              folder_icon = icon_provider.icon(QFileInfo(str(path_obj)))
              if not folder_icon.isNull():
                  # Clear any background first (remove old gray background)
-                 painter.fillRect(image_rect, Qt.GlobalColor.transparent)
-                 # Scale icon to fill the entire image area like we do for photos
-                 scaled = folder_icon.pixmap(image_rect.size()).size().scaled(
-                     image_rect.size(), 
+                 painter.fillRect(folder_rect, Qt.GlobalColor.transparent)
+                 # Keep the folder icon above the caption instead of using the full card height.
+                 scaled = folder_icon.pixmap(folder_rect.size()).size().scaled(
+                     folder_rect.size(),
                      Qt.AspectRatioMode.KeepAspectRatio
                  )
                  target = QRect(
-                     image_rect.left() + (image_rect.width() - scaled.width()) // 2,
-                     image_rect.top() + (image_rect.height() - scaled.height()) // 2,
+                     folder_rect.left() + (folder_rect.width() - scaled.width()) // 2,
+                     folder_rect.top() + (folder_rect.height() - scaled.height()) // 2,
                      scaled.width(),
                      scaled.height(),
                  )
@@ -241,12 +385,19 @@ class PhotoCardDelegate(QStyledItemDelegate):
                 )
                 painter.drawImage(target, preview)
 
-        # For folders: full width text, no ratings/badges
+            if path_obj and is_supported_video(path_obj):
+                video_badge = QRect(image_rect.left() + 5, image_rect.bottom() - 20, 22, 16)
+                painter.fillRect(video_badge, QColor(20, 20, 20, 190))
+                painter.setPen(QColor("#f1f1f1"))
+                icon_font = QFont(FOMANTIC_ICON_FAMILY or option.font.family())
+                icon_font.setPixelSize(10)
+                painter.setFont(icon_font)
+                painter.drawText(video_badge, Qt.AlignmentFlag.AlignCenter, FOMANTIC_ICON_CODES["film"] if FOMANTIC_ICON_FAMILY else "▶")
+
+        # For folders: full width text, no ratings/badges.
+        caption_rect = QRect(rect.left() + 5, rect.bottom() - bottom + 2, rect.width() - 10, bottom - 2)
         if path_obj and path_obj.is_dir():
-            text_rect = QRect(rect.left() + 5, rect.bottom() - bottom + 2, rect.width() - 10, bottom - 2)
-        else:
-            # For photos: normal layout with space for rating
-            text_rect = QRect(rect.left() + 5, rect.bottom() - bottom + 2, rect.width() * (3 if self.compact else 2) // 5, bottom - 2)
+            text_rect = QRect(rect.left() + 8, rect.bottom() - (20 if self.compact else 24) - 1, rect.width() - 16, 20 if self.compact else 24)
         # For folders always use just the folder name, never full path
         if path_obj and path_obj.is_dir():
             text = path_obj.name
@@ -258,18 +409,36 @@ class PhotoCardDelegate(QStyledItemDelegate):
         font.setPointSizeF(6.5 if self.compact else 7.5)
         font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(font)
+        rating = int(detail.get("rating") or 0) if not (path_obj and path_obj.is_dir()) else 0
+        rating_text = "★" * rating
+        if not (path_obj and path_obj.is_dir()):
+            # Always reserve five stars, regardless of the current rating.
+            # This keeps the filename clear of the rating area and guarantees
+            # that a later five-star mark cannot be clipped.
+            rating_width = min(painter.fontMetrics().horizontalAdvance("★" * 5) + 5, caption_rect.width())
+            text_rect = QRect(caption_rect)
+            text_rect.setWidth(max(0, caption_rect.width() - rating_width - 3))
+            rating_rect = QRect(caption_rect.right() - rating_width + 1, caption_rect.top(), rating_width, caption_rect.height())
+        else:
+            text_rect = QRect(caption_rect)
+        display_text = text
+        font_metrics = painter.fontMetrics()
+        if path_obj and path_obj.is_file() and font_metrics.horizontalAdvance(text) > text_rect.width():
+            # The extension is secondary information. When a narrow card
+            # cannot fit both, spend all available width on the filename.
+            display_text = path_obj.stem
         painter.drawText(
             text_rect,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            option.fontMetrics.elidedText(text, Qt.TextElideMode.ElideMiddle, text_rect.width()),
+            (Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
+            if path_obj and path_obj.is_dir()
+            else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            font_metrics.elidedText(display_text, Qt.TextElideMode.ElideMiddle, text_rect.width()),
         )
         # Only render ratings and series badges for photos, not folders
         if not (path_obj and path_obj.is_dir()):
-            rating = detail.get("rating")
-            if rating:
-                badge = QRect(rect.right() - (43 if self.compact else 50), rect.bottom() - bottom + 2, 39 if self.compact else 45, bottom - 2)
+            if rating_text:
                 painter.setPen(QColor("#3a3123"))
-                painter.drawText(badge, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, "★" * int(rating))
+                painter.drawText(rating_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, rating_text)
             series = index.data(SERIES_ROLE) or {}
             count = int(series.get("count", 0) or 0)
             if count > 1:
@@ -284,15 +453,19 @@ class PhotoCardDelegate(QStyledItemDelegate):
                 font.setPixelSize(9)
                 painter.setFont(font)
                 marker = "−" if series.get("expanded") else "+"
-                painter.drawText(QRect(badge_rect.left() + 16, badge_rect.top(), 26, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, f"{count} {marker}")
+                badge_text = str(count) if self.compact else f"{count} {marker}"
+                painter.drawText(QRect(badge_rect.left() + 16, badge_rect.top(), 26, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, badge_text)
         painter.restore()
 
     def sizeHint(self, option, index) -> QSize:
+        if isinstance(option.widget, PhotoGrid):
+            return option.widget.card_size_hint(index.row())
         return option.widget.gridSize() if isinstance(option.widget, QListWidget) else super().sizeHint(option, index)
 
 
 class ViewerStrip(QListWidget):
     pathActivated = Signal(Path)
+    viewportChanged = Signal()
 
     def __init__(self, *, vertical: bool = False) -> None:
         super().__init__()
@@ -314,21 +487,38 @@ class ViewerStrip(QListWidget):
             self.setGridSize(QSize(82, 76))
             self.setIconSize(QSize(76, 70))
             self.setFixedWidth(90)
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         else:
             self.setFlow(QListWidget.Flow.LeftToRight)
             self.setWrapping(False)
             self.setGridSize(QSize(118, 104))
             self.setIconSize(QSize(112, 98))
             self.setFixedHeight(108)
+            # A horizontal filmstrip must never reserve space for a vertical
+            # scrollbar: its one row is deliberately clipped horizontally.
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.setHorizontalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.itemClicked.connect(self._activate)
+        scroll_bar = self.verticalScrollBar() if vertical else self.horizontalScrollBar()
+        scroll_bar.valueChanged.connect(self.viewportChanged)
 
     def _activate(self, item: QListWidgetItem) -> None:
         value = item.data(Qt.ItemDataRole.UserRole)
         if value:
+            self.setCurrentItem(item)
             self.pathActivated.emit(Path(value))
 
-    def set_paths(self, paths: list[Path], current: Path | None, details: dict[str, dict], previews: dict[Path, QImage]) -> None:
+    def set_paths(
+        self,
+        paths: list[Path],
+        current: Path | None,
+        details: dict[str, dict],
+        previews: dict[Path, QImage],
+        series_cards: dict[Path, dict] | None = None,
+    ) -> None:
+        series_cards = series_cards or {}
         if paths != self._paths:
             self.clear()
             self._items_by_path.clear()
@@ -337,6 +527,7 @@ class ViewerStrip(QListWidget):
                 item = QListWidgetItem(path.name)
                 item.setData(Qt.ItemDataRole.UserRole, str(path))
                 item.setData(DETAIL_ROLE, details.get(path.name, {}))
+                item.setData(SERIES_ROLE, series_cards.get(path, {}))
                 preview = previews.get(path)
                 if preview is not None:
                     item.setData(PREVIEW_ROLE, preview)
@@ -347,6 +538,10 @@ class ViewerStrip(QListWidget):
                 item = self._items_by_path.get(path)
                 if item is not None:
                     item.setData(PREVIEW_ROLE, preview)
+            for path, series in series_cards.items():
+                item = self._items_by_path.get(path)
+                if item is not None:
+                    item.setData(SERIES_ROLE, series)
         self.set_current(current)
 
     def set_current(self, current: Path | None) -> None:
@@ -377,6 +572,41 @@ class ViewerStrip(QListWidget):
             item.setData(PREVIEW_ROLE, preview)
             self.update(self.visualItemRect(item))
 
+    def visible_paths(self) -> list[Path]:
+        """Return items intersecting the viewport, in display order."""
+        viewport_rect = self.viewport().rect()
+        return [
+            path
+            for path in self._paths
+            if (item := self._items_by_path.get(path)) is not None
+            and self.visualItemRect(item).intersects(viewport_rect)
+        ]
+
+    def item_for_path(self, path: Path) -> QListWidgetItem | None:
+        return self._items_by_path.get(path)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self.viewportChanged.emit()
+
+
+class VideoSeekSlider(QSlider):
+    """A seek slider that jumps to the point clicked on its track."""
+
+    seekRequested = Signal(int)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self.width() > 0:
+            ratio = min(1.0, max(0.0, event.position().x() / self.width()))
+            position = self.minimum() + round(ratio * (self.maximum() - self.minimum()))
+            current_ratio = (self.value() - self.minimum()) / max(1, self.maximum() - self.minimum())
+            if abs(event.position().x() - current_ratio * self.width()) > 8:
+                self.setValue(position)
+                self.seekRequested.emit(position)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
 
 class FullView(QFrame):
     exitRequested = Signal()
@@ -388,6 +618,8 @@ class FullView(QFrame):
     faceRequested = Signal(object)
     quickMarkRequested = Signal()
     commentSubmitted = Signal(str)
+    stripViewportChanged = Signal()
+    videoPlaybackChanged = Signal(bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -403,6 +635,25 @@ class FullView(QFrame):
         self.image_view = FullImageView()
         self.image_view.setObjectName("fullImageView")
         self.image_view.faceRequested.connect(self.faceRequested)
+        self.video_widget = QVideoWidget()
+        self.video_widget.setObjectName("fullVideoView")
+        self.media_stack = QStackedWidget()
+        self.media_stack.addWidget(self.image_view)
+        self.media_stack.addWidget(self.video_widget)
+        self.video_player = QMediaPlayer(self)
+        self.video_player.setVideoOutput(self.video_widget)
+        self.video_player.positionChanged.connect(self._video_position_changed)
+        self.video_player.durationChanged.connect(self._video_duration_changed)
+        self.video_player.playbackStateChanged.connect(self._video_state_changed)
+        self._is_video = False
+        self.video_controls = QFrame()
+        self.video_controls.setObjectName("videoControls")
+        self.video_controls.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.video_controls.setMaximumWidth(420)
+        self.video_controls_layout = QHBoxLayout(self.video_controls)
+        self.video_controls_layout.setContentsMargins(8, 5, 8, 5)
+        self.video_controls_layout.setSpacing(7)
+        self.video_controls.hide()
 
         self.info_label = QLabel()
         self.info_label.setObjectName("overlayLabel")
@@ -410,20 +661,25 @@ class FullView(QFrame):
 
         self.photo_strip = ViewerStrip()
         self.photo_strip.pathActivated.connect(self.pathRequested)
+        self.photo_strip.viewportChanged.connect(self.stripViewportChanged)
         self.series_strip = ViewerStrip(vertical=True)
         self.series_strip.pathActivated.connect(self.pathRequested)
+        self.series_strip.viewportChanged.connect(self.stripViewportChanged)
+        self._series_paths: list[Path] = []
 
         self.series_panel = QFrame()
         self.series_panel.setObjectName("seriesPanel")
         series_layout = QVBoxLayout(self.series_panel)
-        series_layout.setContentsMargins(5, 5, 5, 5)
+        series_layout.setContentsMargins(0, 5, 0, 5)
         series_layout.setSpacing(4)
         self.series_up = QToolButton()
         self.series_up.setObjectName("seriesNav")
+        self.series_up.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.series_up.setIcon(_fomantic_icon("chevron-up", 13))
         self.series_up.clicked.connect(lambda: self._move_series(-1))
         self.series_down = QToolButton()
         self.series_down.setObjectName("seriesNav")
+        self.series_down.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.series_down.setIcon(_fomantic_icon("chevron-down", 13))
         self.series_down.clicked.connect(lambda: self._move_series(1))
         series_layout.addWidget(self.series_up)
@@ -434,10 +690,16 @@ class FullView(QFrame):
         stage = QWidget()
         stage.setObjectName("photoStage")
         stage_layout = QHBoxLayout(stage)
-        stage_layout.setContentsMargins(12, 12, 12, 12)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
         stage_layout.setSpacing(12)
         stage_layout.addWidget(self.series_panel)
-        stage_layout.addWidget(self.image_view, 1)
+        media_panel = QWidget()
+        media_layout = QVBoxLayout(media_panel)
+        media_layout.setContentsMargins(0, 0, 0, 0)
+        media_layout.setSpacing(0)
+        media_layout.addWidget(self.media_stack, 1)
+        media_layout.addWidget(self.video_controls, 0, Qt.AlignmentFlag.AlignHCenter)
+        stage_layout.addWidget(media_panel, 1)
 
         strip_header = QWidget()
         strip_header.setObjectName("stripHeader")
@@ -456,6 +718,24 @@ class FullView(QFrame):
         self.quick_mark_button.setToolTip("Быстрая метка (M)")
         self.quick_mark_button.clicked.connect(self.quickMarkRequested)
         strip_header_layout.addWidget(self.quick_mark_button)
+        self.video_play_button = QToolButton()
+        self.video_play_button.setObjectName("videoPlay")
+        self.video_play_button.setIcon(_fomantic_icon("play", 12))
+        self.video_play_button.setText("Пуск")
+        self.video_play_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.video_play_button.setToolTip("Воспроизвести / пауза (Пробел)")
+        self.video_play_button.clicked.connect(self._toggle_video_playback)
+        self.video_seek = VideoSeekSlider(Qt.Orientation.Horizontal)
+        self.video_seek.setObjectName("videoSeek")
+        self.video_seek.setRange(0, 0)
+        self.video_seek.setMinimumWidth(150)
+        self.video_seek.sliderMoved.connect(self.video_player.setPosition)
+        self.video_seek.seekRequested.connect(self.video_player.setPosition)
+        self.video_time_label = QLabel("0:00 / 0:00")
+        self.video_time_label.setObjectName("videoTime")
+        self.video_controls_layout.addWidget(self.video_play_button)
+        self.video_controls_layout.addWidget(self.video_seek, 1)
+        self.video_controls_layout.addWidget(self.video_time_label)
         self.color_buttons: dict[str, QToolButton] = {}
         for color in ("", "red", "yellow", "green", "blue", "purple"):
             button = QToolButton()
@@ -507,19 +787,37 @@ class FullView(QFrame):
         self.strip_toggle.setToolTip("Развернуть ленту превью" if visible else "Свернуть ленту превью")
         QSettings("RAWww", "RAWww").setValue("viewer_strip_collapsed", visible)
 
-    def set_navigation(self, paths: list[Path], current: Path | None, details: dict[str, dict], previews: dict[Path, QImage], series: list[Path], generation: int) -> None:
+    def set_navigation(
+        self,
+        paths: list[Path],
+        current: Path | None,
+        details: dict[str, dict],
+        previews: dict[Path, QImage],
+        series: list[Path],
+        generation: int,
+        *,
+        series_current: Path | None = None,
+        strip_series_cards: dict[Path, dict] | None = None,
+    ) -> None:
+        # The bottom strip represents collapsed series and therefore selects
+        # its leader. The vertical strip represents every member and must keep
+        # the actual opened frame selected.
+        series_current = current if series_current is None else series_current
         if generation != self._photo_generation:
-            self.photo_strip.set_paths(paths, current, details, previews)
+            self.photo_strip.set_paths(paths, current, details, previews, strip_series_cards)
             self._photo_generation = generation
         else:
             self.photo_strip.set_current(current)
             for path, preview in previews.items():
                 self.photo_strip.update_preview(path, preview)
-        self.series_strip.set_paths(series, current, details, previews)
+            for path, series_card in (strip_series_cards or {}).items():
+                item = self.photo_strip.item_for_path(path)
+                if item is not None:
+                    item.setData(SERIES_ROLE, series_card)
+        self.series_strip.set_paths(series, series_current, details, previews)
+        self._series_paths = list(series)
         self.series_panel.setVisible(len(series) > 1)
-        current_row = self.series_strip.currentRow()
-        self.series_up.setEnabled(current_row > 0)
-        self.series_down.setEnabled(0 <= current_row < self.series_strip.count() - 1)
+        self._update_series_navigation(series_current)
 
     def update_preview(self, path: Path, preview: QImage) -> None:
         self.photo_strip.update_preview(path, preview)
@@ -550,13 +848,36 @@ class FullView(QFrame):
             self.series_strip.update_details(path, detail)
 
     def _move_series(self, delta: int) -> None:
-        row = self.series_strip.currentRow() + delta
-        if 0 <= row < self.series_strip.count():
-            item = self.series_strip.item(row)
-            self.series_strip.setCurrentItem(item)
-            self.pathRequested.emit(Path(item.data(Qt.ItemDataRole.UserRole)))
+        if not self._series_paths:
+            return
+        current = self.series_strip.currentItem()
+        current_path = Path(current.data(Qt.ItemDataRole.UserRole)) if current is not None else None
+        try:
+            row = self._series_paths.index(current_path) + delta
+        except ValueError:
+            row = 0 if delta > 0 else len(self._series_paths) - 1
+        if 0 <= row < len(self._series_paths):
+            path = self._series_paths[row]
+            item = self.series_strip.item_for_path(path)
+            if item is not None:
+                self.series_strip.setCurrentItem(item)
+                self.series_strip.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
+                self._update_series_navigation(path)
+                self.pathRequested.emit(path)
+
+    def _update_series_navigation(self, current: Path | None) -> None:
+        try:
+            row = self._series_paths.index(current) if current is not None else -1
+        except ValueError:
+            row = -1
+        self.series_up.setEnabled(row > 0)
+        self.series_down.setEnabled(0 <= row < len(self._series_paths) - 1)
 
     def set_image(self, decoded: DecodedImage, *, fallback: bool = False) -> None:
+        self.video_player.stop()
+        self._is_video = False
+        self.video_controls.hide()
+        self.media_stack.setCurrentWidget(self.image_view)
         self._path = decoded.path
         self._is_fallback = fallback
         self._pixmap = QPixmap.fromImage(decoded.image)
@@ -564,6 +885,61 @@ class FullView(QFrame):
         self.info_label.setText(f"{decoded.path.name}  ·  {decoded.width} × {decoded.height}{suffix}")
         self.image_view.set_pixmap(self._pixmap, smooth=False)
         self._schedule_smooth_fit()
+
+    def set_video(self, path: Path, preview: QImage | None = None) -> None:
+        self._path = path
+        self._is_video = True
+        self._is_fallback = True
+        self.video_player.stop()
+        self.video_player.setSource(QUrl.fromLocalFile(str(path)))
+        self.video_seek.setRange(0, 0)
+        self.video_time_label.setText("0:00 / 0:00")
+        self.video_play_button.setIcon(_fomantic_icon("play", 12))
+        self.video_play_button.setText("Пуск")
+        self.video_controls.show()
+        self.media_stack.setCurrentWidget(self.image_view)
+        if preview is not None and not preview.isNull():
+            self._pixmap = QPixmap.fromImage(preview)
+            self.image_view.set_pixmap(self._pixmap, smooth=False)
+        self.info_label.setText(path.name)
+
+    def set_video_preview(self, path: Path, preview: QImage) -> None:
+        if self._is_video and self._path == path and self.media_stack.currentWidget() is self.image_view:
+            self._pixmap = QPixmap.fromImage(preview)
+            self.image_view.set_pixmap(self._pixmap, smooth=False)
+
+    def _toggle_video_playback(self) -> None:
+        if not self._is_video:
+            return
+        if self.video_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.video_player.pause()
+        else:
+            self.media_stack.setCurrentWidget(self.video_widget)
+            self.video_player.play()
+
+    def _video_position_changed(self, position: int) -> None:
+        if not self.video_seek.isSliderDown():
+            self.video_seek.setValue(position)
+        self._update_video_time(position, self.video_player.duration())
+
+    def _video_duration_changed(self, duration: int) -> None:
+        self.video_seek.setRange(0, max(0, duration))
+        self._update_video_time(self.video_player.position(), duration)
+
+    def _update_video_time(self, position: int, duration: int) -> None:
+        def format_time(milliseconds: int) -> str:
+            seconds = max(0, milliseconds // 1000)
+            minutes, seconds = divmod(seconds, 60)
+            hours, minutes = divmod(minutes, 60)
+            return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
+
+        self.video_time_label.setText(f"{format_time(position)} / {format_time(duration)}")
+
+    def _video_state_changed(self, state) -> None:
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.video_play_button.setIcon(_fomantic_icon("pause" if playing else "play", 12))
+        self.video_play_button.setText("Пауза" if playing else "Пуск")
+        self.videoPlaybackChanged.emit(playing)
 
     @property
     def is_fallback(self) -> bool:
@@ -585,6 +961,8 @@ class FullView(QFrame):
             self._move_series(1)
         elif key == Qt.Key.Key_Up and self.series_panel.isVisible():
             self._move_series(-1)
+        elif key == Qt.Key.Key_Space and self._is_video:
+            self._toggle_video_playback()
         elif key in {Qt.Key.Key_Right, Qt.Key.Key_Space}:
             self.nextRequested.emit()
         elif key in {Qt.Key.Key_Left, Qt.Key.Key_Backspace}:
@@ -836,6 +1214,8 @@ class Workspace(QMainWindow):
         self.bridge.failed.connect(self._on_decode_failed)
         self.bridge.cacheLoaded.connect(self._on_cache_loaded)
         self.bridge.directoryScanned.connect(self._on_directory_scanned)
+        self.video_thumbnailer = VideoThumbnailer(self)
+        self.video_thumbnailer.previewReady.connect(self._on_video_preview)
         self.pending: dict[tuple[Path, int], Future] = {}
         self.foreground_full_futures: dict[tuple[Path, int], Future] = {}
         self.last_navigation_at = 0.0
@@ -872,7 +1252,7 @@ class Workspace(QMainWindow):
         self.last_move_direction = 1
         self.settings = QSettings("RAWww", "RAWww")
         self.current_dir = initial_directory or self._initial_directory()
-        thumbnail_size = max(0, min(2, self.settings.value("thumbnail_size", 1, int)))
+        thumbnail_size = max(0, min(3, self.settings.value("thumbnail_size", 1, int)))
         self.workspace_state = WorkspaceState(self.current_dir, thumbnail_size=thumbnail_size)
         self.folder_watcher = QFileSystemWatcher(self)
         self.folder_watcher.directoryChanged.connect(self._folder_changed)
@@ -880,6 +1260,9 @@ class Workspace(QMainWindow):
         self.folder_change_timer.setSingleShot(True)
         self.folder_change_timer.timeout.connect(self._reload_changed_folder)
         self.current_path: Path | None = None
+        self.workspace_active = False
+        self._folder_context_active = False
+        self._pending_folder_grid_context: tuple[list[str], int] | None = None
         self.folder_cache: FolderCache | None = None
         self.ai_pipeline = AiPipeline()
         self.ai_progress_total = 0
@@ -895,6 +1278,8 @@ class Workspace(QMainWindow):
         self.full_view.nextRequested.connect(self.next_image)
         self.full_view.previousRequested.connect(self.previous_image)
         self.full_view.pathRequested.connect(self.open_full)
+        self.full_view.videoPlaybackChanged.connect(self._video_playback_changed)
+        self.full_view.stripViewportChanged.connect(self._prioritize_visible_full_strip_thumbs)
         self.full_view.ratingRequested.connect(self._set_selected_rating)
         self.full_view.colorRequested.connect(self._set_selected_color)
         self.full_view.faceRequested.connect(self._filter_face_from_full_view)
@@ -903,6 +1288,7 @@ class Workspace(QMainWindow):
         self.stack.addWidget(self.grid_page)
         self.stack.addWidget(self.full_view)
         self.setCentralWidget(self.stack)
+        self._install_grid_page_key_filters()
 
         # Qt exposes mounted volumes on all supported platforms. Polling is
         # intentional here: QStorageInfo has no cross-platform mount-change
@@ -944,6 +1330,7 @@ class Workspace(QMainWindow):
         # executors so a completed cache lookup cannot enqueue a decode into an
         # executor that has already been shut down.
         self.closing = True
+        self._save_folder_grid_context()
         self.workspace_state.close()
         self.flush_timer.stop()
         self.full_request_timer.stop()
@@ -969,6 +1356,39 @@ class Workspace(QMainWindow):
         self.cache_flush_executor.shutdown(wait=False, cancel_futures=False)
         self.ai_pipeline.shutdown()
         super().closeEvent(event)
+
+    def set_workspace_active(self, active: bool) -> None:
+        """Run preview generation only for the tab currently on screen."""
+        if self.workspace_active == active:
+            return
+        self.workspace_active = active
+        self.video_thumbnailer.set_active(active)
+        if not active:
+            self.populate_timer.stop()
+            self.thumb_timer.stop()
+            self.visible_thumb_timer.stop()
+            self.grid_full_request_timer.stop()
+            self.full_request_timer.stop()
+            self.pending_full_request = None
+            self.pending_grid_full_request = None
+            for future in self.pending.values():
+                future.cancel()
+            self.pending.clear()
+            self.foreground_full_futures.clear()
+            self.visible_thumb_pending.clear()
+            self.full_view.video_player.pause()
+            return
+        if self.populate_index < len(self.paths):
+            self.populate_timer.start()
+        self._schedule_visible_thumb_priority()
+        if self.thumb_priority or self.thumb_index < len(self.paths):
+            self.thumb_timer.start()
+
+    def _video_playback_changed(self, playing: bool) -> None:
+        """Never decode grid-video frames while a full video is playing."""
+        self.video_thumbnailer.set_active(self.workspace_active and not playing)
+        if not playing and self.workspace_active:
+            self._schedule_visible_thumb_priority()
 
     def _build_grid_page(self) -> QWidget:
         page = QWidget()
@@ -1041,8 +1461,8 @@ class Workspace(QMainWindow):
         self.dir_tree = QTreeView()
         self.dir_tree.setModel(self.dir_model)
         # Включаем возможность редактирования элементов дерева
-        self.dir_tree.setEditTriggers(QTreeView.EditTrigger.DoubleClicked | QTreeView.EditTrigger.EditKeyPressed)
-        self.dir_tree.itemDelegate().closeEditor.connect(self._directory_editor_closed)
+        self.dir_tree.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
+        self._folder_name_editor: FolderNameEditor | None = None
         self._set_tree_root_for_path(self.current_dir.anchor or QDir.rootPath())
         for column in range(1, self.dir_model.columnCount()):
             self.dir_tree.hideColumn(column)
@@ -1081,20 +1501,25 @@ class Workspace(QMainWindow):
 
         # Создаем тулбар с кнопками навигации над деревом папок
         folder_toolbar = QWidget()
+        folder_toolbar.setObjectName("folderToolbar")
         folder_toolbar_layout = QHBoxLayout(folder_toolbar)
         folder_toolbar_layout.setContentsMargins(0, 0, 0, 8)
         folder_toolbar_layout.setSpacing(4)
         
         # Кнопка "На уровень вверх"
         self.up_button = QToolButton()
-        self.up_button.setIcon(qApp.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogToParent))
+        self.up_button.setObjectName("folderToolButton")
+        self.up_button.setIcon(_sidebar_tool_icon("up"))
+        self.up_button.setIconSize(QSize(16, 16))
         self.up_button.setToolTip("На уровень вверх")
         self.up_button.clicked.connect(self._go_up_directory)
         folder_toolbar_layout.addWidget(self.up_button)
         
         # Кнопка "Создать папку"
         self.new_folder_button = QToolButton()
-        self.new_folder_button.setIcon(qApp.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder))
+        self.new_folder_button.setObjectName("folderToolButton")
+        self.new_folder_button.setIcon(_sidebar_tool_icon("new-folder"))
+        self.new_folder_button.setIconSize(QSize(16, 16))
         self.new_folder_button.setToolTip("Создать папку")
         self.new_folder_button.clicked.connect(self._create_new_folder)
         folder_toolbar_layout.addWidget(self.new_folder_button)
@@ -1192,7 +1617,7 @@ class Workspace(QMainWindow):
         self.series_toggle.setText("Серии")
         self.series_toggle.setCheckable(True)
         self.series_toggle.setChecked(True)
-        self.series_toggle.toggled.connect(self._apply_view)
+        self.series_toggle.toggled.connect(self._series_toggle_changed)
         series_faces_layout.addWidget(self.series_toggle)
         self.faces_panel_button = QToolButton()
         self.faces_panel_button.setObjectName("aiFilter")
@@ -1285,7 +1710,7 @@ class Workspace(QMainWindow):
 
         escape = QAction("Back", self)
         escape.setShortcut(QKeySequence(Qt.Key.Key_Escape))
-        escape.triggered.connect(self.show_grid)
+        escape.triggered.connect(self._handle_escape)
         self.addAction(escape)
 
         refresh = QAction("Refresh", self)
@@ -1314,6 +1739,61 @@ class Workspace(QMainWindow):
             action.triggered.connect(lambda _checked=False, value=rating: self._set_selected_rating(value or None))
             self.addAction(action)
 
+    def _install_grid_page_key_filters(self) -> None:
+        self._register_grid_page_focus_widget(self.grid_page)
+        for widget in self.grid_page.findChildren(QWidget):
+            self._register_grid_page_focus_widget(widget)
+
+    def _register_grid_page_focus_widget(self, widget: QWidget) -> None:
+        widget.installEventFilter(self)
+
+    def _is_grid_page_widget(self, widget: QWidget | None) -> bool:
+        return widget is not None and (widget is self.grid_page or self.grid_page.isAncestorOf(widget))
+
+    def _is_directory_focus_widget(self, widget: QWidget | None) -> bool:
+        return widget is not None and (widget is self.dir_tree or self.dir_tree.isAncestorOf(widget))
+
+    def _focus_directory_panel(self) -> None:
+        index = self.dir_tree.currentIndex()
+        if not index.isValid():
+            index = self.dir_model.index(str(self.current_dir))
+            if index.isValid():
+                self.dir_tree.setCurrentIndex(index)
+        self.dir_tree.setFocus(Qt.FocusReason.TabFocusReason)
+
+    def _focus_grid_panel(self) -> None:
+        if self.grid.currentItem() is None and self.grid.count() > 0:
+            self.grid.setCurrentRow(0)
+        self.grid.setFocus(Qt.FocusReason.TabFocusReason)
+
+    def _toggle_primary_panel_focus(self) -> None:
+        focus_widget = QApplication.focusWidget()
+        if self._is_directory_focus_widget(focus_widget):
+            self._focus_grid_panel()
+            return
+        self._focus_directory_panel()
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.Type.KeyPress and self.stack.currentWidget() is self.grid_page:
+            focus_widget = watched if isinstance(watched, QWidget) else QApplication.focusWidget()
+            if self._is_grid_page_widget(focus_widget):
+                if event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                    self._toggle_primary_panel_focus()
+                    return True
+                if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._is_directory_focus_widget(focus_widget):
+                    index = self.dir_tree.currentIndex()
+                    if index.isValid():
+                        self._directory_selected(index)
+                        return True
+        return super().eventFilter(watched, event)
+
+
+    def _handle_escape(self) -> None:
+        if self.stack.currentWidget() is self.full_view:
+            self.show_grid()
+            return
+        if self.stack.currentWidget() is self.grid_page:
+            self._go_up_directory()
 
     def _go_up_directory(self) -> None:
         """Перейти на уровень вверх от текущей директории"""
@@ -1345,18 +1825,75 @@ class Workspace(QMainWindow):
             return
 
         self._expand_tree_path(index)
+        selection_model = self.dir_tree.selectionModel()
+        if selection_model is not None:
+            selection_model.setCurrentIndex(
+                index,
+                QItemSelectionModel.SelectionFlag.ClearAndSelect | QItemSelectionModel.SelectionFlag.Rows,
+            )
         self.dir_tree.setCurrentIndex(index)
         self.dir_tree.scrollTo(index, QTreeView.ScrollHint.EnsureVisible)
         self.dir_tree.setFocus(Qt.FocusReason.OtherFocusReason)
-        if self.dir_tree.edit(index):
+        QTimer.singleShot(0, lambda target=path, idx=index: self._show_folder_name_editor(target, idx))
+
+    def _show_folder_name_editor(self, path: Path, index) -> None:
+        if self.dir_model._new_folder_path != path or not index.isValid():
             return
-        if attempts_left <= 0:
-            self.dir_model._new_folder_path = None
+        if self._folder_name_editor is not None:
+            self._folder_name_editor.deleteLater()
+
+        rect = self.dir_tree.visualRect(index)
+        editor = FolderNameEditor(self.dir_tree.viewport())
+        editor.setText(path.name)
+        editor.selectAll()
+        editor.setGeometry(rect.adjusted(22, 0, -2, 0))
+        editor.setMinimumWidth(80)
+        editor.setProperty("folderPath", str(path))
+        editor.accepted.connect(self._commit_folder_name)
+        editor.cancelled.connect(self._cancel_folder_name)
+        self._folder_name_editor = editor
+        editor.show()
+        editor.raise_()
+        editor.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _commit_folder_name(self) -> None:
+        editor = self._folder_name_editor
+        if editor is None:
             return
-        QTimer.singleShot(
-            50,
-            lambda target=path, idx=index, attempts=attempts_left - 1: self._begin_directory_inline_rename(target, idx, attempts),
-        )
+        old_path = Path(editor.property("folderPath"))
+        new_name = editor.text().strip()
+        if not new_name or new_name in {".", ".."} or "/" in new_name or "\\" in new_name:
+            editor.setStyleSheet("border: 1px solid #c43d2f;")
+            editor.setToolTip("Введите корректное имя папки")
+            QTimer.singleShot(0, editor.setFocus)
+            return
+
+        new_path = old_path.parent / new_name
+        if new_path != old_path:
+            if new_path.exists():
+                editor.setStyleSheet("border: 1px solid #c43d2f;")
+                editor.setToolTip("Папка с таким именем уже существует")
+                QTimer.singleShot(0, editor.setFocus)
+                return
+            try:
+                old_path.rename(new_path)
+            except OSError as error:
+                editor.setStyleSheet("border: 1px solid #c43d2f;")
+                editor.setToolTip(str(error))
+                QTimer.singleShot(0, editor.setFocus)
+                return
+        self._finish_folder_name_editor()
+
+    def _cancel_folder_name(self) -> None:
+        self._finish_folder_name_editor()
+
+    def _finish_folder_name_editor(self) -> None:
+        editor = self._folder_name_editor
+        self._folder_name_editor = None
+        self.dir_model._new_folder_path = None
+        if editor is not None:
+            editor.hide()
+            editor.deleteLater()
 
     def _create_new_folder(self) -> None:
         """Создать новую папку в текущей директории с inline-редактированием."""
@@ -1384,7 +1921,10 @@ class Workspace(QMainWindow):
             if not new_index.isValid():
                 raise OSError("QFileSystemModel не смог создать папку.")
 
-            self._begin_directory_inline_rename(temp_path, new_index)
+            QTimer.singleShot(
+                0,
+                lambda target=temp_path, idx=new_index: self._begin_directory_inline_rename(target, idx),
+            )
 
         except OSError as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось создать папку: {e}")
@@ -1433,6 +1973,7 @@ class Workspace(QMainWindow):
                 button.clicked.connect(lambda _checked=False, root=path: self._drive_selected(root))
                 self.drive_buttons.addButton(button)
                 self.drive_button_layout.addWidget(button)
+                self._register_grid_page_focus_widget(button)
             if key not in self.volume_removability:
                 self.volume_removability[key] = _is_removable_volume(path)
             removable = self.volume_removability[key]
@@ -1474,6 +2015,9 @@ class Workspace(QMainWindow):
                     button.setChecked(button.property("volumeKey") == root_key)
 
     def load_directory(self, directory: Path) -> None:
+        if self._folder_context_active:
+            self._save_folder_grid_context()
+        self._folder_context_active = False
         watched = self.folder_watcher.directories()
         if watched:
             self.folder_watcher.removePaths(watched)
@@ -1500,11 +2044,16 @@ class Workspace(QMainWindow):
         self.folder_cache = None
         self.cache_ready = False
         self.current_dir = directory
+        self._restore_series_mode(directory)
+        self._pending_folder_grid_context = self._load_folder_grid_context(directory)
         self.settings.setValue("last_directory", str(directory))
         self.setWindowTitle(_workspace_title(directory))
         self.all_paths = []
         self.view_paths = []
         self.paths = []
+        self.photo_details = {}
+        self.image_embeddings = {}
+        self.ai_progress_total = 0
         self.items_by_path.clear()
         self.grid.clear()
         self.thumb_priority.clear()
@@ -1524,6 +2073,60 @@ class Workspace(QMainWindow):
         future = self.directory_scan_executor.submit(_scan_directory, directory)
         future.add_done_callback(lambda done, r=request, d=directory: self._directory_scanned(r, d, done))
 
+    @staticmethod
+    def _folder_settings_prefix(directory: Path) -> str:
+        # Keep the setting portable and avoid QSettings treating path
+        # separators as nested groups.
+        normalized = str(directory.expanduser().resolve()).casefold()
+        return f"folder_settings/{sha1(normalized.encode()).hexdigest()}"
+
+    @classmethod
+    def _series_mode_setting_key(cls, directory: Path) -> str:
+        return f"{cls._folder_settings_prefix(directory)}/series_enabled"
+
+    def _load_folder_grid_context(self, directory: Path) -> tuple[list[str], int] | None:
+        prefix = self._folder_settings_prefix(directory)
+        if not self.settings.contains(f"{prefix}/grid_scroll"):
+            return None
+        selected = self.settings.value(f"{prefix}/selected_paths", [], list)
+        if isinstance(selected, (list, tuple)):
+            selected_names = [str(name) for name in selected]
+        else:
+            selected_names = [str(selected)] if selected else []
+        return selected_names, max(0, self.settings.value(f"{prefix}/grid_scroll", 0, int))
+
+    def _save_folder_grid_context(self) -> None:
+        if not self._folder_context_active:
+            return
+        prefix = self._folder_settings_prefix(self.current_dir)
+        selected = [path.name for path in self._selected_paths()]
+        self.settings.setValue(f"{prefix}/selected_paths", selected)
+        self.settings.setValue(f"{prefix}/grid_scroll", self.grid.verticalScrollBar().value())
+
+    def _restore_folder_grid_context(self) -> None:
+        context = self._pending_folder_grid_context
+        if context is None:
+            return
+        self._pending_folder_grid_context = None
+        selected_names, scroll_value = context
+        selected_items = [self.items_by_path[path] for path in self.paths if path.name in selected_names and path in self.items_by_path]
+        if selected_items:
+            self.grid.setCurrentItem(selected_items[0])
+            for item in selected_items:
+                item.setSelected(True)
+        scroll_bar = self.grid.verticalScrollBar()
+        scroll_bar.setValue(min(scroll_value, scroll_bar.maximum()))
+
+    def _restore_series_mode(self, directory: Path) -> None:
+        enabled = self.settings.value(self._series_mode_setting_key(directory), True, bool)
+        self.series_toggle.blockSignals(True)
+        self.series_toggle.setChecked(enabled)
+        self.series_toggle.blockSignals(False)
+
+    def _series_toggle_changed(self, enabled: bool) -> None:
+        self.settings.setValue(self._series_mode_setting_key(self.current_dir), enabled)
+        self._apply_view()
+
     def _directory_scanned(self, request: WorkspaceRequest, directory: Path, future: Future) -> None:
         if self.closing:
             return
@@ -1532,6 +2135,7 @@ class Workspace(QMainWindow):
     def _on_directory_scanned(self, request: WorkspaceRequest, directory: Path, future: Future) -> None:
         if self.closing or not self.workspace_state.accepts(request):
             return
+        self._folder_context_active = True
         try:
             self.all_paths = future.result()
             # Separate subdirectories and image files
@@ -1549,17 +2153,24 @@ class Workspace(QMainWindow):
             self.all_paths = []
             self.view_paths = []
             self.paths = []
-        self.folder_cache = FolderCache(
-            directory,
-            {path.name for path in self.paths},
-            eager_variants={THUMB_SIZE},
-            load_from_disk=False,
-        )
-        self.cache_ready = False
-        generation = self.cache_load_generation
-        cache = self.folder_cache
-        future = self.cache_load_executor.submit(cache.load_from_disk)
-        future.add_done_callback(lambda done, g=generation: self._cache_loaded(g, done))
+        scannable_paths = [path for path in self.paths if path.is_file()]
+        if scannable_paths:
+            self.folder_cache = FolderCache(
+                directory,
+                {path.name for path in scannable_paths},
+                eager_variants={THUMB_SIZE},
+                load_from_disk=False,
+            )
+            self.cache_ready = False
+            generation = self.cache_load_generation
+            cache = self.folder_cache
+            future = self.cache_load_executor.submit(cache.load_from_disk)
+            future.add_done_callback(lambda done, g=generation: self._cache_loaded(g, done))
+        else:
+            self.folder_cache = None
+            self.cache_ready = True
+            self._update_analysis_controls()
+            self._reset_ai_status()
         self.items_by_path.clear()
         self.grid.clear()
         self.populate_index = 0
@@ -1572,6 +2183,9 @@ class Workspace(QMainWindow):
         # deserialized.  Otherwise the sequential queue races cached previews.
 
     def _populate_next_items(self) -> None:
+        if not self.workspace_active:
+            self.populate_timer.stop()
+            return
         end = min(len(self.paths), self.populate_index + POPULATE_BATCH)
         for path in self.paths[self.populate_index : end]:
             item = QListWidgetItem(path.name)
@@ -1592,8 +2206,13 @@ class Workspace(QMainWindow):
         self._schedule_visible_thumb_priority()
         if self.populate_index >= len(self.paths):
             self.populate_timer.stop()
+            if self.cache_ready:
+                QTimer.singleShot(0, self._restore_folder_grid_context)
 
     def _submit_next_thumbs(self) -> None:
+        if not self.workspace_active:
+            self.thumb_timer.stop()
+            return
         if self.folder_cache is None or not self.cache_ready:
             return
         if self.pending_full_request is not None or self.foreground_full_futures:
@@ -1613,20 +2232,26 @@ class Workspace(QMainWindow):
             if next_path is None:
                 break
             path, visible_priority = next_path
-            self._submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=visible_priority)
+            if is_supported_video(path):
+                self.video_thumbnailer.request(path)
+            else:
+                self._submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=visible_priority)
             submitted += 1
         if self.thumb_index >= len(self.paths) and not self.thumb_priority:
             self.thumb_timer.stop()
 
     def _schedule_visible_thumb_priority(self) -> None:
+        if not self.workspace_active:
+            return
         if not self.visible_thumb_timer.isActive():
             self.visible_thumb_timer.start(0)
 
     def _start_ai_analysis(self) -> None:
         if self.closing or not self.cache_ready or self.folder_cache is None:
             return
-        embedding_missing = self.folder_cache.missing_ai_paths(self.view_paths, "image_embeddings")
-        face_missing = self.folder_cache.missing_ai_paths(self.view_paths, "face_analysis")
+        analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
+        embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
+        face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
         self.ai_progress_total = len(set(embedding_missing) | set(face_missing))
         if not self.ai_progress_total:
             self.ai_progress.setRange(0, 1)
@@ -1637,15 +2262,16 @@ class Workspace(QMainWindow):
         self.ai_progress.setRange(0, self.ai_progress_total)
         self.ai_progress.setValue(0)
         self.ai_progress.setFormat("Анализ: %v / %m")
-        self.ai_pipeline.scan(self.view_paths, self.folder_cache, self._background_decode_executor())
+        self.ai_pipeline.scan(analysis_paths, self.folder_cache, self._background_decode_executor())
         self.ai_progress_timer.start()
 
     def _update_ai_progress(self) -> None:
         if self.folder_cache is None or not self.cache_ready:
             self.ai_progress_timer.stop()
             return
-        embedding_missing = self.folder_cache.missing_ai_paths(self.view_paths, "image_embeddings")
-        face_missing = self.folder_cache.missing_ai_paths(self.view_paths, "face_analysis")
+        analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
+        embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
+        face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
         remaining = len(set(embedding_missing) | set(face_missing))
         completed = max(0, self.ai_progress_total - remaining)
         self.ai_progress.setValue(completed)
@@ -1669,14 +2295,24 @@ class Workspace(QMainWindow):
 
     def _refresh_ai_status(self) -> None:
         if self.folder_cache is None or not self.cache_ready:
+            self._reset_ai_status()
             return
-        embedding_missing = self.folder_cache.missing_ai_paths(self.view_paths, "image_embeddings")
-        face_missing = self.folder_cache.missing_ai_paths(self.view_paths, "face_analysis")
+        analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
+        embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
+        face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
         waiting = len(set(embedding_missing) | set(face_missing))
         self.ai_button.setEnabled(waiting > 0 and self.ai_pipeline.pending_count() == 0)
         self.ai_progress.setRange(0, 1)
         self.ai_progress.setValue(0 if waiting else 1)
         self.ai_progress.setFormat(f"Ожидают анализа: {waiting}" if waiting else "Все фото обработаны")
+
+    def _reset_ai_status(self) -> None:
+        if not hasattr(self, "ai_button"):
+            return
+        self.ai_button.setEnabled(False)
+        self.ai_progress.setRange(0, 1)
+        self.ai_progress.setValue(1)
+        self.ai_progress.setFormat("Нет фото для анализа")
 
     def _reload_photo_details(self) -> None:
         if self.folder_cache is None or not self.cache_ready:
@@ -1718,15 +2354,22 @@ class Workspace(QMainWindow):
             self.shot_filter.setCurrentIndex(index)
 
     def _has_available_series(self, paths: list[Path]) -> bool:
+        photos = [path for path in paths if path.is_file()]
         return any(
             self._embedding_similarity(left, right) >= 0.92
-            for left, right in zip(paths, paths[1:])
+            for left, right in zip(photos, photos[1:])
         )
 
     def _prioritize_visible_thumbs(self) -> None:
+        if not self.workspace_active:
+            return
         if self.folder_cache is None or not self.cache_ready or self.grid.count() == 0:
             return
-        cell = self.grid.gridSize()
+        # PhotoGrid intentionally keeps QListView's gridSize invalid so the
+        # delegate can distribute remainder pixels across columns. Use its
+        # actual per-card hint for viewport sampling; otherwise this routine
+        # returns early and thumbnail work falls back to top-to-bottom only.
+        cell = self.grid.card_size_hint(0)
         if cell.width() <= 0 or cell.height() <= 0:
             return
 
@@ -1815,10 +2458,18 @@ class Workspace(QMainWindow):
             self.image_embeddings = self.folder_cache.load_image_embeddings()
             for path, item in self.items_by_path.items():
                 item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
+        # Series membership depends on embeddings, which are only available
+        # after the folder cache has loaded. Rebuild the grid now so a restored
+        # checked state reflects the actual collapsed-series view.
+        self._apply_view()
         self._update_analysis_controls()
         self._refresh_ai_status()
         if self.folder_cache is not None:
-            self.ai_pipeline.scan_exif(self.view_paths, self.folder_cache, self._background_decode_executor())
+            self.ai_pipeline.scan_exif(
+                [path for path in self.view_paths if is_supported_image(path)],
+                self.folder_cache,
+                self._background_decode_executor(),
+            )
         self.thumb_index = 0
         self._schedule_visible_thumb_priority()
         self.thumb_timer.start()
@@ -1887,7 +2538,9 @@ class Workspace(QMainWindow):
         self.series_cards = {}
         if not self.series_toggle.isChecked():
             return list(paths)
-        result: list[Path] = []
+        # Folders are navigation targets, not photos. Keep them at the top
+        # and exclude them completely from AI-series grouping.
+        result: list[Path] = [path for path in paths if path.is_dir()]
         group: list[Path] = []
 
         def flush() -> None:
@@ -1911,6 +2564,8 @@ class Workspace(QMainWindow):
             group.clear()
 
         for path in paths:
+            if path.is_dir():
+                continue
             if group and self._embedding_similarity(group[-1], path) < 0.92:
                 flush()
             group.append(path)
@@ -1942,10 +2597,9 @@ class Workspace(QMainWindow):
     def _update_selection(self, **changes) -> None:
         paths = self._selected_paths()
         if self.current_path is not None and self.stack.currentWidget() is self.full_view:
-            # Grid selection may belong to a previously opened card. In photo
-            # mode a mark must never silently land on that stale selection.
-            if self.current_path not in paths:
-                paths = [self.current_path]
+            # The grid retains the series leader as its selection. In the
+            # viewer, metadata belongs exclusively to the opened series frame.
+            paths = [self.current_path]
         for path in paths:
             detail = self.photo_details.setdefault(path.name, {})
             detail.update(changes)
@@ -1963,7 +2617,7 @@ class Workspace(QMainWindow):
         if self.current_path is not None and self.stack.currentWidget() is self.full_view:
             self.full_view.set_metadata(
                 self.photo_details.get(self.current_path.name, {}),
-                (self.current_path, *self._series_for_path(self.current_path)[:1]),
+                (self.current_path,),
             )
             self._refresh_full_view_navigation(self.current_path)
         if self.auto_advance and len(paths) == 1:
@@ -1991,7 +2645,7 @@ class Workspace(QMainWindow):
     def _apply_quick_mark(self) -> None:
         kind, value = self.quick_mark
         paths = self._selected_paths()
-        if self.current_path is not None and self.stack.currentWidget() is self.full_view and self.current_path not in paths:
+        if self.current_path is not None and self.stack.currentWidget() is self.full_view:
             paths = [self.current_path]
         if not paths:
             return
@@ -2182,6 +2836,8 @@ class Workspace(QMainWindow):
     def _on_decoded(self, payload: object) -> None:
         decoded, max_size = payload
         self.visible_thumb_pending.discard((decoded.path, max_size))
+        if not self.workspace_active:
+            return
         item = self.items_by_path.get(decoded.path)
         if max_size == THUMB_SIZE:
             self._thumbnail_cache_put(decoded.path, decoded.image)
@@ -2194,6 +2850,24 @@ class Workspace(QMainWindow):
                 self.full_view.set_image(decoded, fallback=max_size == THUMB_SIZE)
         if max_size > THUMB_SIZE and decoded.path == self.current_path:
             self.thumb_timer.start()
+
+    def _on_video_preview(self, path: Path, preview: QImage) -> None:
+        if self.closing or not self.workspace_active or preview.isNull():
+            return
+        preview = preview.scaled(THUMB_SIZE, THUMB_SIZE, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        if self.folder_cache is not None and self.cache_ready:
+            rgba = preview.convertToFormat(QImage.Format.Format_RGBA8888)
+            self.folder_cache.store_pixels(
+                PixelImage(path=path, pixels=bytes(rgba.bits()), width=rgba.width(), height=rgba.height()),
+                THUMB_SIZE,
+            )
+        self._thumbnail_cache_put(path, preview)
+        item = self.items_by_path.get(path)
+        if item is not None:
+            item.setData(PREVIEW_ROLE, preview)
+            self.grid.update(self.grid.visualItemRect(item))
+        self.full_view.update_preview(path, preview)
+        self.full_view.set_video_preview(path, preview)
 
     def _on_decode_failed(self, path: str, message: str) -> None:
         self.visible_thumb_pending.discard((Path(path), THUMB_SIZE))
@@ -2237,17 +2911,32 @@ class Workspace(QMainWindow):
         self.full_view.set_faces(self.photo_details.get(path.name, {}).get("faces") or [])
         self.full_view.set_metadata(
             self.photo_details.get(path.name, {}),
-            (path, *self._series_for_path(path)[:1]),
+            (path,),
         )
         self.stack.setCurrentWidget(self.full_view)
         self._refresh_full_view_navigation(path)
         self.fullViewRequested.emit(self)
         self.full_view.setFocus(Qt.FocusReason.OtherFocusReason)
+        if is_supported_video(path):
+            item = self.items_by_path.get(path)
+            preview = item.data(PREVIEW_ROLE) if item is not None else self._thumbnail_cache_get(path)
+            self.full_view.set_video(path, preview if isinstance(preview, QImage) else None)
+            if not isinstance(preview, QImage) or preview.isNull():
+                self.video_thumbnailer.request(path)
+            return
         full_size = self._full_preview_size()
         self._suspend_thumbnail_work()
         self._cancel_outdated_full_tasks(path, full_size)
         self._show_best_cached_full(path, full_size)
-        if rapid_navigation:
+        in_series = len(self._series_for_path(path)) > 1
+        if in_series:
+            # Show the compact decode first. In a series this gives immediate
+            # visual feedback while the full-resolution frame is still being
+            # decoded or read from a slow card.
+            self._submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=True)
+            self.pending_full_request = path
+            self.full_request_timer.start(55)
+        elif rapid_navigation:
             self.pending_full_request = path
             self.full_request_timer.start(55)
         else:
@@ -2348,19 +3037,42 @@ class Workspace(QMainWindow):
             cached = self._cache_get((path, THUMB_SIZE))
             if cached is not None:
                 previews[path] = cached.image
-        self.full_view.set_navigation(strip_paths, strip_current, self.photo_details, previews, series, self.view_generation)
+        self.full_view.set_navigation(
+            strip_paths,
+            strip_current,
+            self.photo_details,
+            previews,
+            series,
+            self.view_generation,
+            series_current=current,
+            strip_series_cards={path: self.series_cards.get(path, {}) for path in strip_paths},
+        )
         self._prioritize_full_strip_thumbs(current, strip_paths, series)
 
     def _prioritize_full_strip_thumbs(self, current: Path, strip_paths: list[Path], series: list[Path]) -> None:
         """Use the existing grid thumbnail queue for the currently useful strips."""
-        if not self.cache_ready:
-            return
         try:
             index = strip_paths.index(current)
         except ValueError:
             index = 0
         nearby = [*series, *strip_paths[max(0, index - 4) : index + 5]]
-        for path in reversed(list(dict.fromkeys(nearby))):
+        self._prioritize_strip_thumbs(nearby)
+
+    def _prioritize_visible_full_strip_thumbs(self) -> None:
+        """Schedule previews as soon as either viewer strip is scrolled."""
+        if self.stack.currentWidget() is not self.full_view:
+            return
+        self._prioritize_strip_thumbs(
+            [*self.full_view.photo_strip.visible_paths(), *self.full_view.series_strip.visible_paths()]
+        )
+
+    def _prioritize_strip_thumbs(self, paths: list[Path]) -> None:
+        """Put strip items ahead of the background scan, preserving UI order."""
+        if not self.cache_ready:
+            return
+        for path in reversed(list(dict.fromkeys(paths))):
+            if not path.is_file():
+                continue
             key = (path, THUMB_SIZE)
             if key not in self.pending and path not in self.thumb_priority_set:
                 self.thumb_priority.appendleft(path)
@@ -2415,9 +3127,7 @@ class Workspace(QMainWindow):
         return dot / norm if norm else -1.0
 
     def _preload_neighbors(self, path: Path) -> None:
-        navigation_paths = self._photo_mode_paths()
-        if path not in navigation_paths:
-            path = self._series_for_path(path)[0]
+        navigation_paths = self._full_preload_paths(path)
         if path not in navigation_paths:
             return
         index = navigation_paths.index(path)
@@ -2439,11 +3149,21 @@ class Workspace(QMainWindow):
         for neighbor in neighbors:
             self._submit_decode(neighbor, full_size, full_priority=True)
 
-    def _cancel_outdated_full_tasks(self, path: Path, full_size: int) -> None:
-        keep = {path}
+    def _full_preload_paths(self, path: Path) -> list[Path]:
+        """Prefer adjacent frames while navigating inside an expanded series."""
+        series = self._series_for_path(path)
+        if len(series) > 1 and path in series:
+            return series
         navigation_paths = self._photo_mode_paths()
         if path not in navigation_paths:
-            path = self._series_for_path(path)[0]
+            series_leader = series[0]
+            if series_leader in navigation_paths:
+                return navigation_paths
+        return navigation_paths
+
+    def _cancel_outdated_full_tasks(self, path: Path, full_size: int) -> None:
+        keep = {path}
+        navigation_paths = self._full_preload_paths(path)
         if path in navigation_paths:
             index = navigation_paths.index(path)
             keep.update(
@@ -2657,6 +3377,7 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.title_bar)
         root_layout.addWidget(self.workspace_stack, 1)
         self.setCentralWidget(root)
+        self._create_actions()
         self._restore_workspaces()
 
     def _add_workspace(self, directory: Path | None = None) -> None:
@@ -2673,11 +3394,33 @@ class MainWindow(QMainWindow):
         workspace.fullscreenRequested.connect(self._toggle_workspace_fullscreen)
         workspace.gridRequested.connect(self._leave_full_view)
         self.tabs.setCurrentIndex(index)
+        self._select_workspace(self.tabs.currentIndex())
         self._update_tab_geometry()
+
+    def _create_actions(self) -> None:
+        next_tab = QAction("Next workspace", self)
+        next_tab.setShortcut(QKeySequence("Ctrl+Right"))
+        next_tab.triggered.connect(lambda: self._select_relative_workspace(1))
+        self.addAction(next_tab)
+
+        previous_tab = QAction("Previous workspace", self)
+        previous_tab.setShortcut(QKeySequence("Ctrl+Left"))
+        previous_tab.triggered.connect(lambda: self._select_relative_workspace(-1))
+        self.addAction(previous_tab)
+
+    def _select_relative_workspace(self, step: int) -> None:
+        count = self.tabs.count()
+        if count <= 1:
+            return
+        self.tabs.setCurrentIndex((self.tabs.currentIndex() + step) % count)
 
     def _select_workspace(self, index: int) -> None:
         if index >= 0:
             self.workspace_stack.setCurrentIndex(index)
+        for workspace_index in range(self.workspace_stack.count()):
+            workspace = self.workspace_stack.widget(workspace_index)
+            if isinstance(workspace, Workspace):
+                workspace.set_workspace_active(workspace_index == index)
 
     def _update_workspace_title(self, workspace: Workspace, title: str) -> None:
         index = self.workspace_stack.indexOf(workspace)
@@ -2919,6 +3662,30 @@ def apply_theme(app: QApplication) -> None:
             border-color: #79aaff;
             color: white;
         }
+        QWidget#folderToolbar {
+            background: transparent;
+        }
+        QToolButton#folderToolButton {
+            background: #262626;
+            border: 1px solid #151515;
+            border-radius: 3px;
+            min-width: 28px;
+            max-width: 28px;
+            min-height: 26px;
+            max-height: 26px;
+            padding: 0;
+        }
+        QToolButton#folderToolButton:hover {
+            background: #303030;
+            border-color: #4b4b4b;
+        }
+        QToolButton#folderToolButton:pressed {
+            background: #1b1b1b;
+        }
+        QToolButton#folderToolButton:disabled {
+            background: #202020;
+            border-color: #121212;
+        }
         QTreeView::item, QListWidget::item {
             padding: 6px;
         }
@@ -2944,12 +3711,12 @@ def apply_theme(app: QApplication) -> None:
         QScrollBar:vertical, QScrollBar:horizontal {
             background: #202020;
             border: 0;
-            width: 12px;
-            height: 12px;
+            width: 6px;
+            height: 6px;
         }
         QScrollBar::handle {
             background: #555555;
-            border-radius: 3px;
+            border-radius: 2px;
         }
         QScrollBar::handle:hover {
             background: #6a6a6a;
@@ -3118,6 +3885,23 @@ def apply_theme(app: QApplication) -> None:
             background: #3c3c3c;
         }
         QToolButton#fullQuickMark:hover { background: #505050; }
+        QToolButton#videoPlay {
+            min-width: 58px;
+            max-width: 76px;
+            min-height: 22px;
+            max-height: 22px;
+            border: 1px solid #1a1a1a;
+            border-radius: 3px;
+            background: #3c3c3c;
+        }
+        QFrame#videoControls {
+            background: #252525;
+            border: 1px solid #121212;
+            border-radius: 7px;
+        }
+        QLabel#videoTime { min-width: 82px; color: #d5d5d5; font-size: 11px; font-weight: 600; }
+        QSlider#videoSeek::groove:horizontal { height: 4px; background: #1b1b1b; border-radius: 2px; }
+        QSlider#videoSeek::handle:horizontal { width: 10px; margin: -4px 0; background: #c8c8c8; border-radius: 5px; }
         QLineEdit#fullComment {
             min-width: 180px;
             max-width: 360px;
@@ -3283,6 +4067,33 @@ def _chrome_icon(kind: str) -> QIcon:
     return QIcon(pixmap)
 
 
+def _sidebar_tool_icon(kind: str) -> QIcon:
+    """Monochrome icons for the compact directory toolbar."""
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#e2e2e2"), 1.8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+
+    if kind == "up":
+        painter.drawLine(7, 24, 15, 16)
+        painter.drawLine(15, 16, 23, 24)
+        painter.drawLine(15, 16, 15, 9)
+    elif kind == "new-folder":
+        painter.setBrush(QColor("#f0f0f0"))
+        painter.drawRoundedRect(QRectF(5, 10, 22, 14), 2.5, 2.5)
+        painter.drawRoundedRect(QRectF(7, 7, 8, 5), 1.8, 1.8)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawLine(16, 13, 16, 21)
+        painter.drawLine(12, 17, 20, 17)
+
+    painter.end()
+    return QIcon(pixmap)
+
+
 def _mounted_volume_paths() -> list[Path]:
     """Return only mounted, accessible filesystem roots reported by Qt."""
     paths: dict[str, Path] = {}
@@ -3399,7 +4210,7 @@ def _scan_directory(directory: Path) -> list[Path]:
         entries = []
         # Collect both subdirectories and supported image files
         for entry in directory.iterdir():
-            if entry.is_dir() or (entry.is_file() and is_supported_image(entry)):
+            if entry.is_dir() or (entry.is_file() and is_supported_media(entry)):
                 entries.append(entry)
         return entries
     except OSError:
@@ -3419,9 +4230,13 @@ def _build_photo_view(
     rebuild the view without rescanning the directory or coupling their rules
     to thumbnail scheduling.
     """
-    visible = paths if predicate is None else [path for path in paths if predicate(path)]
+    # Folders form a permanent top section of the grid. Filtering, photo
+    # sorting and series logic below apply to image files only.
+    folders = sorted((path for path in paths if path.is_dir()), key=lambda path: path.name.casefold())
+    photos = [path for path in paths if not path.is_dir()]
+    visible = photos if predicate is None else [path for path in photos if predicate(path)]
     key = sort_key or (lambda path: path.name.lower())
-    return sorted(visible, key=key, reverse=reverse)
+    return [*folders, *sorted(visible, key=key, reverse=reverse)]
 
 
 def _flush_and_close(cache: FolderCache, close: bool) -> None:

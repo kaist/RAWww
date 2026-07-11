@@ -45,6 +45,7 @@ RAW_EXTENSIONS = {
     ".x3f",
 }
 IMAGE_EXTENSIONS = JPEG_EXTENSIONS | RAW_EXTENSIONS | {".png", ".tif", ".tiff", ".bmp", ".webp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
 SHARPEN_PREVIEWS = True
 
 
@@ -66,6 +67,14 @@ class PixelImage:
 
 def is_supported_image(path: Path) -> bool:
     return path.suffix.lower() in IMAGE_EXTENSIONS
+
+
+def is_supported_video(path: Path) -> bool:
+    return path.suffix.lower() in VIDEO_EXTENSIONS
+
+
+def is_supported_media(path: Path) -> bool:
+    return is_supported_image(path) or is_supported_video(path)
 
 
 def decode_image(path: Path, max_size: int) -> DecodedImage:
