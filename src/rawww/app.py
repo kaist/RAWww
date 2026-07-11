@@ -1047,33 +1047,6 @@ class Workspace(QMainWindow):
         for column in range(1, self.dir_model.columnCount()):
             self.dir_tree.hideColumn(column)
         self.dir_tree.clicked.connect(self._directory_selected)
-        # Hide expand arrows on folders that don't have any subfolders
-        def update_node_flags():
-            root = self.dir_tree.rootIndex()
-            rows = self.dir_model.rowCount(root)
-            # BFS through all items to check if they have subdirectories
-            from collections import deque
-            queue = deque()
-            for i in range(rows):
-                queue.append(self.dir_model.index(i, 0, root))
-            while queue:
-                index = queue.popleft()
-                path = self.dir_model.filePath(index)
-                qdir = QDir(path)
-                subdirs = qdir.entryList(QDir.Filter.Dirs | QDir.Filter.NoDotAndDotDot)
-                if len(subdirs) == 0:
-                    # No subfolders, set flag to never have children (hides expand icon)
-                    item_flags = self.dir_model.flags(index)
-                    self.dir_model.setData(index, item_flags | Qt.ItemNeverHasChildren, Qt.ItemDataRole.EditRole)
-                else:
-                    # Add children to queue to check them
-                    child_rows = self.dir_model.rowCount(index)
-                    for i in range(child_rows):
-                        queue.append(self.dir_model.index(i, 0, index))
-        # Refresh flags when the tree expands
-        self.dir_tree.expanded.connect(update_node_flags)
-        # Update once at startup
-        QTimer.singleShot(100, update_node_flags)
         self.dir_tree.setHeaderHidden(True)
         self.dir_tree.setMinimumWidth(260)
 
