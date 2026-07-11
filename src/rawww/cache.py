@@ -123,6 +123,7 @@ class FolderCache:
         if fmt != "rgba":
             return None
         image = QImage(data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
+        image = image.convertToFormat(QImage.Format.Format_RGB888)
         return DecodedImage(path=path, image=image, width=width, height=height)
 
     def store(self, decoded: DecodedImage, max_size: int) -> None:
@@ -179,6 +180,16 @@ class FolderCache:
 
     def store_image_embeddings(self, results: list[tuple[str, bytes]]) -> None:
         self._store_ai_results("image_embeddings", "embedding", results)
+
+    def load_image_embeddings(self) -> dict[str, bytes]:
+        """Return normalized CLIP vectors used by the viewer's series UI."""
+        with self._lock:
+            db = self._db_or_raise()
+            return {
+                str(name): bytes(embedding)
+                for name, embedding in db.execute("SELECT name, embedding FROM image_embeddings")
+                if embedding
+            }
 
     def store_face_analysis(self, results: list[tuple[str, str]]) -> None:
         self._store_ai_results("face_analysis", "faces_json", results)

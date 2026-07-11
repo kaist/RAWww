@@ -8,6 +8,8 @@ from PIL import Image, ImageCms, ImageFilter, ImageOps
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSize
 from PySide6.QtGui import QImage, QImageReader
 
+from .worker_priority import lower_background_priority
+
 try:
     import rawpy
 except ImportError:  # pragma: no cover
@@ -76,14 +78,23 @@ def decode_pixels(path: Path, max_size: int) -> PixelImage:
     return _decode_pillow(path, max_size)
 
 
+def decode_thumbnail_pixels(path: Path, max_size: int) -> PixelImage:
+    """Thumbnail worker entry point; never compete with the foreground view."""
+    lower_background_priority()
+    return decode_pixels(path, max_size)
+
+
 def pixel_to_decoded(pixel: PixelImage) -> DecodedImage:
-    qimage = QImage(
+    rgba = QImage(
         pixel.pixels,
         pixel.width,
         pixel.height,
         pixel.width * 4,
         QImage.Format.Format_RGBA8888,
     ).copy()
+    # Photographic previews never need alpha. RGB888 keeps the in-RAM
+    # thumbnail cache at three bytes per pixel instead of four.
+    qimage = rgba.convertToFormat(QImage.Format.Format_RGB888)
     return DecodedImage(path=pixel.path, image=qimage, width=pixel.width, height=pixel.height)
 
 

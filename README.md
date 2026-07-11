@@ -16,7 +16,8 @@ uv run rawww
 
 ## Viewer
 
-- Grid mode: drive selector and directory tree on the left, adaptive 3:2 photo cards on the right.
+- Folder workspaces open in independent tabs. Use `+` to create a tab; tabs may be reordered or closed without changing another tab's current folder, filters, or selection. Open tabs and the active tab are restored at startup; tabs whose folders no longer exist are omitted.
+- Grid mode: mounted disks appear as buttons above the directory tree on the left; the list refreshes automatically, includes USB media and inserted cards, and excludes empty card-reader slots.
 - ShotSync-style selection toolbar: filter by rating, color label, shot size, filename/comment, and change the sort order or card size.
 - Use Ctrl/Shift to select multiple cards, then assign a 0-5 rating, color label, comment, or the 5-star quick mark. Selection metadata is stored in the central folder cache and survives restarts.
 - Select a processed photo and press **Find face** to show photos containing a matching face; the × button clears face search. **No faces** is available in the shot-size filter.
