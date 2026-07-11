@@ -1042,6 +1042,7 @@ class Workspace(QMainWindow):
         self.dir_tree.setModel(self.dir_model)
         # Включаем возможность редактирования элементов дерева
         self.dir_tree.setEditTriggers(QTreeView.EditTrigger.DoubleClicked | QTreeView.EditTrigger.EditKeyPressed)
+        self.dir_tree.itemDelegate().closeEditor.connect(self._directory_editor_closed)
         self._set_tree_root_for_path(self.current_dir.anchor or QDir.rootPath())
         for column in range(1, self.dir_model.columnCount()):
             self.dir_tree.hideColumn(column)
@@ -1403,6 +1404,13 @@ class Workspace(QMainWindow):
             # Если сигнал был подключен, лучше его отключить
             if 'on_rows_inserted' in locals() and self.dir_model.receivers(self.dir_model.rowsInserted) > 0:
                     self.dir_model.rowsInserted.disconnect(on_rows_inserted)
+
+    def _directory_editor_closed(self, _editor, _hint) -> None:
+        """Сбрасывать состояние новой папки даже при отмене inline-rename."""
+        if self.dir_model._new_folder_path is None:
+            return
+        self.dir_model._new_folder_path = None
+
     def _directory_selected(self, index) -> None:
         path = Path(self.dir_model.filePath(index))
         self.load_directory(path)
