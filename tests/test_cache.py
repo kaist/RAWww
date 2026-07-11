@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+import sqlite3
+import unittest
+from contextlib import closing
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+
+from PIL import Image
+
+import rawww.cache as cache_module
+from rawww.cache import FolderCache
+from rawww.imaging import decode_pixels
+from rawww.ai import AiPipeline, prepare_analysis_batch
+
+
+class CacheTests(unittest.TestCase):
+    def test_ai_model_workers_are_lazy_and_releasable(self) -> None:
+        pipeline = AiPipeline()
+        self.assertIsNone(pipeline.embedding_workers)
+        self.assertIsNone(pipeline.face_workers)
+        pipeline._ensure_analysis_workers()
+        self.assertIsNotNone(pipeline.embedding_workers)
+        self.assertIsNotNone(pipeline.face_workers)
+        self.assertIsNot(pipeline.embedding_workers, pipeline.face_workers)
+        pipeline.release_analysis_workers()
+        self.assertIsNone(pipeline.embedding_workers)
+        self.assertIsNone(pipeline.face_workers)
+        pipeline.shutdown()
+
+    def test_analysis_source_is_kept_in_memory_and_limited_to_640px(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "large.jpg"
+            Image.new("RGB", (2400, 1600), (80, 120, 160)).save(path)
+            results = prepare_analysis_batch([str(path)])
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0][0], str(path))
+            with Image.open(__import__("io").BytesIO(results[0][1])) as prepared:
+                self.assertLessEqual(max(prepared.size), 640)
+            self.assertEqual(list(Path(tmp).iterdir()), [path])
+
+    def test_ram_hit_avoids_second_decode_and_disk_uses_jpeg(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            path = folder / "sample.jpg"
+            Image.new("RGB", (1200, 800), (180, 60, 40)).save(path, quality=90)
+
+            cache_root = folder / "central-cache"
+            cache = FolderCache(folder, {"sample.jpg"}, eager_variants={256}, cache_root=cache_root)
+            real_decode = cache_module.decode_pixels
+            counts = {"decode": 0}
+
+            def counted_decode(*args, **kwargs):
+                counts["decode"] += 1
+                return real_decode(*args, **kwargs)
+
+            with patch("rawww.cache.decode_pixels", counted_decode):
+                first = cache.load_or_decode(path, 256)
+                second = cache.load_or_decode(path, 256)
+                self.assertEqual(counts["decode"], 1)
+                self.assertEqual((first.width, first.height), (second.width, second.height))
+
+            cache.flush()
+            cache.close(flush=False)
+
+            db_path = cache.path
+            with closing(sqlite3.connect(db_path)) as db:
+                fmt = db.execute("SELECT format FROM previews").fetchone()[0]
+            self.assertEqual(fmt, "jpeg")
+
+            cache2 = FolderCache(folder, {"sample.jpg"}, eager_variants={256}, cache_root=cache_root)
+            with patch("rawww.cache.decode_pixels", counted_decode):
+                third = cache2.load_or_decode(path, 256)
+                self.assertEqual(counts["decode"], 1)
+                self.assertEqual((third.width, third.height), (first.width, first.height))
+            cache2.close(flush=False)
+
+    def test_process_worker_decodes_pixels(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.jpg"
+            Image.new("RGB", (1600, 900), (20, 80, 140)).save(path, quality=90)
+
+            with ProcessPoolExecutor(max_workers=2) as pool:
+                pixel = pool.submit(decode_pixels, path, 320).result(timeout=20)
+
+            self.assertLessEqual(max(pixel.width, pixel.height), 320)
+            self.assertEqual(len(pixel.pixels), pixel.width * pixel.height * 4)
+
+    def test_disk_cache_keeps_all_variants(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            path = folder / "sample.jpg"
+            Image.new("RGB", (1200, 800), (180, 60, 40)).save(path, quality=90)
+
+            cache = FolderCache(folder, {"sample.jpg"}, cache_root=folder / "central-cache")
+            cache.load_or_decode(path, 256)
+            cache.load_or_decode(path, 1024)
+            cache.flush()
+            cache.close(flush=False)
+
+            db_path = cache.path
+            with closing(sqlite3.connect(db_path)) as db:
+                count = db.execute("SELECT COUNT(*) FROM previews").fetchone()[0]
+            self.assertEqual(count, 2)
+
+    def test_cache_is_stored_outside_the_photo_folder(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            path = folder / "sample.jpg"
+            Image.new("RGB", (1200, 800), (180, 60, 40)).save(path, quality=90)
+
+            cache_root = folder / "central-cache"
+            cache = FolderCache(folder, {"sample.jpg"}, cache_root=cache_root)
+            cache.load_or_decode(path, 256)
+            cache.close(flush=False)
+
+            db_path = cache.path
+            self.assertEqual(db_path.parent, cache_root)
+            self.assertTrue(db_path.exists())
+            self.assertFalse((folder / ".rawww").exists())
+            with closing(sqlite3.connect(db_path)) as db:
+                count = db.execute("SELECT COUNT(*) FROM previews").fetchone()[0]
+            self.assertEqual(count, 1)
+
+    def test_cache_uses_high_throughput_sqlite_profile(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            cache = FolderCache(folder, set(), cache_root=folder / "cache")
+            with closing(sqlite3.connect(cache.path)) as db:
+                self.assertEqual(db.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+                self.assertEqual(db.execute("PRAGMA page_size").fetchone()[0], 32 * 1024)
+            cache.close(flush=False)
+
+    def test_corrupt_cache_is_rebuilt_from_scratch(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            root = folder / "cache"
+            path = cache_module.cache_path(folder, root)
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b"not a sqlite database")
+            cache = FolderCache(folder, set(), cache_root=root)
+            with closing(sqlite3.connect(path)) as db:
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertIn("previews", tables)
+            self.assertIn("image_embeddings", tables)
+            self.assertIn("face_analysis", tables)
+            self.assertIn("photo_metadata", tables)
+            cache.close(flush=False)
+
+    def test_ai_results_live_in_folder_cache_and_are_invalidated(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            path = folder / "sample.jpg"
+            Image.new("RGB", (10, 10)).save(path)
+            cache = FolderCache(folder, {path.name}, cache_root=folder / "cache")
+            cache.store_image_embeddings([(str(path), b"embedding")])
+            cache.store_face_analysis([(str(path), "[]")])
+            self.assertEqual(cache.missing_ai_paths([path], "image_embeddings"), [])
+            self.assertEqual(cache.missing_ai_paths([path], "face_analysis"), [])
+            path.write_bytes(path.read_bytes() + b"changed")
+            self.assertEqual(cache.missing_ai_paths([path], "image_embeddings"), [path])
+            cache.close(flush=False)
+
+    def test_preview_and_each_ai_result_are_tracked_independently(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            path = folder / "sample.jpg"
+            Image.new("RGB", (120, 80), (30, 60, 90)).save(path)
+            cache = FolderCache(folder, {path.name}, cache_root=folder / "cache")
+
+            cache.load_or_decode(path, 256)
+            self.assertEqual(cache.missing_ai_paths([path], "image_embeddings"), [path])
+            self.assertEqual(cache.missing_ai_paths([path], "face_analysis"), [path])
+            self.assertEqual(cache.missing_ai_paths([path], "photo_metadata"), [path])
+
+            cache.store_image_embeddings([(str(path), b"embedding")])
+            self.assertEqual(cache.missing_ai_paths([path], "image_embeddings"), [])
+            self.assertEqual(cache.missing_ai_paths([path], "face_analysis"), [path])
+
+            cache.store_face_analysis([(str(path), "[]")])
+            self.assertEqual(cache.missing_ai_paths([path], "face_analysis"), [])
+            cache.store_photo_metadata([(str(path), '{"rating":3}')])
+            self.assertEqual(cache.missing_ai_paths([path], "photo_metadata"), [])
+            cache.close(flush=False)
+
+
+if __name__ == "__main__":
+    unittest.main()
