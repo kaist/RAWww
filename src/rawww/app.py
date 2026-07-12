@@ -1010,6 +1010,11 @@ class FullView(QFrame):
         media_layout.setSpacing(0)
         media_layout.addWidget(self.media_stack, 1)
         stage_layout.addWidget(self.media_panel, 1)
+        # The floating video controls are positioned manually on top of their
+        # host. Reposition them whenever the host resizes (e.g. when the bottom
+        # strip is collapsed/expanded) so they always stay pinned to the bottom.
+        self.media_panel.installEventFilter(self)
+        self.video_widget.installEventFilter(self)
 
         self.face_filter_chip = QFrame(self.media_panel)
         self.face_filter_chip.setObjectName("fullFaceFilterChip")
@@ -1040,7 +1045,7 @@ class FullView(QFrame):
         self.strip_toggle = QToolButton()
         self.strip_toggle.setObjectName("stripToggle")
         self.strip_toggle.setIcon(_fomantic_icon("chevron-down", 12))
-        self.strip_toggle.setToolTip("Свернуть ленту превью")
+        self.strip_toggle.setToolTip("Свернуть ленту пр��вью")
         self.strip_toggle.clicked.connect(self.toggle_strip)
         strip_header_layout.addWidget(self.strip_toggle)
         self.video_play_button = QToolButton()
@@ -1096,9 +1101,8 @@ class FullView(QFrame):
         self.strip_toggle.setIcon(_fomantic_icon("chevron-up" if visible else "chevron-down", 12))
         self.strip_toggle.setToolTip("Развернуть ленту превью" if visible else "Свернуть ленту превью")
         QSettings("RAWww", "RAWww").setValue("viewer_strip_collapsed", visible)
-        # Collapsing/expanding the strip resizes the media area, but that does
-        # not trigger FullView.resizeEvent, so the floating video controls must
-        # be repositioned explicitly once the layout has settled.
+        # The host's resize (handled in eventFilter) keeps the controls pinned,
+        # but reposition once more after the layout settles as a safety net.
         QTimer.singleShot(0, self._position_video_controls)
 
     def stop_video(self) -> None:
@@ -1337,6 +1341,11 @@ class FullView(QFrame):
             max(8, host.height() - height - 14),
         )
         self.video_controls.raise_()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.Resize and obj is self.video_controls.parentWidget():
+            self._position_video_controls()
+        return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -2413,7 +2422,7 @@ class Workspace(QMainWindow):
             )
 
         except OSError as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось создать папку: {e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создат�� папку: {e}")
             self.dir_model._new_folder_path = None # Очищаем в случае ошибки
 
     def _directory_editor_closed(self, _editor, _hint) -> None:
