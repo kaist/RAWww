@@ -17,8 +17,8 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Callable
 
-from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QPoint, QRect, QRectF, QIODevice, QSettings, QSize, Qt, QTimer, Signal, QObject, QStorageInfo, QItemSelectionModel, QUrl
-from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygon
+from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QPoint, QPointF, QRect, QRectF, QIODevice, QSettings, QSize, Qt, QTimer, Signal, QObject, QStorageInfo, QItemSelectionModel, QUrl
+from PySide6.QtGui import QAction, QColor, QCursor, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -41,12 +41,14 @@ from PySide6.QtWidgets import (
     QToolButton,
     QStyledItemDelegate,
     QStyle,
+    QStyleOptionButton,
     QSplitter,
     QScrollArea,
     QSlider,
     QSizePolicy,
     QStackedWidget,
     QTabBar,
+    QTabWidget,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -63,12 +65,15 @@ from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
 from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection_root
 from .ai import AiPipeline
+from .audio import AudioTranscriptionPipeline
 from .exif import MetadataPipeline
-from .imaging import DecodedImage, PixelImage, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
+from .imaging import DecodedImage, PixelImage, decode_original_pixels, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
 from .workspace import WorkspaceRequest, WorkspaceState
 
 
 THUMB_SIZE = 256
+# A non-preview decode key: the complete source used by the 100% inspector.
+ORIGINAL_SIZE = 0
 CARD_HARD_MIN_WIDTH = 96
 CARD_TARGET_WIDTH = 200
 CARD_MAX_WIDTH = 280
@@ -107,11 +112,12 @@ FOMANTIC_ICON_CODES = {
     "sort": "\uf160", "search": "\uf002", "star": "\uf005", "ban": "\uf05e",
     "chevron-down": "\uf078", "chevron-up": "\uf077", "bookmark": "\uf02e",
     "step-forward": "\uf051", "keyboard": "\uf11c", "folder": "\uf07c",
-    "filter": "\uf0b0", "lightbulb": "\uf0eb", "volume": "\uf028", "close": "\uf00d",
+    "filter": "\uf0b0", "lightbulb": "\uf0eb", "volume": "\uf028", "microphone": "\uf130", "close": "\uf00d",
     "plus": "\uf067", "trash": "\uf1f8",
     "expand": "\uf065", "zoom": "\uf00e", "zoom-out": "\uf010", "play": "\uf04b", "pause": "\uf04c", "film": "\uf008",
     "cloud": "\uf0c2", "sign-out": "\uf08b", "lock": "\uf023", "sync": "\uf021",
     "download": "\uf56d", "eye": "\uf06e", "stop": "\uf04d",
+    "cog": "\uf013",
 }
 FOMANTIC_ICON_FAMILY = ""
 
@@ -122,6 +128,7 @@ class DecodeBridge(QObject):
     cacheLoaded = Signal(int, object)
     directoryScanned = Signal(object, Path, object)
     metadataUpdated = Signal(object)
+    audioUpdated = Signal(object)
 
 
 class VideoThumbnailer(QObject):
@@ -252,6 +259,8 @@ class PhotoGrid(QListWidget):
     viewportChanged = Signal()
     cardSizeChanged = Signal(int)
     seriesToggleRequested = Signal(Path)
+    audioRequested = Signal(Path)
+    audioHoverChanged = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -267,6 +276,9 @@ class PhotoGrid(QListWidget):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.card_size = 1
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
+        self._hovered_audio_path: Path | None = None
         # Adjacent columns can differ by one pixel so their total always equals
         # the viewport width.  A uniform grid cannot represent that remainder.
         self.setUniformItemSizes(False)
@@ -299,6 +311,14 @@ class PhotoGrid(QListWidget):
             if item is not None:
                 series = item.data(SERIES_ROLE) or {}
                 rect = self.visualItemRect(item)
+                detail = item.data(DETAIL_ROLE) or {}
+                audio_badge = self._audio_badge_rect(rect)
+                if detail.get("audio_comment_path") and audio_badge.contains(event.position().toPoint()):
+                    value = item.data(Qt.ItemDataRole.UserRole)
+                    if value:
+                        self.audioRequested.emit(Path(value))
+                        event.accept()
+                        return
                 badge = QRect(rect.right() - 36, rect.top() + 4, 32, 12)
                 if series.get("count", 0) > 1 and badge.contains(event.position().toPoint()):
                     value = item.data(Qt.ItemDataRole.UserRole)
@@ -307,6 +327,38 @@ class PhotoGrid(QListWidget):
                         event.accept()
                         return
         super().mouseReleaseEvent(event)
+
+    @staticmethod
+    def _audio_badge_rect(rect: QRect) -> QRect:
+        return QRect(rect.left() + 7, rect.bottom() - 43, 22, 22)
+
+    def _update_audio_hover(self, position: QPoint) -> None:
+        item = self.itemAt(position)
+        path = None
+        if item is not None and (item.data(DETAIL_ROLE) or {}).get("audio_comment_path"):
+            if self._audio_badge_rect(self.visualItemRect(item)).contains(position):
+                path = Path(item.data(Qt.ItemDataRole.UserRole))
+        if path != self._hovered_audio_path:
+            self._hovered_audio_path = path
+            self.audioHoverChanged.emit(path)
+
+    def viewportEvent(self, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.MouseMove:
+            self._update_audio_hover(event.position().toPoint())
+        elif event.type() == QEvent.Type.Leave and self._hovered_audio_path is not None:
+            self._hovered_audio_path = None
+            self.audioHoverChanged.emit(None)
+        return super().viewportEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        self._update_audio_hover(event.position().toPoint())
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._hovered_audio_path is not None:
+            self._hovered_audio_path = None
+            self.audioHoverChanged.emit(None)
+        super().leaveEvent(event)
 
     def _update_card_size(self) -> None:
         available = max(CARD_HARD_MIN_WIDTH, self.viewport().width())
@@ -359,6 +411,32 @@ class PhotoGrid(QListWidget):
         self._last_icon_size = QSize()
         self._update_card_size()
         self.cardSizeChanged.emit(self.card_size)
+
+
+class AudioToggleButton(QToolButton):
+    """Round full-view audio control with the web viewer's progress ring."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.progress = 0.0
+        self.setAutoRaise(True)
+
+    def set_progress(self, value: float) -> None:
+        self.progress = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        center = self.rect().center()
+        radius = min(self.width(), self.height()) / 2 - 3
+        painter.setPen(QPen(QColor(255, 255, 255, 70), 2))
+        painter.drawEllipse(QPointF(center), radius, radius)
+        painter.setPen(QPen(QColor(235, 238, 241), 3))
+        painter.drawArc(QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2), 90 * 16, -round(self.progress * 360 * 16))
+        icon = self.icon()
+        if not icon.isNull():
+            icon.paint(painter, self.rect().adjusted(10, 10, -10, -10), Qt.AlignmentFlag.AlignCenter)
 
 
 class PhotoCardDelegate(QStyledItemDelegate):
@@ -457,6 +535,21 @@ class PhotoCardDelegate(QStyledItemDelegate):
                 painter.setFont(icon_font)
                 painter.drawText(video_badge, Qt.AlignmentFlag.AlignCenter, FOMANTIC_ICON_CODES["film"] if FOMANTIC_ICON_FAMILY else "▶")
 
+            if detail.get("audio_comment_path"):
+                audio_badge = QRect(image_rect.left() + 5, image_rect.bottom() - 25, 22, 22)
+                painter.setBrush(QColor(243, 245, 247, 235))
+                painter.setPen(QPen(QColor(255, 255, 255, 220), 1))
+                painter.drawEllipse(audio_badge)
+                icon_font = QFont(FOMANTIC_ICON_FAMILY or option.font.family())
+                icon_font.setPixelSize(10)
+                painter.setFont(icon_font)
+                painter.setPen(QColor("#30363d"))
+                painter.drawText(
+                    audio_badge,
+                    Qt.AlignmentFlag.AlignCenter,
+                    FOMANTIC_ICON_CODES.get("microphone", "M") if FOMANTIC_ICON_FAMILY else "M",
+                )
+
             # A series is a temporary expanded context, not a normal row in
             # the timeline. Darken its preview as well as the card chrome so
             # the complete group remains recognisable in grids and strips.
@@ -488,8 +581,6 @@ class PhotoCardDelegate(QStyledItemDelegate):
             text_rect = QRect(caption_rect)
             text_rect.setWidth(max(0, caption_rect.width() - rating_width - 3))
             rating_rect = QRect(caption_rect.right() - rating_width + 1, caption_rect.top(), rating_width, caption_rect.height())
-        else:
-            text_rect = QRect(caption_rect)
         display_text = text
         font_metrics = painter.fontMetrics()
         if path_obj and path_obj.is_file() and font_metrics.horizontalAdvance(text) > text_rect.width():
@@ -948,11 +1039,14 @@ class FullView(QFrame):
     commentSubmitted = Signal(str)
     stripViewportChanged = Signal()
     videoPlaybackChanged = Signal(bool)
+    originalRequested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("fullView")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._pixmap: QPixmap | None = None
+        self._preview_pixmap: QPixmap | None = None
         self._path: Path | None = None
         self._is_fallback = False
         self._photo_generation = -1
@@ -962,7 +1056,10 @@ class FullView(QFrame):
 
         self.image_view = FullImageView()
         self.image_view.setObjectName("fullImageView")
+        self.image_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.image_view.faceClicked.connect(self._show_face_actions)
+        self.image_view.zoomPressed.connect(self._request_mouse_zoom)
+        self.image_view.zoomReleased.connect(self._release_mouse_zoom)
         self.video_widget = QVideoWidget()
         self.video_widget.setObjectName("fullVideoView")
         self.media_stack = QStackedWidget()
@@ -1061,6 +1158,61 @@ class FullView(QFrame):
         face_chip_layout.addWidget(self.face_filter_clear)
         self.face_filter_chip.hide()
 
+        # Mirrors the web viewer: a round microphone control opens a compact
+        # transcript/player panel over the lower-left corner of the photo.
+        self.audio_player = QMediaPlayer(self)
+        self.audio_output = QAudioOutput(self)
+        self.audio_output.setVolume(1.0)
+        self.audio_player.setAudioOutput(self.audio_output)
+        self.audio_player.positionChanged.connect(self._audio_position_changed)
+        self.audio_player.durationChanged.connect(self._audio_duration_changed)
+        self.audio_player.playbackStateChanged.connect(self._audio_state_changed)
+        self.audio_path = ""
+        self.audio_toggle = AudioToggleButton(self.media_panel)
+        self.audio_toggle.setObjectName("audioToggle")
+        self.audio_toggle.setFixedSize(48, 48)
+        self.audio_toggle.setIcon(_fomantic_icon("microphone", 22))
+        self.audio_toggle.setToolTip("Аудиокомментарий")
+        self.audio_toggle.clicked.connect(self._toggle_audio)
+        self.audio_toggle.hide()
+        self.audio_panel = QFrame(self.media_panel)
+        self.audio_panel.setObjectName("audioPanel")
+        audio_layout = QVBoxLayout(self.audio_panel)
+        audio_layout.setContentsMargins(10, 3, 10, 4)
+        audio_layout.setSpacing(3)
+        audio_header = QWidget()
+        audio_header.setObjectName("audioHeader")
+        audio_header.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        audio_header.setFixedHeight(20)
+        audio_header_layout = QHBoxLayout(audio_header)
+        audio_header_layout.setContentsMargins(0, 0, 0, 0)
+        audio_header_layout.setSpacing(8)
+        audio_title = QLabel("АУДИОКОММЕНТАРИЙ")
+        audio_title.setObjectName("audioPanelTitle")
+        self.audio_time = QLabel("0:00 / 0:00")
+        self.audio_time.setObjectName("audioTime")
+        audio_header_layout.addWidget(audio_title)
+        audio_header_layout.addStretch(1)
+        audio_header_layout.addWidget(self.audio_time)
+        audio_layout.addWidget(audio_header)
+        self.audio_seek = QSlider(Qt.Orientation.Horizontal)
+        self.audio_seek.setObjectName("audioSeek")
+        self.audio_seek.sliderMoved.connect(self.audio_player.setPosition)
+        self.audio_transcript = QLabel()
+        self.audio_transcript.setObjectName("audioTranscript")
+        self.audio_transcript.setWordWrap(True)
+        self.audio_transcript.setMaximumHeight(180)
+        audio_layout.addWidget(self.audio_transcript)
+        self.audio_to_comment = QToolButton()
+        self.audio_to_comment.setObjectName("audioToComment")
+        self.audio_to_comment.setText("В комментарий")
+        self.audio_to_comment.setIcon(_fomantic_icon("send", 12))
+        self.audio_to_comment.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.audio_to_comment.clicked.connect(self._copy_audio_to_comment)
+        audio_layout.addWidget(self.audio_to_comment, 0, Qt.AlignmentFlag.AlignLeft)
+        self.audio_panel.setFixedWidth(360)
+        self.audio_panel.hide()
+
         strip_header = QWidget()
         strip_header.setObjectName("stripHeader")
         strip_header_layout = QHBoxLayout(strip_header)
@@ -1118,6 +1270,13 @@ class FullView(QFrame):
         layout.setSpacing(0)
         layout.addWidget(stage, 1)
         layout.addWidget(self.strip_panel)
+        # The full-view frame often hands focus to a child control (the image,
+        # strip, or metadata bar). Keep Z available throughout that subtree.
+        self.zoom_action = QAction(self)
+        self.zoom_action.setShortcut(QKeySequence("Z"))
+        self.zoom_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.zoom_action.triggered.connect(self._toggle_zoom)
+        self.addAction(self.zoom_action)
 
     def toggle_strip(self) -> None:
         visible = self.photo_strip.isVisible()
@@ -1135,6 +1294,10 @@ class FullView(QFrame):
             return
         self.video_player.stop()
         self.video_play_button.setIcon(_fomantic_icon("play", 12))
+
+    def stop_audio(self) -> None:
+        self.audio_player.stop()
+        self.audio_panel.hide()
 
     def set_quick_mark(self, kind: str, value: object) -> None:
         self.meta_bar.set_quick_mark(kind, value)
@@ -1243,6 +1406,7 @@ class FullView(QFrame):
 
     def set_metadata(self, detail: dict, paths: tuple[Path, ...] = ()) -> None:
         self.meta_bar.set_metadata(detail)
+        self._set_audio_detail(detail)
         for path in paths or ((self._path,) if self._path is not None else ()):
             self.photo_strip.update_details(path, detail)
             self.series_strip.update_details(path, detail)
@@ -1274,6 +1438,8 @@ class FullView(QFrame):
         self.series_down.setEnabled(0 <= row < len(self._series_paths) - 1)
 
     def set_image(self, decoded: DecodedImage, *, fallback: bool = False) -> None:
+        if self._path != decoded.path:
+            self.stop_audio()
         self.video_player.stop()
         self._is_video = False
         self.video_controls.hide()
@@ -1281,12 +1447,19 @@ class FullView(QFrame):
         self._path = decoded.path
         self._is_fallback = fallback
         self._pixmap = QPixmap.fromImage(decoded.image)
+        self._preview_pixmap = self._pixmap
         suffix = "  -  preview" if fallback else ""
         self.info_label.setText(f"{decoded.path.name}  ·  {decoded.width} × {decoded.height}{suffix}")
+        # A late screen-sized decode must not replace an active original.
+        if self.image_view.zoom_requested:
+            return
         self.image_view.set_pixmap(self._pixmap, smooth=False)
         self._schedule_smooth_fit()
 
     def set_video(self, path: Path, preview: QImage | None = None) -> None:
+        if self._path != path:
+            self.stop_audio()
+        self._reset_zoom()
         self._path = path
         self._is_video = True
         self._is_fallback = True
@@ -1354,6 +1527,38 @@ class FullView(QFrame):
     def has_image(self) -> bool:
         return self._pixmap is not None and not self._pixmap.isNull()
 
+    def show_original(self, decoded: DecodedImage) -> None:
+        """Enter 100% only after the original source has finished decoding."""
+        if decoded.path != self._path or not self.image_view.zoom_requested:
+            return
+        self.image_view.set_original_pixmap(QPixmap.fromImage(decoded.image))
+
+    def _request_mouse_zoom(self, position: object) -> None:
+        if self._is_video or self.image_view.zoom_requested:
+            return
+        self.image_view.request_zoom(position, temporary=True)
+        self.originalRequested.emit(position)
+
+    def _release_mouse_zoom(self) -> None:
+        if self.image_view.temporary_zoom:
+            self._reset_zoom()
+
+    def _toggle_zoom(self) -> None:
+        if self._is_video:
+            return
+        if self.image_view.zoom_requested:
+            self._reset_zoom()
+            return
+        self.image_view.request_zoom(None, temporary=False)
+        self.originalRequested.emit(None)
+
+    def _reset_zoom(self) -> None:
+        self.image_view.reset_zoom(self._preview_pixmap)
+
+    def cancel_zoom(self) -> None:
+        """Discard a pending/active inspection before changing photos."""
+        self._reset_zoom()
+
     def _position_video_controls(self) -> None:
         host = self.video_controls.parentWidget()
         if host is not self.media_panel and host is not self.video_widget:
@@ -1366,9 +1571,80 @@ class FullView(QFrame):
         )
         self.video_controls.raise_()
 
+    def _set_audio_detail(self, detail: dict) -> None:
+        path = str(detail.get("audio_comment_path") or "")
+        transcript = str(detail.get("audio_comment_transcript") or "").strip()
+        available = bool(path and Path(path).is_file())
+        self.audio_toggle.setVisible(available)
+        if not available:
+            self.stop_audio()
+            self.audio_path = ""
+            return
+        self.audio_path = path
+        self.audio_transcript.setText(transcript or "Речь распознана, но текст пустой.")
+        self.audio_to_comment.setVisible(bool(transcript))
+        self._position_audio_controls()
+
+    def _toggle_audio(self) -> None:
+        if not self.audio_path:
+            return
+        if self.audio_player.source().toLocalFile() != self.audio_path:
+            self.audio_player.setSource(QUrl.fromLocalFile(self.audio_path))
+        self.audio_panel.setVisible(True)
+        if self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.audio_player.stop()
+            self.audio_player.setPosition(0)
+            self.audio_toggle.set_progress(0)
+        else:
+            self.audio_player.setPosition(0)
+            self.audio_player.play()
+        self._position_audio_controls()
+
+    def _audio_position_changed(self, position: int) -> None:
+        if not self.audio_seek.isSliderDown():
+            self.audio_seek.setValue(position)
+        self._update_audio_time(position, self.audio_player.duration())
+        duration = self.audio_player.duration()
+        self.audio_toggle.set_progress(position / duration if duration > 0 else 0)
+
+    def _audio_duration_changed(self, duration: int) -> None:
+        self.audio_seek.setRange(0, max(0, duration))
+        self._update_audio_time(self.audio_player.position(), duration)
+
+    def _audio_state_changed(self, state) -> None:
+        playing = state == QMediaPlayer.PlaybackState.PlayingState
+        self.audio_toggle.setIcon(_fomantic_icon("pause" if playing else "microphone", 22))
+        if not playing and self.audio_player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
+            self.audio_toggle.set_progress(1.0)
+
+    def _update_audio_time(self, position: int, duration: int) -> None:
+        def fmt(value: int) -> str:
+            minutes, seconds = divmod(max(0, value // 1000), 60)
+            return f"{minutes}:{seconds:02d}"
+        self.audio_time.setText(f"{fmt(position)} / {fmt(duration)}")
+
+    def _copy_audio_to_comment(self) -> None:
+        transcript = self.audio_transcript.text().strip()
+        if transcript and transcript != "Речь распознана, но текст пустой.":
+            comment = self.full_comment_edit.text().strip()
+            value = transcript if not comment else f"{comment}\n{transcript}"
+            self.full_comment_edit.setText(value)
+            self.commentSubmitted.emit(value)
+
+    def _position_audio_controls(self) -> None:
+        if not self.audio_toggle.isVisible():
+            return
+        self.audio_toggle.move(12, max(12, self.media_panel.height() - 60))
+        self.audio_panel.setFixedWidth(min(360, max(220, self.media_panel.width() - 92)))
+        self.audio_panel.adjustSize()
+        self.audio_panel.move(68, max(12, self.media_panel.height() - self.audio_panel.height() - 12))
+        self.audio_toggle.raise_()
+        self.audio_panel.raise_()
+
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.Resize and obj is self.video_controls.parentWidget():
             self._position_video_controls()
+            self._position_audio_controls()
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -1376,6 +1652,7 @@ class FullView(QFrame):
         self.image_view.update()
         QTimer.singleShot(0, self._position_video_controls)
         QTimer.singleShot(0, self._position_face_filter_chip)
+        QTimer.singleShot(0, self._position_audio_controls)
 
     def _position_face_filter_chip(self) -> None:
         if not self.face_filter_chip.isVisible():
@@ -1390,12 +1667,20 @@ class FullView(QFrame):
         key = event.key()
         if key in {Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter}:
             self.exitRequested.emit()
+        elif key == Qt.Key.Key_Z:
+            self._toggle_zoom()
+        elif self.image_view.zoomed and key in {
+            Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down,
+        }:
+            self.image_view.pan_key(key)
         elif key == Qt.Key.Key_Down and self.series_panel.isVisible():
             self._move_series(1)
         elif key == Qt.Key.Key_Up and self.series_panel.isVisible():
             self._move_series(-1)
         elif key == Qt.Key.Key_Space and self._is_video:
             self._toggle_video_playback()
+        elif key == Qt.Key.Key_Space and self.audio_path:
+            self._toggle_audio()
         elif key in {Qt.Key.Key_Right, Qt.Key.Key_Space}:
             self.nextRequested.emit()
         elif key in {Qt.Key.Key_Left, Qt.Key.Key_Backspace}:
@@ -1425,6 +1710,8 @@ class FullView(QFrame):
 
 class FullImageView(QWidget):
     faceClicked = Signal(object, QPoint)
+    zoomPressed = Signal(object)
+    zoomReleased = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -1432,13 +1719,108 @@ class FullImageView(QWidget):
         self._smooth = False
         self._faces: list[dict] = []
         self._hovered_face = -1
+        self._zoomed = False
+        self._zoom_requested = False
+        self._temporary_zoom = False
+        self._zoom_anchor: QPointF | None = None
+        self._view_center = QPointF(0.5, 0.5)
+        self._drag_position: QPointF | None = None
+        self._drag_center: QPointF | None = None
+        self._spinner_angle = 0
+        self._spinner_timer = QTimer(self)
+        self._spinner_timer.setInterval(50)
+        self._spinner_timer.timeout.connect(self._advance_spinner)
         self.setMinimumSize(1, 1)
         self.setAutoFillBackground(False)
         self.setMouseTracking(True)
+        self._set_zoom_cursor()
 
     def set_pixmap(self, pixmap: QPixmap, *, smooth: bool) -> None:
         self._pixmap = pixmap
         self._smooth = smooth
+        self.update()
+
+    @property
+    def zoomed(self) -> bool:
+        return self._zoomed
+
+    @property
+    def zoom_requested(self) -> bool:
+        return self._zoom_requested
+
+    @property
+    def temporary_zoom(self) -> bool:
+        return self._temporary_zoom
+
+    def request_zoom(self, position: object, *, temporary: bool) -> None:
+        self._zoom_requested = True
+        self._temporary_zoom = temporary
+        self._zoom_anchor = position if isinstance(position, QPointF) else None
+        self._spinner_timer.start()
+        self.setCursor(Qt.CursorShape.BlankCursor)
+        self.update()
+
+    def set_original_pixmap(self, pixmap: QPixmap) -> None:
+        if pixmap.isNull() or not self._zoom_requested:
+            return
+        self._pixmap = pixmap
+        self._zoomed = True
+        self._spinner_timer.stop()
+        self._view_center = self._zoom_focus()
+        self._clamp_view_center()
+        # A held mouse may have started while the original was loading. Make
+        # that exact point the origin now, after the face/cursor focus is set.
+        if self._drag_position is not None:
+            self._drag_center = QPointF(self._view_center)
+        self.update()
+
+    def reset_zoom(self, preview: QPixmap | None) -> None:
+        self._zoomed = self._zoom_requested = self._temporary_zoom = False
+        self._zoom_anchor = self._drag_position = self._drag_center = None
+        self._spinner_timer.stop()
+        if preview is not None and not preview.isNull():
+            self._pixmap = preview
+        self._set_zoom_cursor()
+        self.update()
+
+    def _set_zoom_cursor(self) -> None:
+        self.setCursor(QCursor(_fomantic_icon("zoom", 20).pixmap(20, 20), 10, 10))
+
+    def _advance_spinner(self) -> None:
+        self._spinner_angle = (self._spinner_angle + 24) % 360
+        self.update()
+
+    def _zoom_focus(self) -> QPointF:
+        faces = []
+        for face in self._faces:
+            bbox = face.get("bbox") or {}
+            try:
+                faces.append((float(bbox["width"]) * float(bbox["height"]), bbox))
+            except (KeyError, TypeError, ValueError):
+                pass
+        if faces:
+            _area, bbox = max(faces, key=lambda item: item[0])
+            return QPointF(float(bbox["x"]) + float(bbox["width"]) / 2, float(bbox["y"]) + float(bbox["height"]) / 2)
+        if self._zoom_anchor is not None and self._pixmap is not None:
+            rect = _fit_rect(self._pixmap.size(), self.size())
+            if not rect.isEmpty() and rect.contains(self._zoom_anchor.toPoint()):
+                return QPointF((self._zoom_anchor.x() - rect.left()) / rect.width(), (self._zoom_anchor.y() - rect.top()) / rect.height())
+        return QPointF(0.5, 0.5)
+
+    def _clamp_view_center(self) -> None:
+        if self._pixmap is None or self._pixmap.isNull():
+            return
+        half_x = min(0.5, self.width() / max(1, self._pixmap.width()) / 2)
+        half_y = min(0.5, self.height() / max(1, self._pixmap.height()) / 2)
+        self._view_center.setX(min(1 - half_x, max(half_x, self._view_center.x())))
+        self._view_center.setY(min(1 - half_y, max(half_y, self._view_center.y())))
+
+    def pan_key(self, key) -> None:
+        delta = {Qt.Key.Key_Left: (-.05, 0), Qt.Key.Key_Right: (.05, 0), Qt.Key.Key_Up: (0, -.05), Qt.Key.Key_Down: (0, .05)}.get(key)
+        if not self._zoomed or delta is None:
+            return
+        self._view_center += QPointF(*delta)
+        self._clamp_view_center()
         self.update()
 
     def set_smooth(self, smooth: bool) -> None:
@@ -1453,10 +1835,24 @@ class FullImageView(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._zoomed and self._drag_position is not None and self._pixmap is not None:
+            # Map the pointer's displacement from the grab point to the whole
+            # scene, while keeping the originally focused point under it.
+            # This avoids a jump on the first tiny movement and never needs a
+            # second grab to reach the edge of the image.
+            start = self._drag_center or self._view_center
+            self._view_center = QPointF(
+                start.x() - (event.position().x() - self._drag_position.x()) / max(1, self.width()),
+                start.y() - (event.position().y() - self._drag_position.y()) / max(1, self.height()),
+            )
+            self._clamp_view_center()
+            self.update()
+            event.accept()
+            return
         hit = self._face_at(event.position())
         if hit != self._hovered_face:
             self._hovered_face = hit
-            self.setCursor(Qt.CursorShape.PointingHandCursor if hit >= 0 else Qt.CursorShape.ArrowCursor)
+            self._set_zoom_cursor()
             self.update()
         super().mouseMoveEvent(event)
 
@@ -1469,6 +1865,11 @@ class FullImageView(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_position = None
+            if self._temporary_zoom:
+                self.zoomReleased.emit()
+                event.accept()
+                return
             hit = self._face_at(event.position())
             if hit >= 0:
                 self.faceClicked.emit(self._faces[hit], event.position().toPoint())
@@ -1476,10 +1877,25 @@ class FullImageView(QWidget):
                 return
         super().mouseReleaseEvent(event)
 
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self._zoomed:
+                self._drag_position = event.position()
+                self._drag_center = QPointF(self._view_center)
+            else:
+                # Keep this point while the source is decoding. If the user
+                # keeps holding the button, the first later move pans at once.
+                self._drag_position = event.position()
+                self._drag_center = None
+                self.zoomPressed.emit(event.position())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
     def _face_at(self, position) -> int:
         if self._pixmap is None or self._pixmap.isNull():
             return -1
-        image_rect = _fit_rect(self._pixmap.size(), self.size())
+        image_rect = self._image_rect()
         for index, face in enumerate(self._faces):
             rect = self._face_rect(face, image_rect)
             if rect.contains(position):
@@ -1545,8 +1961,15 @@ class FullImageView(QWidget):
             return
         if self._smooth:
             painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        target = _fit_rect(self._pixmap.size(), self.size())
+        target = self._image_rect()
         painter.drawPixmap(target, self._pixmap)
+        if self._zoom_requested and not self._zoomed:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            spinner = QRect(self.rect().center().x() - 16, self.rect().center().y() - 16, 32, 32)
+            pen = QPen(QColor(235, 235, 235), 3)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawArc(spinner, self._spinner_angle * 16, 250 * 16)
         if 0 <= self._hovered_face < len(self._faces):
             face_rect = self._face_rect(self._faces[self._hovered_face], target)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -1554,6 +1977,18 @@ class FullImageView(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(face_rect, 4, 4)
         painter.end()
+
+    def _image_rect(self) -> QRect:
+        if self._pixmap is None or self._pixmap.isNull():
+            return QRect()
+        if not self._zoomed:
+            return _fit_rect(self._pixmap.size(), self.size())
+        self._clamp_view_center()
+        return QRect(
+            round(self.width() / 2 - self._view_center.x() * self._pixmap.width()),
+            round(self.height() / 2 - self._view_center.y() * self._pixmap.height()),
+            self._pixmap.width(), self._pixmap.height(),
+        )
 
 
 class ChromeTitleBar(QFrame):
@@ -1582,6 +2017,115 @@ class ChromeTitleBar(QFrame):
         if event.button() == Qt.MouseButton.LeftButton:
             self.window.showNormal() if self.window.isMaximized() else self.window.showMaximized()
         super().mouseDoubleClickEvent(event)
+
+
+class SettingsCheckBox(QCheckBox):
+    """A settings checkbox with an explicit check mark in the selected state."""
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not self.isChecked():
+            return
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        indicator = self.style().subElementRect(QStyle.SubElement.SE_CheckBoxIndicator, option, self)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#ffffff"), 1.8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(indicator.left() + 3, indicator.center().y(), indicator.left() + 7, indicator.bottom() - 4)
+        painter.drawLine(indicator.left() + 7, indicator.bottom() - 4, indicator.right() - 3, indicator.top() + 4)
+        painter.end()
+
+class SettingsDialog(QDialog):
+    """Application settings presented in the same visual language as the shell."""
+
+    def __init__(self, settings: QSettings, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.setObjectName("settingsDialog")
+        self.setWindowTitle("Настройки")
+        self.setModal(True)
+        self.resize(560, 410)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setSpacing(16)
+
+        title = QLabel("Настройки")
+        title.setObjectName("settingsDialogTitle")
+        layout.addWidget(title)
+
+        tabs = QTabWidget()
+        tabs.setObjectName("settingsTabs")
+        tabs.addTab(self._behavior_tab(), "Поведение")
+        tabs.addTab(self._placeholder_tab("Интерфейс", "Параметры внешнего вида появятся здесь."), "Интерфейс")
+        tabs.addTab(self._placeholder_tab("О приложении", "RAWww — рабочее пространство для просмотра и отбора материалов."), "О приложении")
+        layout.addWidget(tabs, 1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Отмена")
+        cancel.setObjectName("settingsSecondaryButton")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        apply = QPushButton("Готово")
+        apply.setObjectName("settingsPrimaryButton")
+        apply.clicked.connect(self._save)
+        buttons.addWidget(apply)
+        layout.addLayout(buttons)
+
+    def _behavior_tab(self) -> QWidget:
+        tab = QWidget()
+        tab.setObjectName("settingsTabPage")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(18, 20, 18, 18)
+        layout.setSpacing(8)
+        heading = QLabel("Рабочее пространство")
+        heading.setObjectName("settingsSectionTitle")
+        layout.addWidget(heading)
+        hint = QLabel("Выберите, что RAWww будет восстанавливать при следующем запуске.")
+        hint.setObjectName("settingsHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.restore_workspaces = SettingsCheckBox("Восстанавливать открытые вкладки")
+        self.restore_workspaces.setChecked(self.settings.value("restore_workspaces", True, bool))
+        self.restore_workspaces.toggled.connect(self._update_behavior_state)
+        layout.addWidget(self.restore_workspaces)
+        self.restore_active_workspace = SettingsCheckBox("Возвращаться к активной вкладке")
+        self.restore_active_workspace.setChecked(self.settings.value("restore_active_workspace", True, bool))
+        layout.addWidget(self.restore_active_workspace)
+        layout.addStretch(1)
+        self._update_behavior_state(self.restore_workspaces.isChecked())
+        return tab
+
+    @staticmethod
+    def _placeholder_tab(title_text: str, description: str) -> QWidget:
+        tab = QWidget()
+        tab.setObjectName("settingsTabPage")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(18, 20, 18, 18)
+        layout.setSpacing(8)
+        title = QLabel(title_text)
+        title.setObjectName("settingsSectionTitle")
+        layout.addWidget(title)
+        hint = QLabel(description)
+        hint.setObjectName("settingsHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch(1)
+        return tab
+
+    def _update_behavior_state(self, enabled: bool) -> None:
+        self.restore_active_workspace.setEnabled(enabled)
+
+    def _save(self) -> None:
+        self.settings.setValue("restore_workspaces", self.restore_workspaces.isChecked())
+        self.settings.setValue("restore_active_workspace", self.restore_active_workspace.isChecked())
+        self.accept()
 
 
 class ChromeTabBar(QTabBar):
@@ -1808,6 +2352,7 @@ class Workspace(QMainWindow):
         self.bridge.cacheLoaded.connect(self._on_cache_loaded)
         self.bridge.directoryScanned.connect(self._on_directory_scanned)
         self.bridge.metadataUpdated.connect(self._on_metadata_updated)
+        self.bridge.audioUpdated.connect(self._on_audio_updated)
         self.video_thumbnailer = VideoThumbnailer(self)
         self.video_thumbnailer.previewReady.connect(self._on_video_preview)
         self.pending: dict[tuple[Path, int], Future] = {}
@@ -1924,6 +2469,7 @@ class Workspace(QMainWindow):
         self._pending_folder_grid_context: tuple[list[str], int] | None = None
         self.folder_cache: FolderCache | None = None
         self.ai_pipeline = AiPipeline()
+        self.audio_pipeline = AudioTranscriptionPipeline()
         self.metadata_pipeline = MetadataPipeline()
         self.ai_progress_total = 0
         self.preview_progress_total = 0
@@ -1945,6 +2491,7 @@ class Workspace(QMainWindow):
         self.grid_page = self._build_grid_page()
         self.full_view = FullView()
         self.full_view.exitRequested.connect(self.show_grid)
+        self.full_view.originalRequested.connect(self._request_original_zoom)
         self.full_view.nextRequested.connect(self.next_image)
         self.full_view.previousRequested.connect(self.previous_image)
         self.full_view.pathRequested.connect(self.open_full)
@@ -2005,6 +2552,7 @@ class Workspace(QMainWindow):
 
         self._create_actions()
         QTimer.singleShot(0, lambda: self.load_directory(self.current_dir))
+        QTimer.singleShot(0, self._focus_grid_panel)
         QTimer.singleShot(0, self._restore_face_filter_chip)
 
     def closeEvent(self, event) -> None:  # noqa: N802
@@ -2041,6 +2589,7 @@ class Workspace(QMainWindow):
         self.cache_flush_executor.shutdown(wait=False, cancel_futures=False)
         self.metadata_pipeline.shutdown()
         self.ai_pipeline.shutdown()
+        self.audio_pipeline.shutdown()
         super().closeEvent(event)
 
     def set_workspace_active(self, active: bool) -> None:
@@ -2162,11 +2711,30 @@ class Workspace(QMainWindow):
         self.grid._update_card_size()
         self.grid.cardSizeChanged.connect(self._remember_thumbnail_size)
         self.grid.openRequested.connect(self.open_full)
+        self.grid.audioRequested.connect(self._open_grid_audio)
+        self.grid.audioHoverChanged.connect(self._set_grid_audio_hover)
         self.grid.seriesToggleRequested.connect(self._toggle_grid_series)
         self.grid.currentItemChanged.connect(self._grid_current_item_changed)
         self.grid.itemSelectionChanged.connect(self._selection_changed)
         self.grid.verticalScrollBar().valueChanged.connect(self._schedule_visible_thumb_priority)
         self.grid.viewportChanged.connect(self._schedule_visible_thumb_priority)
+        self.grid_audio_player = QMediaPlayer(self)
+        self.grid_audio_output = QAudioOutput(self)
+        self.grid_audio_player.setAudioOutput(self.grid_audio_output)
+        self.grid_audio_path = ""
+        self.grid_audio_popup = QFrame(self.grid.viewport())
+        self.grid_audio_popup.setObjectName("gridAudioPopup")
+        popup_layout = QVBoxLayout(self.grid_audio_popup)
+        popup_layout.setContentsMargins(9, 3, 9, 4)
+        popup_layout.setSpacing(3)
+        popup_title = QLabel("АУДИОКОММЕНТАРИЙ")
+        popup_title.setObjectName("gridAudioPopupTitle")
+        popup_layout.addWidget(popup_title)
+        self.grid_audio_transcript = QLabel()
+        self.grid_audio_transcript.setObjectName("gridAudioTranscript")
+        self.grid_audio_transcript.setWordWrap(True)
+        popup_layout.addWidget(self.grid_audio_transcript)
+        self.grid_audio_popup.hide()
 
         splitter = QSplitter()
         sidebar = QWidget()
@@ -4179,6 +4747,24 @@ class Workspace(QMainWindow):
             if self.stack.currentWidget() is self.grid_page and hasattr(self, "meta_bar"):
                 self.meta_bar.set_metadata(detail)
 
+    def _on_audio_updated(self, results: object) -> None:
+        """Expose a newly localised transcript without reloading the folder."""
+        if self.closing or not self.cache_ready or not isinstance(results, list):
+            return
+        for value in results:
+            if not isinstance(value, tuple) or len(value) != 3:
+                continue
+            path_text, audio_name, transcript = value
+            path = Path(path_text)
+            detail = self.photo_details.setdefault(path.name, {})
+            detail.update(audio_comment_path=str(self.current_dir / audio_name), audio_comment_transcript=transcript)
+            item = self.items_by_path.get(path)
+            if item is not None:
+                item.setData(DETAIL_ROLE, detail)
+                self.grid.update(self.grid.visualItemRect(item))
+            if path == self.current_path and self.stack.currentWidget() is self.full_view:
+                self.full_view.set_metadata(detail, (path,))
+
     @staticmethod
     def _camera_filter_key(detail: dict) -> str | None:
         camera = detail.get("camera") or {}
@@ -4385,6 +4971,12 @@ class Workspace(QMainWindow):
                 [path for path in self.view_paths if is_supported_image(path)],
                 self.folder_cache,
                 self.bridge.metadataUpdated.emit,
+            )
+        if self.folder_cache is not None:
+            self.audio_pipeline.scan(
+                [path for path in self.view_paths if is_supported_image(path)],
+                self.folder_cache,
+                self.bridge.audioUpdated.emit,
             )
         self.thumb_index = 0
         self._schedule_visible_thumb_priority()
@@ -4994,8 +5586,8 @@ class Workspace(QMainWindow):
         else:
             executor = self._background_decode_executor()
         try:
-            decoder = decode_pixels if full_priority else decode_thumbnail_pixels
-            future = executor.submit(decoder, path, max_size)
+            decoder = decode_original_pixels if max_size == ORIGINAL_SIZE else (decode_pixels if full_priority else decode_thumbnail_pixels)
+            future = executor.submit(decoder, path) if max_size == ORIGINAL_SIZE else executor.submit(decoder, path, max_size)
         except RuntimeError:
             # Shutdown may begin between the guard above and submit because
             # cache callbacks execute on worker threads.
@@ -5063,6 +5655,10 @@ class Workspace(QMainWindow):
         self.visible_thumb_pending.discard((decoded.path, max_size))
         if not self.workspace_active:
             return
+        if max_size == ORIGINAL_SIZE:
+            if self.stack.currentWidget() is self.full_view and decoded.path == self.current_path:
+                self.full_view.show_original(decoded)
+            return
         item = self.items_by_path.get(decoded.path)
         if max_size == THUMB_SIZE:
             self._thumbnail_cache_put(decoded.path, decoded.image)
@@ -5122,6 +5718,40 @@ class Workspace(QMainWindow):
         if item:
             self.open_full(Path(item.data(Qt.ItemDataRole.UserRole)))
 
+    def _open_grid_audio(self, path: Path) -> None:
+        """The grid microphone follows the web viewer: open and play at once."""
+        self.open_full(path)
+        QTimer.singleShot(0, self.full_view._toggle_audio)
+
+    def _set_grid_audio_hover(self, value: object) -> None:
+        path = value if isinstance(value, Path) else None
+        if path is None:
+            self.grid_audio_player.stop()
+            self.grid_audio_popup.hide()
+            return
+        detail = self.photo_details.get(path.name, {})
+        audio_path = str(detail.get("audio_comment_path") or "")
+        if not audio_path or not Path(audio_path).is_file():
+            return
+        self.grid_audio_transcript.setText(
+            str(detail.get("audio_comment_transcript") or "").strip() or "Речь распознана, но текст пустой."
+        )
+        item = self.items_by_path.get(path)
+        if item is not None:
+            card = self.grid.visualItemRect(item)
+            available_width = max(180, self.grid.viewport().width() - card.left() - 42)
+            self.grid_audio_popup.setFixedWidth(min(360, available_width))
+            self.grid_audio_popup.adjustSize()
+            x = min(self.grid.viewport().width() - self.grid_audio_popup.width() - 6, card.left() + 31)
+            y = max(6, card.bottom() - self.grid_audio_popup.height() - 8)
+            self.grid_audio_popup.move(max(6, x), y)
+        self.grid_audio_popup.show()
+        self.grid_audio_popup.raise_()
+        if self.grid_audio_path != audio_path:
+            self.grid_audio_path = audio_path
+            self.grid_audio_player.setSource(QUrl.fromLocalFile(audio_path))
+        self.grid_audio_player.play()
+
     def _grid_current_item_changed(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
         if current is None:
             self.pending_grid_full_request = None
@@ -5147,7 +5777,10 @@ class Workspace(QMainWindow):
         now = monotonic()
         rapid_navigation = now - self.last_navigation_at < 0.14
         self.last_navigation_at = now
+        if self.current_path != path:
+            self.full_view.stop_audio()
         self.current_path = path
+        self.full_view.cancel_zoom()
         self.workspace_state.current_photo = path
         self.workspace_state.thumbnail_size = self.grid.card_size
         self.full_view.set_faces(self.photo_details.get(path.name, {}).get("faces") or [])
@@ -5187,9 +5820,23 @@ class Workspace(QMainWindow):
             self._submit_decode(path, full_size, full_priority=True)
             self._preload_neighbors(path)
 
+    def _request_original_zoom(self, _position: object) -> None:
+        """Load the source only on demand; repeated 100% views reuse RAM."""
+        if self.current_path is None or is_supported_video(self.current_path):
+            return
+        # A 100% inspection is explicitly user-driven: do not let queued
+        # thumbnails or screen-sized neighbour decodes delay it.
+        self._suspend_thumbnail_work()
+        original_key = (self.current_path, ORIGINAL_SIZE)
+        for key, future in list(self.pending.items()):
+            if key != original_key and key[1] != THUMB_SIZE:
+                future.cancel()
+        self._submit_decode(self.current_path, ORIGINAL_SIZE, full_priority=True)
+
     def show_grid(self) -> None:
         # Leaving full view must not keep a video playing in the background.
         self.full_view.stop_video()
+        self.full_view.stop_audio()
         self.stack.setCurrentWidget(self.grid_page)
         self._restore_grid_context()
         self._refresh_status_panel()
@@ -5527,6 +6174,12 @@ class Workspace(QMainWindow):
         self._trim_memory_cache()
 
     def _trim_memory_cache(self) -> None:
+        # Original frames are much larger than display previews. Keeping the
+        # active one is enough for a repeated Z press without risking a large
+        # accumulation while browsing.
+        original_keys = [key for key in self.memory_cache if key[1] == ORIGINAL_SIZE]
+        while len(original_keys) > 1:
+            self.memory_cache.pop(original_keys.pop(0), None)
         full_keys = [key for key in self.memory_cache if key[1] > THUMB_SIZE]
         while len(full_keys) > FULL_RAM_CACHE_LIMIT:
             self.memory_cache.pop(full_keys.pop(0), None)
@@ -5611,12 +6264,13 @@ class MainWindow(QMainWindow):
         add_tab.clicked.connect(self._add_workspace)
         title_layout.addWidget(add_tab)
         title_layout.addStretch(1)
-        settings = QToolButton()
-        settings.setObjectName("titleAction")
-        settings.setIcon(_chrome_icon("settings"))
-        settings.setIconSize(QSize(16, 16))
-        settings.setToolTip("Настройки")
-        title_layout.addWidget(settings)
+        settings_button = QToolButton()
+        settings_button.setObjectName("titleAction")
+        settings_button.setIcon(_fomantic_icon("cog", 18, "#c9c9c9"))
+        settings_button.setIconSize(QSize(18, 18))
+        settings_button.setToolTip("Настройки")
+        settings_button.clicked.connect(self._show_settings)
+        title_layout.addWidget(settings_button)
         for icon, tooltip, callback in (
             ("minimize", "Свернуть", self.showMinimized),
             ("maximize", "Развернуть", self._toggle_maximized),
@@ -5679,6 +6333,9 @@ class MainWindow(QMainWindow):
         previous_tab.setShortcut(QKeySequence("Ctrl+Left"))
         previous_tab.triggered.connect(lambda: self._select_relative_workspace(-1))
         self.addAction(previous_tab)
+
+    def _show_settings(self) -> None:
+        SettingsDialog(self.settings, self).exec()
 
     def _select_relative_workspace(self, step: int) -> None:
         count = self.tabs.count()
@@ -5766,6 +6423,9 @@ class MainWindow(QMainWindow):
         self.tabs.setFixedWidth(tab_width * self.tabs.count())
 
     def _restore_workspaces(self) -> None:
+        if not self.settings.value("restore_workspaces", True, bool):
+            self._add_workspace()
+            return
         stored = self.settings.value("open_workspaces", [], list)
         directories = stored if isinstance(stored, list) else [stored]
         for value in directories:
@@ -5782,7 +6442,7 @@ class MainWindow(QMainWindow):
             workspace = self.workspace_stack.widget(index)
             if isinstance(workspace, Workspace) and str(workspace.current_dir) in shotsync_paths:
                 workspace._activate_shotsync()
-        active = self.settings.value("active_workspace", 0, int)
+        active = self.settings.value("active_workspace", 0, int) if self.settings.value("restore_active_workspace", True, bool) else 0
         self.tabs.setCurrentIndex(max(0, min(active, self.tabs.count() - 1)))
 
     def _show_full_view(self, workspace: Workspace) -> None:
@@ -5925,6 +6585,93 @@ def apply_theme(app: QApplication) -> None:
         QToolButton#windowControl:hover {
             background: #303030;
         }
+        QDialog#settingsDialog {
+            background: #202020;
+            border: 1px solid #4a4a4a;
+        }
+        QLabel#settingsDialogTitle {
+            color: #f1f1f1;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        QTabWidget#settingsTabs::pane {
+            background: #292929;
+            border: 1px solid #3d3d3d;
+            border-top-left-radius: 0;
+            border-top-right-radius: 7px;
+            border-bottom-left-radius: 7px;
+            border-bottom-right-radius: 7px;
+            top: -1px;
+        }
+        QWidget#settingsTabPage {
+            background: #292929;
+        }
+        QTabWidget#settingsTabs QTabBar::tab {
+            background: #252525;
+            border: 1px solid #3a3a3a;
+            border-bottom: 0;
+            border-top-left-radius: 6px;
+            border-top-right-radius: 6px;
+            color: #969696;
+            min-width: 92px;
+            padding: 8px 13px;
+        }
+        QTabWidget#settingsTabs QTabBar::tab:selected {
+            background: #292929;
+            border-color: #4b4b4b;
+            border-bottom-color: #292929;
+            color: #f1f1f1;
+            margin-bottom: -1px;
+        }
+        QTabWidget#settingsTabs QTabBar::tab:hover:!selected {
+            background: #303030;
+            color: #d8d8d8;
+        }
+        QLabel#settingsSectionTitle {
+            color: #eeeeee;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        QLabel#settingsHint {
+            color: #9d9d9d;
+            font-size: 12px;
+            padding-bottom: 10px;
+        }
+        QDialog#settingsDialog QCheckBox {
+            color: #dddddd;
+            spacing: 9px;
+            min-height: 28px;
+        }
+        QDialog#settingsDialog QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 1px solid #676767;
+            border-radius: 3px;
+            background: #202020;
+        }
+        QDialog#settingsDialog QCheckBox::indicator:checked {
+            background: #3f6db5;
+            border-color: #79aaff;
+        }
+        QPushButton#settingsSecondaryButton, QPushButton#settingsPrimaryButton {
+            min-width: 88px;
+            min-height: 30px;
+            border-radius: 5px;
+            padding: 3px 12px;
+            font-weight: 600;
+        }
+        QPushButton#settingsSecondaryButton {
+            background: #2b2b2b;
+            border: 1px solid #4b4b4b;
+            color: #dddddd;
+        }
+        QPushButton#settingsSecondaryButton:hover { background: #363636; }
+        QPushButton#settingsPrimaryButton {
+            background: #315b92;
+            border: 1px solid #79aaff;
+            color: #ffffff;
+        }
+        QPushButton#settingsPrimaryButton:hover { background: #396bab; }
         QTreeView, QListWidget {
             background: #252525;
             border: 1px solid #161616;
@@ -6576,6 +7323,34 @@ def apply_theme(app: QApplication) -> None:
             border: 1px solid #121212;
             border-radius: 7px;
         }
+        QToolButton#audioToggle {
+            border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 24px;
+            background: #161616;
+            color: #f4f4f5;
+        }
+        QToolButton#audioToggle:hover { background: #303030; }
+        QFrame#audioPanel {
+            background: #171717;
+            border: 1px solid #454545;
+            border-radius: 12px;
+        }
+        QWidget#audioHeader, QLabel#audioPanelTitle, QLabel#audioTime { background: transparent; }
+        QLabel#audioPanelTitle { color: #eef2f4; font-size: 10px; font-weight: 700; padding: 0; margin: 0; }
+        QLabel#audioTime { color: #cfd6dc; font-size: 10px; padding: 0; margin: -2px 0; }
+        QLabel#audioTranscript { background: rgba(255,255,255,0.08); color: #d9e1e6; font-size: 11px; padding: 14px 10px; border-radius: 6px; }
+        QSlider#audioSeek::groove:horizontal { height: 4px; background: #111; border-radius: 2px; }
+        QSlider#audioSeek::handle:horizontal { width: 10px; margin: -4px 0; background: #ddd; border-radius: 5px; }
+        QToolButton#audioToComment { background: #3f6db5; color: #ffffff; padding: 5px 10px; border: 1px solid #76a0df; border-radius: 6px; font-weight: 600; }
+        QToolButton#audioToComment:hover { background: #5284ce; border-color: #a8c6f2; }
+        QFrame#gridAudioPopup {
+            background: #252a30;
+            border: 1px solid #808a95;
+            border-radius: 9px;
+        }
+        QLabel#gridAudioPopupTitle { background: transparent; }
+        QLabel#gridAudioPopupTitle { color: #f3f5f7; font-size: 9px; font-weight: 700; padding: 0; margin: 0; }
+        QLabel#gridAudioTranscript { background: rgba(255,255,255,0.08); color: #eef2f5; font-size: 11px; padding: 14px 10px; border-radius: 6px; }
         QLabel#videoTime { min-width: 82px; background: transparent; color: #d5d5d5; font-size: 11px; font-weight: 600; }
         QSlider#videoSeek { background: transparent; }
         QSlider#videoSeek::groove:horizontal { height: 4px; background: #1b1b1b; border-radius: 2px; }

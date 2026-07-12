@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS photo_selection (
     comment TEXT NOT NULL DEFAULT '',
     updated_ns INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS audio_transcripts (
+    name TEXT PRIMARY KEY,
+    audio_name TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    mtime_ns INTEGER NOT NULL,
+    transcript TEXT NOT NULL,
+    processed_ns INTEGER NOT NULL
+);
 -- ShotSync "selection" session state (feature 2). A single row marks this
 -- folder as a synced copy of a server shooting.
 CREATE TABLE IF NOT EXISTS shotsync_session (
@@ -226,6 +234,45 @@ class FolderCache:
     def store_photo_metadata(self, results: list[tuple[str, str]]) -> None:
         self._store_ai_results("photo_metadata", "metadata_json", results)
 
+    def audio_transcript_is_current(self, path: Path, audio_path: Path) -> bool:
+        stamp = _stamp(audio_path)
+        with self._lock:
+            row = self._db_or_raise().execute(
+                "SELECT 1 FROM audio_transcripts WHERE name=? AND audio_name=? AND file_size=? AND mtime_ns=?",
+                (path.name, audio_path.name, stamp.size, stamp.mtime_ns),
+            ).fetchone()
+        return row is not None
+
+    def store_audio_transcripts(self, results: list[tuple[str, str, str]]) -> None:
+        rows = []
+        for name, audio_name, transcript in results:
+            try:
+                stamp = _stamp(self.folder / audio_name)
+            except OSError:
+                continue
+            rows.append((name, audio_name, stamp.size, stamp.mtime_ns, transcript, time.time_ns()))
+        with self._lock:
+            self._db_or_raise().executemany(
+                "INSERT OR REPLACE INTO audio_transcripts (name, audio_name, file_size, mtime_ns, transcript, processed_ns) VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            self._db_or_raise().commit()
+
+    def load_audio_details(self) -> dict[str, dict]:
+        details = {}
+        with self._lock:
+            rows = self._db_or_raise().execute(
+                "SELECT name, audio_name, file_size, mtime_ns, transcript FROM audio_transcripts"
+            ).fetchall()
+        for name, audio_name, size, mtime_ns, transcript in rows:
+            try:
+                stamp = _stamp(self.folder / audio_name)
+            except OSError:
+                continue
+            if stamp.size == size and stamp.mtime_ns == mtime_ns:
+                details[name] = {"audio_comment_path": str(self.folder / audio_name), "audio_comment_transcript": transcript}
+        return details
+
     def load_photo_details(self, *, include_metadata: bool = True) -> dict[str, dict]:
         """Return cached EXIF/AI metadata and the user's local selection state."""
         import json
@@ -251,6 +298,8 @@ class FolderCache:
                 details.setdefault(name, {}).update(
                     rating=rating, color_label=color or "", comment=comment or ""
                 )
+        for name, audio in self.load_audio_details().items():
+            details.setdefault(name, {}).update(audio)
         return details
 
     def store_photo_selection(
@@ -442,6 +491,7 @@ class FolderCache:
             db.execute("DELETE FROM face_analysis WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = face_analysis.name)")
             db.execute("DELETE FROM photo_metadata WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_metadata.name)")
             db.execute("DELETE FROM photo_selection WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_selection.name)")
+            db.execute("DELETE FROM audio_transcripts WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = audio_transcripts.name)")
         finally:
             db.execute("DROP TABLE live_names")
 

@@ -23,11 +23,12 @@ uv run rawww
 - Use Ctrl/Shift to select multiple cards, then assign a 0-5 rating, color label, comment, or the 5-star quick mark. Selection metadata is stored in the central folder cache and survives restarts.
 - Select a processed photo and press **Find face** to show photos containing a matching face; the × button clears face search. **No faces** is available in the shot-size filter.
 - Hotkeys: `1`-`5` assign a rating, `0` clears it, `M` toggles the quick mark, and `C` focuses the comment field.
-- Full view: double-click a photo or press `F`.
+- Full view: double-click a photo or press `F`. Hold the left mouse button for a temporary 100% inspection and drag to pan; press `Z` to toggle it. The inspector decodes and caches the full JPEG or the embedded RAW preview (falling back to RAW decoding only when needed), focusing the largest recognized face when available (otherwise the cursor position or image centre); arrow keys pan by 5% while it is active.
 - Back to grid: `Esc`, `Enter`, or `G`.
 - Toggle fullscreen: `F11`.
 - Navigate in full view: arrow keys or space.
 - Video files (`.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`) show a captured frame and video badge in the grid. In full view, use Play/Pause and the seek bar; playback uses Qt Multimedia and the system media codecs.
+- Camera WAV notes matching a photo's filename are recognised locally when a folder opens. The microphone badge opens playback and the full-view panel shows the cached transcript; **В комментарий** appends it to the photo comment. Recognition uses bundled Vosk and Qt Multimedia only, with no server or external ffmpeg dependency.
 
 JPEG files are decoded with draft downsampling for fast previews. RAW files use the embedded preview when available. Embedded ICC profiles are converted to sRGB before display.
 

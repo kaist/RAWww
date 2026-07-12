@@ -93,6 +93,18 @@ def decode_thumbnail_pixels(path: Path, max_size: int) -> PixelImage:
     return decode_pixels(path, max_size)
 
 
+def decode_original_pixels(path: Path) -> PixelImage:
+    """Decode the complete source for the 100% viewer.
+
+    This deliberately shares the colour-management and orientation path used
+    by previews, but skips JPEG ``draft`` downsampling. RAW files keep using
+    their embedded preview; only files without one fall back to raw decoding.
+    """
+    if path.suffix.lower() in RAW_EXTENSIONS:
+        return _decode_raw_preview(path, None)
+    return _decode_pillow(path, None, use_draft=False, sharpen=False)
+
+
 def pixel_to_decoded(pixel: PixelImage) -> DecodedImage:
     rgba = QImage(
         pixel.pixels,
@@ -107,7 +119,7 @@ def pixel_to_decoded(pixel: PixelImage) -> DecodedImage:
     return DecodedImage(path=pixel.path, image=qimage, width=pixel.width, height=pixel.height)
 
 
-def _decode_raw_preview(path: Path, max_size: int) -> PixelImage:
+def _decode_raw_preview(path: Path, max_size: int | None) -> PixelImage:
     if rawpy is None:
         raise RuntimeError("rawpy is not installed")
 
@@ -117,22 +129,27 @@ def _decode_raw_preview(path: Path, max_size: int) -> PixelImage:
         except rawpy.LibRawNoThumbnailError:
             rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=True, output_bps=8)
             image = Image.fromarray(rgb)
-            return _pillow_to_pixels(path, image, max_size)
+            return _pillow_to_pixels(path, image, max_size, sharpen=max_size is not None)
 
     if thumb.format == rawpy.ThumbFormat.JPEG:
+        if max_size is None:
+            return _decode_pillow(path, None, data=thumb.data, use_draft=False, sharpen=False)
         return _decode_qt_jpeg_bytes(path, thumb.data, max_size)
     if thumb.format == rawpy.ThumbFormat.BITMAP:
-        return _pillow_to_pixels(path, Image.fromarray(thumb.data), max_size)
+        return _pillow_to_pixels(path, Image.fromarray(thumb.data), max_size, sharpen=max_size is not None)
     raise RuntimeError(f"Unsupported RAW thumbnail format: {thumb.format}")
 
 
-def _decode_pillow(path: Path, max_size: int, data: bytes | None = None) -> PixelImage:
+def _decode_pillow(
+    path: Path, max_size: int | None, data: bytes | None = None, *, use_draft: bool = True,
+    sharpen: bool = True,
+) -> PixelImage:
     source = BytesIO(data) if data is not None else path
     with Image.open(source) as image:
-        if image.format == "JPEG":
+        if use_draft and max_size is not None and image.format == "JPEG":
             image.draft("RGB", (max_size, max_size))
         image = ImageOps.exif_transpose(image)
-        return _pillow_to_pixels(path, image, max_size)
+        return _pillow_to_pixels(path, image, max_size, sharpen=sharpen)
 
 
 def _decode_qt_jpeg_bytes(path: Path, data: bytes, max_size: int) -> PixelImage:
@@ -166,10 +183,12 @@ def _decode_qt_jpeg_bytes(path: Path, data: bytes, max_size: int) -> PixelImage:
     return _qimage_to_pillow_pixels(path, image, max_size)
 
 
-def _pillow_to_pixels(path: Path, image: Image.Image, max_size: int) -> PixelImage:
+def _pillow_to_pixels(path: Path, image: Image.Image, max_size: int | None, *, sharpen: bool = True) -> PixelImage:
     image = _convert_to_srgb(image)
-    image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-    image = _sharpen_preview(image)
+    if max_size is not None:
+        image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    if sharpen:
+        image = _sharpen_preview(image)
     if image.mode != "RGBA":
         image = image.convert("RGBA")
 
