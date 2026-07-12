@@ -23,7 +23,7 @@ from pathlib import Path
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QUrl, Signal
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from .shotsync_receiver import safe_filename
@@ -33,6 +33,8 @@ if TYPE_CHECKING:  # avoid importing the GUI/QtGui stack at module load
 
 API_KEY_HEADER = b"X-Api-Key"
 SELECTION_DIR = "shotsync-selections"
+MAX_INFLIGHT_DOWNLOADS = 3
+RETRY_MAX_MS = 30_000
 
 
 def selection_root() -> Path:
@@ -84,7 +86,10 @@ class SelectionDownloader(QObject):
             "total": 0,
             "done": 0,
             "mapping": [],   # (name, photo_id, shooting_id)
-            "selection": [], # (name, rating, color_label, comment)
+            "selection": [], # (name, rating, color_label, comment, original_datetime)
+            "queue": [],
+            "inflight": 0,
+            "retrying": 0,
         }
         request = self._request(
             f"{self._base_url}/api/shootings/{shooting_id}/downloads/photos/"
@@ -114,36 +119,56 @@ class SelectionDownloader(QObject):
         if not photos:
             self._finalize(shooting_id)
             return
-        for photo in photos:
-            self._download_photo(shooting_id, photo)
+        run["queue"] = [(photo, 0) for photo in photos]
+        self._pump(shooting_id)
 
     # ----- per-photo download --------------------------------------------
-    def _download_photo(self, shooting_id: int, photo: dict) -> None:
+    def _pump(self, shooting_id: int) -> None:
+        run = self._runs.get(shooting_id)
+        if run is None:
+            return
+        while run["queue"] and run["inflight"] < MAX_INFLIGHT_DOWNLOADS:
+            photo, attempt = run["queue"].pop(0)
+            self._download_photo(shooting_id, photo, attempt)
+        if not run["queue"] and not run["inflight"] and not run["retrying"]:
+            self._finalize(shooting_id)
+
+    def _download_photo(self, shooting_id: int, photo: dict, attempt: int = 0) -> None:
         run = self._runs[shooting_id]
         # Prefer the 1920px preview; fall back to original then mini.
         url = photo.get("thumb_url") or photo.get("url") or photo.get("mini_url")
         photo_id = int(photo.get("id") or 0)
-        name = safe_filename(photo.get("name") or f"photo-{photo_id}.jpg")
+        name = _unique_local_name(
+            safe_filename(photo.get("name") or f"photo-{photo_id}.jpg"),
+            {entry[0] for entry in run["mapping"]},
+        )
         if not url or not photo_id:
             self._advance(shooting_id)
             return
         run["mapping"].append((name, photo_id, shooting_id))
-        run["selection"].append(
-            (name, photo.get("rating"), photo.get("color_label") or "", photo.get("comment") or "")
-        )
+        run["selection"].append((
+            name,
+            photo.get("rating"),
+            photo.get("color_label") or "",
+            photo.get("comment") or "",
+            photo.get("original_datetime") or None,
+        ))
         destination = run["folder"] / name
-        if destination.exists():
+        if destination.is_file() and destination.stat().st_size > 0:
             self._advance(shooting_id)
             return
+        run["inflight"] += 1
         reply = self._manager.get(self._request(self._absolute(url)))
         reply.finished.connect(
-            lambda: self._on_photo(reply, shooting_id, destination)
+            lambda: self._on_photo(reply, shooting_id, photo, destination, attempt)
         )
 
-    def _on_photo(self, reply: QNetworkReply, shooting_id: int, destination: Path) -> None:
+    def _on_photo(self, reply: QNetworkReply, shooting_id: int, photo: dict, destination: Path, attempt: int) -> None:
         reply.deleteLater()
-        if shooting_id not in self._runs:
+        run = self._runs.get(shooting_id)
+        if run is None:
             return
+        run["inflight"] -= 1
         if reply.error() == QNetworkReply.NetworkError.NoError:
             data = bytes(reply.readAll())
             if data:
@@ -153,7 +178,21 @@ class SelectionDownloader(QObject):
                     temp.replace(destination)
                 except OSError:
                     temp.unlink(missing_ok=True)
-        self._advance(shooting_id)
+                self._advance(shooting_id)
+                self._pump(shooting_id)
+                return
+        run["retrying"] += 1
+        delay = min(1000 * (2 ** min(attempt, 5)), RETRY_MAX_MS)
+        QTimer.singleShot(delay, lambda: self._retry_photo(shooting_id, photo, attempt + 1))
+        self._pump(shooting_id)
+
+    def _retry_photo(self, shooting_id: int, photo: dict, attempt: int) -> None:
+        run = self._runs.get(shooting_id)
+        if run is None:
+            return
+        run["retrying"] -= 1
+        run["queue"].append((photo, attempt))
+        self._pump(shooting_id)
 
     def _advance(self, shooting_id: int) -> None:
         run = self._runs.get(shooting_id)
@@ -174,12 +213,22 @@ class SelectionDownloader(QObject):
             from .cache import FolderCache
 
             cache = FolderCache(folder, live_names=names, load_from_disk=True)
+            stale_names = set(cache.shotsync_photo_names()) - names
+            for name in stale_names:
+                (folder / name).unlink(missing_ok=True)
             cache.set_shotsync_session(shooting_id, run["title"])
-            cache.set_shotsync_photos(run["mapping"])
-            for name, rating, color, comment in run["selection"]:
+            cache.replace_shotsync_photos(run["mapping"])
+            for name, rating, color, comment, _original_datetime in run["selection"]:
                 cache.store_photo_selection(
                     name, rating=rating, color_label=color, comment=comment
                 )
+            metadata = [
+                (str(folder / name), json.dumps({"original_datetime": original_datetime}))
+                for name, _rating, _color, _comment, original_datetime in run["selection"]
+                if original_datetime
+            ]
+            if metadata:
+                cache.store_photo_metadata(metadata)
             cache.close(flush=True)
         except Exception as exc:  # noqa: BLE001 - surface a readable message
             self.failed.emit(shooting_id, f"Не удалось сохранить кэш: {exc}")
@@ -203,6 +252,19 @@ class SelectionDownloader(QObject):
 
     def _absolute(self, url: str) -> str:
         return f"{self._base_url}{url}" if url.startswith("/") else url
+
+
+def _unique_local_name(name: str, used_names: set[str]) -> str:
+    """Avoid overwriting two server photos that share a filename."""
+    if name not in used_names:
+        return name
+    path = Path(name)
+    index = 2
+    while True:
+        candidate = f"{path.stem} ({index}){path.suffix}"
+        if candidate not in used_names:
+            return candidate
+        index += 1
 
 
 class SelectionMarkSyncer(QObject):

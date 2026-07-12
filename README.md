@@ -19,6 +19,7 @@ uv run rawww
 - Folder workspaces open in independent tabs. Use `+` to create a tab; tabs may be reordered or closed without changing another tab's current folder, filters, or selection. Open tabs and the active tab are restored at startup; tabs whose folders no longer exist are omitted.
 - Grid mode: mounted disks appear as buttons above the directory tree on the left; the list refreshes automatically, includes USB media and inserted cards, and excludes empty card-reader slots.
 - ShotSync-style selection toolbar: filter by rating, color label, shot size, filename/comment, and change the sort order or card size.
+- In the ShotSync panel, shooting cards open their local folder when one exists; cloud-only shootings offer **Take for selection** or **Watch**. Sending a shooting opens a dialog to choose its name, source folder, and server-side AI face/series processing.
 - Use Ctrl/Shift to select multiple cards, then assign a 0-5 rating, color label, comment, or the 5-star quick mark. Selection metadata is stored in the central folder cache and survives restarts.
 - Select a processed photo and press **Find face** to show photos containing a matching face; the × button clears face search. **No faces** is available in the shot-size filter.
 - Hotkeys: `1`-`5` assign a rating, `0` clears it, `M` toggles the quick mark, and `C` focuses the comment field.

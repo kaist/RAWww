@@ -15,10 +15,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QUrl, Signal
+import json
+
+from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 API_KEY_HEADER = b"X-Api-Key"
+_RETRY_MAX_MS = 30_000
+MAX_INFLIGHT_DOWNLOADS = 3
 
 
 def safe_filename(name: str, fallback: str = "photo.jpg") -> str:
@@ -39,6 +43,7 @@ class ShotSyncReceiver(QObject):
     photoDownloaded = Signal(int, str, str)   # shooting_id, folder, filename
     downloadFailed = Signal(int, str)         # shooting_id, human message
     markUpdated = Signal(int, str, dict)      # shooting_id, folder, photo payload
+    syncProgress = Signal(int, int, int, int) # shooting_id, downloaded, total, retrying
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -48,6 +53,11 @@ class ShotSyncReceiver(QObject):
         self._manager = QNetworkAccessManager(self)
         # Keep a reference to in-flight replies so they are not GC'd mid-flight.
         self._active: set[QNetworkReply] = set()
+        self._downloads: dict[tuple[int, str], tuple[str, int]] = {}
+        self._download_queue: list[tuple[int, str, Path]] = []
+        self._inflight_downloads = 0
+        self._http2_failed = False
+        self._sync: dict[int, dict] = {}
 
     # ----- configuration -------------------------------------------------
     def set_api_key(self, key: str | None) -> None:
@@ -60,6 +70,18 @@ class ShotSyncReceiver(QObject):
 
     def stop_receiving(self, shooting_id: int) -> None:
         self._targets.pop(int(shooting_id), None)
+        self._sync.pop(int(shooting_id), None)
+
+    def sync_existing(self, shooting_id: int) -> None:
+        """Fetch and queue every already processed photo in a received shooting."""
+        target = self._targets.get(int(shooting_id))
+        if target is None or not self._api_key:
+            return
+        request = QNetworkRequest(QUrl(f"{self._base_url}/api/shootings/{int(shooting_id)}/downloads/photos/"))
+        self._apply_http_version_preference(request)
+        request.setRawHeader(API_KEY_HEADER, self._api_key.encode("utf-8"))
+        reply = self._manager.get(request)
+        reply.finished.connect(lambda: self._on_existing_list(reply, int(shooting_id)))
 
     def is_receiving(self, shooting_id: int) -> bool:
         return int(shooting_id) in self._targets
@@ -81,10 +103,19 @@ class ShotSyncReceiver(QObject):
             return
         filename = safe_filename(photo.get("name") or f"photo-{photo.get('id')}.jpg")
         destination = target.folder / filename
+        self._queue_download(int(shooting_id), self._absolute_url(url), destination)
+
+    def _queue_download(self, shooting_id: int, url: str, destination: Path, attempt: int = 0) -> None:
         # Skip files we already have (server may resend on reconnect).
         if destination.exists():
+            self._mark_done(shooting_id, destination.name)
             return
-        self._download(int(shooting_id), self._absolute_url(url), destination)
+        key = (shooting_id, str(destination))
+        if key in self._downloads:
+            return
+        self._downloads[key] = (url, attempt)
+        self._download_queue.append((shooting_id, url, destination))
+        self._pump_downloads()
 
     def on_photo_updated(self, shooting_id: int, photo: dict) -> None:
         target = self._targets.get(int(shooting_id))
@@ -104,22 +135,33 @@ class ShotSyncReceiver(QObject):
             QNetworkRequest.Attribute.RedirectPolicyAttribute,
             QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy,
         )
+        self._apply_http_version_preference(request)
         # Same-origin media may sit behind the API key; harmless elsewhere.
         if self._api_key and url.startswith(self._base_url):
             request.setRawHeader(API_KEY_HEADER, self._api_key.encode("utf-8"))
         reply = self._manager.get(request)
+        self._inflight_downloads += 1
         self._active.add(reply)
         reply.finished.connect(lambda: self._finish_download(reply, shooting_id, destination))
 
     def _finish_download(self, reply: QNetworkReply, shooting_id: int, destination: Path) -> None:
         self._active.discard(reply)
+        self._inflight_downloads = max(0, self._inflight_downloads - 1)
         reply.deleteLater()
+        key = (shooting_id, str(destination))
+        url, attempt = self._downloads.get(key, ("", 0))
         if reply.error() != QNetworkReply.NetworkError.NoError:
+            if _is_http2_stream_error(reply.errorString()):
+                self._http2_failed = True
             self.downloadFailed.emit(shooting_id, reply.errorString())
+            self._retry(shooting_id, destination, url, attempt)
+            self._pump_downloads()
             return
         data = bytes(reply.readAll())
         if not data:
             self.downloadFailed.emit(shooting_id, "Пустой файл.")
+            self._retry(shooting_id, destination, url, attempt)
+            self._pump_downloads()
             return
         # Write atomically so a half-downloaded file is never seen by a scan.
         temp_path = destination.with_suffix(destination.suffix + ".part")
@@ -129,5 +171,73 @@ class ShotSyncReceiver(QObject):
         except OSError as exc:
             temp_path.unlink(missing_ok=True)
             self.downloadFailed.emit(shooting_id, str(exc))
+            self._retry(shooting_id, destination, url, attempt)
+            self._pump_downloads()
             return
+        self._downloads.pop(key, None)
+        self._mark_done(shooting_id, destination.name)
         self.photoDownloaded.emit(shooting_id, str(destination.parent), destination.name)
+        self._pump_downloads()
+
+    def _pump_downloads(self) -> None:
+        """Run a small bounded queue; server syncs may contain many photos."""
+        while self._download_queue and self._inflight_downloads < MAX_INFLIGHT_DOWNLOADS:
+            shooting_id, url, destination = self._download_queue.pop(0)
+            key = (shooting_id, str(destination))
+            if shooting_id not in self._targets or key not in self._downloads:
+                continue
+            self._download(shooting_id, url, destination)
+
+    def _apply_http_version_preference(self, request: QNetworkRequest) -> None:
+        """Prefer HTTP/2, falling back to HTTP/1.1 after a stream refusal."""
+        if self._http2_failed:
+            request.setAttribute(QNetworkRequest.Attribute.Http2AllowedAttribute, False)
+
+    def _on_existing_list(self, reply: QNetworkReply, shooting_id: int) -> None:
+        reply.deleteLater()
+        if reply.error() != QNetworkReply.NetworkError.NoError:
+            if _is_http2_stream_error(reply.errorString()):
+                self._http2_failed = True
+            return
+        try:
+            payload = json.loads(bytes(reply.readAll()).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return
+        photos = payload.get("photos") if isinstance(payload, dict) else None
+        if not payload or not payload.get("ok") or not isinstance(photos, list):
+            return
+        self._sync[shooting_id] = {"total": len(photos), "done": set(), "failed": set()}
+        self._emit_progress(shooting_id)
+        for photo in photos:
+            if isinstance(photo, dict):
+                self.on_photo_added(shooting_id, photo)
+
+    def _retry(self, shooting_id: int, destination: Path, url: str, attempt: int) -> None:
+        key = (shooting_id, str(destination))
+        self._downloads.pop(key, None)
+        if not url or shooting_id not in self._targets:
+            return
+        state = self._sync.get(shooting_id)
+        if state is not None:
+            state["failed"].add(destination.name)
+        self._emit_progress(shooting_id)
+        delay = min(1000 * (2 ** min(attempt, 5)), _RETRY_MAX_MS)
+        QTimer.singleShot(delay, lambda: self._queue_download(shooting_id, url, destination, attempt + 1))
+
+    def _mark_done(self, shooting_id: int, name: str) -> None:
+        state = self._sync.get(shooting_id)
+        if state is not None:
+            state["done"].add(name)
+            state["failed"].discard(name)
+            self._emit_progress(shooting_id)
+
+    def _emit_progress(self, shooting_id: int) -> None:
+        state = self._sync.get(shooting_id)
+        if state is None:
+            return
+        self.syncProgress.emit(shooting_id, len(state["done"]), state["total"], len(state["failed"]))
+
+
+def _is_http2_stream_error(message: str) -> bool:
+    text = (message or "").casefold()
+    return "stream" in text and any(token in text for token in ("refused", "no longer needed"))

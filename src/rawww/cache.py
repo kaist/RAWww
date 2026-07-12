@@ -286,18 +286,47 @@ class FolderCache:
             ).fetchone()
         return (int(row[0]), row[1] or "") if row else None
 
+    def clear_shotsync_session(self) -> None:
+        """Turn this folder back into an ordinary local folder."""
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute("DELETE FROM shotsync_session")
+            db.execute("DELETE FROM shotsync_photos")
+            db.execute("DELETE FROM shotsync_pending")
+            db.commit()
+
     def set_shotsync_photos(self, mapping: list[tuple[str, int, int]]) -> None:
         """Store ``(name, photo_id, shooting_id)`` rows in bulk."""
         if not mapping:
             return
+        rows = _unique_shotsync_mapping(mapping)
         with self._lock:
             db = self._db_or_raise()
             db.executemany(
                 """INSERT OR REPLACE INTO shotsync_photos (name, photo_id, shooting_id)
                    VALUES (?, ?, ?)""",
-                [(name, int(pid), int(sid)) for name, pid, sid in mapping],
+                rows,
             )
             db.commit()
+
+    def replace_shotsync_photos(self, mapping: list[tuple[str, int, int]]) -> None:
+        """Replace the server mapping after a full shooting refresh."""
+        rows = _unique_shotsync_mapping(mapping)
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute("DELETE FROM shotsync_photos")
+            if rows:
+                db.executemany(
+                    """INSERT INTO shotsync_photos (name, photo_id, shooting_id)
+                       VALUES (?, ?, ?)""",
+                    rows,
+                )
+            db.commit()
+
+    def shotsync_photo_names(self) -> list[str]:
+        with self._lock:
+            rows = self._db_or_raise().execute("SELECT name FROM shotsync_photos").fetchall()
+        return [str(row[0]) for row in rows]
 
     def shotsync_photo_id(self, name: str) -> int | None:
         with self._lock:
@@ -305,6 +334,14 @@ class FolderCache:
                 "SELECT photo_id FROM shotsync_photos WHERE name = ?", (name,)
             ).fetchone()
         return int(row[0]) if row else None
+
+    def shotsync_local_name_for_photo_id(self, photo_id: int) -> str | None:
+        """Return the local filename mapped to a server photo id, if known."""
+        with self._lock:
+            row = self._db_or_raise().execute(
+                "SELECT name FROM shotsync_photos WHERE photo_id = ?", (int(photo_id),)
+            ).fetchone()
+        return str(row[0]) if row else None
 
     def enqueue_shotsync_mark(
         self, *, photo_id: int, shooting_id: int, kind: str, payload_json: str
@@ -412,6 +449,14 @@ class FolderCache:
         if self._db is None:
             raise RuntimeError("Folder cache has not been opened")
         return self._db
+
+
+def _unique_shotsync_mapping(mapping: list[tuple[str, int, int]]) -> list[tuple[str, int, int]]:
+    """Keep one row per local filename before SQLite's primary-key insert."""
+    rows: dict[str, tuple[str, int, int]] = {}
+    for name, photo_id, shooting_id in mapping:
+        rows[str(name)] = (str(name), int(photo_id), int(shooting_id))
+    return list(rows.values())
 
 
 def cache_root() -> Path:

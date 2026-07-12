@@ -15,15 +15,14 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QIcon, QImage, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QSize, QTimer, Qt, Signal
+from PySide6.QtGui import QIcon, QImage, QPainter, QPainterPath, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -64,9 +63,12 @@ class ShotSyncPanel(QWidget):
     loginSubmitted = Signal(str, str)   # login, password
     logoutRequested = Signal()
     refreshRequested = Signal()
-    shootingActivated = Signal(dict)    # emitted on double-click (future use)
+    shootingActivated = Signal(dict)    # emitted when a shooting card is opened
     receiveRequested = Signal(dict)     # toggle live "receive photos" for a shooting
     selectRequested = Signal(dict)      # download a shooting locally for selection
+    removeLocalRequested = Signal(dict) # remove the local folder, keep server shooting
+    deleteServerRequested = Signal(dict) # delete an uploaded shooting from ShotSync
+    getMarksForRequested = Signal(dict) # pull marks for a local selection folder
     sendFolderRequested = Signal()      # upload the open folder as a new shooting
     getMarksRequested = Signal()        # pull marks for the open ShotSync folder
 
@@ -76,6 +78,14 @@ class ShotSyncPanel(QWidget):
         self._avatar_size = 40
         self._shootings: list[dict] = []
         self._receiving_ids: set[int] = set()
+        self._local_ids: set[int] = set()
+        self._shooting_modes: dict[int, str] = {}
+        self._current_shooting_id: int | None = None
+        self._refresh_angle = 0
+        self._refresh_base_icon = QIcon()
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(45)
+        self._refresh_timer.timeout.connect(self._rotate_refresh_icon)
         self.setObjectName("shotsyncPanel")
 
         outer = QVBoxLayout(self)
@@ -181,7 +191,15 @@ class ShotSyncPanel(QWidget):
 
         self.logout_button = QToolButton()
         self.logout_button.setObjectName("shotsyncLogoutButton")
-        self.logout_button.setIcon(self._icon("sign-out", 15, "#8a8a8a"))
+        logout_icon = self._icon("sign-out", 15, "#d0d0d0")
+        self.logout_button.setIcon(logout_icon)
+        self.logout_button.setIconSize(QSize(18, 18))
+        self.logout_button.setFixedSize(32, 32)
+        if logout_icon.isNull():
+            self.logout_button.setText("⇥")
+            self.logout_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        else:
+            self.logout_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.logout_button.setToolTip("Выйти из ShotSync")
         self.logout_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.logout_button.clicked.connect(self._confirm_logout)
@@ -189,9 +207,32 @@ class ShotSyncPanel(QWidget):
 
         layout.addWidget(header)
 
-        section = QLabel("СЪЁМКИ")
+        self.send_folder_button = QPushButton("Отправить на ShotSync")
+        self.send_folder_button.setObjectName("shotsyncSendButton")
+        self.send_folder_button.setIcon(self._icon("plus", 17, "#e0e0e0"))
+        self.send_folder_button.setIconSize(QSize(17, 17))
+        self.send_folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send_folder_button.clicked.connect(self.sendFolderRequested)
+        layout.addWidget(self.send_folder_button)
+
+        section_row = QHBoxLayout()
+        section_row.setContentsMargins(2, 2, 2, 0)
+        section_row.setSpacing(5)
+        section = QLabel("СЪЁМКИ НА СЕРВЕРЕ")
         section.setObjectName("shotsyncSection")
-        layout.addWidget(section)
+        section_row.addWidget(section)
+        self.refresh_shootings_button = QToolButton()
+        self.refresh_shootings_button.setObjectName("shotsyncRefreshButton")
+        self.refresh_shootings_button.setIcon(self._icon("sync", 11, "#a8a8a8"))
+        self._refresh_base_icon = self.refresh_shootings_button.icon()
+        self.refresh_shootings_button.setIconSize(QSize(11, 11))
+        self.refresh_shootings_button.setFixedSize(18, 18)
+        self.refresh_shootings_button.setToolTip("Обновить список съёмок")
+        self.refresh_shootings_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.refresh_shootings_button.clicked.connect(self.refreshRequested)
+        section_row.addWidget(self.refresh_shootings_button)
+        section_row.addStretch(1)
+        layout.addLayout(section_row)
 
         self.shooting_status = QLabel()
         self.shooting_status.setObjectName("shotsyncHint")
@@ -202,27 +243,8 @@ class ShotSyncPanel(QWidget):
         self.shooting_list = QListWidget()
         self.shooting_list.setObjectName("shotsyncShootingList")
         self.shooting_list.setUniformItemSizes(False)
-        self.shooting_list.itemDoubleClicked.connect(self._emit_activated)
-        self.shooting_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.shooting_list.customContextMenuRequested.connect(self._show_shooting_menu)
+        self.shooting_list.itemClicked.connect(self._emit_activated)
         layout.addWidget(self.shooting_list, 1)
-
-        folder_section = QLabel("ТЕКУЩАЯ ПАПКА")
-        folder_section.setObjectName("shotsyncSection")
-        layout.addWidget(folder_section)
-
-        self.send_folder_button = QPushButton("Отправить в ShotSync")
-        self.send_folder_button.setObjectName("shotsyncSendButton")
-        self.send_folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.send_folder_button.clicked.connect(self.sendFolderRequested)
-        layout.addWidget(self.send_folder_button)
-
-        self.get_marks_button = QPushButton("Получить метки")
-        self.get_marks_button.setObjectName("shotsyncGetMarksButton")
-        self.get_marks_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.get_marks_button.clicked.connect(self.getMarksRequested)
-        self.get_marks_button.setEnabled(False)
-        layout.addWidget(self.get_marks_button)
 
         return page
 
@@ -230,7 +252,6 @@ class ShotSyncPanel(QWidget):
         """Enable/disable the current-folder actions based on context."""
         if hasattr(self, "send_folder_button"):
             self.send_folder_button.setEnabled(can_send)
-            self.get_marks_button.setEnabled(is_session)
 
     # ----- interaction ---------------------------------------------------
     def _submit(self) -> None:
@@ -306,20 +327,54 @@ class ShotSyncPanel(QWidget):
         self.avatar_label.setPixmap(_rounded_avatar(image, self._avatar_size))
 
     def set_shootings_loading(self) -> None:
-        self.shooting_status.setText("Загружаем съёмки…")
-        self.shooting_status.show()
+        self.set_refreshing(True)
+
+    def set_refreshing(self, refreshing: bool) -> None:
+        if not hasattr(self, "refresh_shootings_button"):
+            return
+        self.refresh_shootings_button.setEnabled(not refreshing)
+        if refreshing:
+            self._refresh_timer.start()
+        else:
+            self._refresh_timer.stop()
+            self.refresh_shootings_button.setIcon(self._refresh_base_icon)
+
+    def _rotate_refresh_icon(self) -> None:
+        if self._refresh_base_icon.isNull():
+            return
+        self._refresh_angle = (self._refresh_angle + 18) % 360
+        pixmap = self._refresh_base_icon.pixmap(22, 22).transformed(
+            QTransform().rotate(self._refresh_angle), Qt.TransformationMode.SmoothTransformation
+        )
+        self.refresh_shootings_button.setIcon(QIcon(pixmap))
 
     def set_shootings_error(self, message: str) -> None:
+        self.set_refreshing(False)
         self.shooting_status.setText(message or "Не удалось загрузить съёмки.")
         self.shooting_status.show()
 
     def set_shootings(self, shootings: list) -> None:
+        self.set_refreshing(False)
         self._shootings = [s for s in shootings if isinstance(s, dict)]
         self._render_shootings()
 
     def set_receiving_ids(self, ids) -> None:
         """Update which shootings are being received and repaint the list."""
         self._receiving_ids = {int(i) for i in ids}
+        self._render_shootings()
+
+    def set_local_ids(self, ids) -> None:
+        """Mark shootings that already have a local folder to open."""
+        self._local_ids = {int(i) for i in ids}
+        self._render_shootings()
+
+    def set_shooting_modes(self, modes: dict[int, str]) -> None:
+        """Set how each local ShotSync folder was created."""
+        self._shooting_modes = {int(shooting_id): str(mode) for shooting_id, mode in modes.items()}
+        self._render_shootings()
+
+    def set_current_shooting_id(self, shooting_id: int | None) -> None:
+        self._current_shooting_id = int(shooting_id) if shooting_id else None
         self._render_shootings()
 
     def _render_shootings(self) -> None:
@@ -333,34 +388,96 @@ class ShotSyncPanel(QWidget):
             title = shooting.get("title") or "Без названия"
             photo_count = shooting.get("photo_count") or 0
             status = _status_label(shooting.get("status"))
-            receiving = int(shooting.get("id") or 0) in self._receiving_ids
+            shooting_id = int(shooting.get("id") or 0)
+            receiving = shooting_id in self._receiving_ids
+            local = shooting_id in self._local_ids
+            mode = self._shooting_modes.get(shooting_id, "")
+            is_current = shooting_id == self._current_shooting_id
             parts = [status, f"{photo_count} фото"]
             if receiving:
-                parts.append("● приём")
+                parts.append("● приём: слежение включено")
+            elif mode == "uploaded":
+                parts.append("отправлена на отбор")
+            elif mode == "selection_copy":
+                parts.append("взята на отбор")
             details = " · ".join(part for part in parts if part)
             item = QListWidgetItem(f"{title}\n{details}")
             item.setData(Qt.ItemDataRole.UserRole, shooting)
-            item.setToolTip("Приём включён" if receiving else title)
+            item.setToolTip("Открыть папку" if (receiving or local) else title)
+            item.setSizeHint(QSize(0, self._card_height(shooting, receiving, mode)))
             self.shooting_list.addItem(item)
+            self.shooting_list.setItemWidget(item, self._shooting_card(shooting, receiving, local, mode, is_current))
 
-    def _show_shooting_menu(self, pos) -> None:
-        item = self.shooting_list.itemAt(pos)
-        if item is None:
-            return
-        shooting = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(shooting, dict):
-            return
-        receiving = int(shooting.get("id") or 0) in self._receiving_ids
-        menu = QMenu(self)
-        receive_label = "Остановить приём фото" if receiving else "Получать новые фото…"
-        receive_action = menu.addAction(receive_label)
-        select_action = menu.addAction("Взять на отбор…")
-        chosen = menu.exec(self.shooting_list.mapToGlobal(pos))
-        if chosen is receive_action:
-            self.receiveRequested.emit(shooting)
-        elif chosen is select_action:
-            self.selectRequested.emit(shooting)
+    @staticmethod
+    def _card_height(shooting: dict, receiving: bool, mode: str) -> int:
+        """Estimate the wrapped text and action rows for a compact card."""
+        title = str(shooting.get("title") or "Без названия")
+        title_lines = max(1, (len(title) + 27) // 28)
+        description_length = {
+            "uploaded": 78,
+            "selection_copy": 64,
+        }.get(mode, 62 if receiving else 30)
+        detail_lines = max(1, (description_length + 37) // 38)
+        action_count = 1 if (receiving or mode == "selection_copy") else 2
+        return min(210, max(132, 44 + title_lines * 19 + detail_lines * 16 + action_count * 27))
 
+    def _shooting_card(self, shooting: dict, receiving: bool, local: bool, mode: str, is_current: bool) -> QWidget:
+        """Build a compact card whose actions describe the current setup."""
+        card = QWidget()
+        card.setObjectName("shotsyncShootingCard")
+        card.setProperty("currentShooting", is_current)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+        title = QLabel(str(shooting.get("title") or "Без названия"))
+        title.setObjectName("shotsyncShootingTitle")
+        title.setWordWrap(True)
+        layout.addWidget(title)
+        photo_count = shooting.get("photo_count") or 0
+        state = "Слежение: новые фото будут загружаться в выбранную папку." if receiving else {
+            "uploaded": "Ваша папка отправлена на отбор. Метки можно получить с сервера.",
+            "selection_copy": "Локальная копия съёмки, взятая с сервера для отбора.",
+        }.get(mode, "Съёмка хранится на сервере.")
+        details = QLabel(f"{photo_count} фото · {state}")
+        details.setObjectName("shotsyncHint")
+        details.setWordWrap(True)
+        layout.addWidget(details)
+        actions = QVBoxLayout()
+        actions.setSpacing(6)
+        def action_button(label: str, icon: str) -> QPushButton:
+            button = QPushButton(label)
+            button.setIcon(self._icon(icon, 12, "#e0e0e0"))
+            button.setIconSize(QSize(12, 12))
+            return button
+
+        if mode == "uploaded" and not receiving:
+            marks_button = action_button("Получить метки", "sync")
+            marks_button.clicked.connect(lambda: self.getMarksForRequested.emit(shooting))
+            actions.addWidget(marks_button)
+        if mode == "uploaded" and not receiving:
+            delete_button = action_button("Удалить с сервера", "trash")
+            delete_button.clicked.connect(lambda: self.deleteServerRequested.emit(shooting))
+            actions.addWidget(delete_button)
+        if mode == "selection_copy" and not receiving:
+            remove_button = action_button("Удалить локально", "trash")
+            remove_button.clicked.connect(lambda: self.removeLocalRequested.emit(shooting))
+            actions.addWidget(remove_button)
+        # A remembered folder alone is not a ShotSync state. Only a real
+        # selection session or live receive hides the two server actions.
+        if not mode and not receiving:
+            select_button = action_button("Взять на отбор", "download")
+            select_button.clicked.connect(lambda: self.selectRequested.emit(shooting))
+            actions.addWidget(select_button)
+        if receiving:
+            watch_button = action_button("Остановить отслеживание", "stop")
+            watch_button.clicked.connect(lambda: self.receiveRequested.emit(shooting))
+            actions.addWidget(watch_button)
+        elif not mode:
+            watch_button = action_button("Получать оригиналы", "eye")
+            watch_button.clicked.connect(lambda: self.receiveRequested.emit(shooting))
+            actions.addWidget(watch_button)
+        layout.addLayout(actions)
+        return card
 
 def _humanize_login_error(raw: str) -> str:
     """Convert a raw server/network error into a human-readable Russian message."""

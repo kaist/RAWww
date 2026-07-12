@@ -31,7 +31,10 @@ class ShotSyncHub(QObject):
     receivingChanged = Signal()                # the set of received shootings changed
     photoDownloaded = Signal(int, str, str)    # shooting_id, folder, filename
     markUpdated = Signal(int, str, dict)       # shooting_id, folder, photo payload
+    photoUpdated = Signal(int, dict)           # shooting_id, photo payload
+    shootingDeleted = Signal(int)              # shooting_id
     ackReceived = Signal(dict)                 # server reply to a mark we sent
+    receiveProgress = Signal(int, int, int, int)
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -44,10 +47,13 @@ class ShotSyncHub(QObject):
 
         self.socket.photoAdded.connect(self.receiver.on_photo_added)
         self.socket.photoUpdated.connect(self.receiver.on_photo_updated)
+        self.socket.photoUpdated.connect(self.photoUpdated)
+        self.socket.shootingDeleted.connect(self._on_shooting_deleted)
         self.socket.connectionChanged.connect(self.connectionChanged)
         self.socket.ackReceived.connect(self.ackReceived)
         self.receiver.photoDownloaded.connect(self.photoDownloaded)
         self.receiver.markUpdated.connect(self.markUpdated)
+        self.receiver.syncProgress.connect(self.receiveProgress)
 
     # ----- credential ----------------------------------------------------
     def set_api_key(self, key: str | None) -> None:
@@ -72,6 +78,7 @@ class ShotSyncHub(QObject):
     # ----- receive management --------------------------------------------
     def start_receiving(self, shooting_id: int, folder: Path, name: str) -> None:
         self.receiver.start_receiving(shooting_id, folder, name)
+        self.receiver.sync_existing(shooting_id)
         self._persist_targets()
         self.receivingChanged.emit()
 
@@ -88,6 +95,10 @@ class ShotSyncHub(QObject):
 
     def folder_for(self, shooting_id: int) -> Path | None:
         return self.receiver.folder_for(shooting_id)
+
+    def _on_shooting_deleted(self, shooting_id: int) -> None:
+        self.stop_receiving(shooting_id)
+        self.shootingDeleted.emit(shooting_id)
 
     # ----- persistence ---------------------------------------------------
     def _restore_targets(self) -> None:
@@ -108,6 +119,7 @@ class ShotSyncHub(QObject):
             name = str(config.get("name", ""))
             if folder and folder.is_dir():
                 self.receiver.start_receiving(int(shooting_id), folder, name)
+                self.receiver.sync_existing(int(shooting_id))
                 changed = True
         if changed:
             self.receivingChanged.emit()

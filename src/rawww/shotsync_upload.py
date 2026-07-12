@@ -62,17 +62,33 @@ def encode_preview(path: Path, max_size: int = PREVIEW_MAX_SIZE) -> bytes:
     return buffer.getvalue()
 
 
+def exif_original_datetime(path: Path) -> str | None:
+    """Read the capture time from the source file's EXIF metadata."""
+    from .exif import extract_metadata_batch
+
+    results = extract_metadata_batch([str(path)])
+    if not results:
+        return None
+    try:
+        metadata = json.loads(results[0][1])
+    except (IndexError, TypeError, ValueError):
+        return None
+    value = metadata.get("original_datetime") if isinstance(metadata, dict) else None
+    return str(value) if value else None
+
+
 class _EncodeSignals(QObject):
-    done = Signal(object, bytes)     # path, jpeg bytes
+    done = Signal(object, bytes, object)  # path, jpeg bytes, EXIF original_datetime
     failed = Signal(object, str)     # path, error
 
 
 class _EncodeTask(QRunnable):
     """Encode one preview off the UI thread."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, original_datetime: str | None) -> None:
         super().__init__()
         self.path = path
+        self.original_datetime = original_datetime
         self.signals = _EncodeSignals()
 
     def run(self) -> None:  # noqa: D401 - QRunnable entry point
@@ -81,7 +97,8 @@ class _EncodeTask(QRunnable):
         except Exception as exc:  # noqa: BLE001 - report a readable message
             self.signals.failed.emit(self.path, str(exc))
             return
-        self.signals.done.emit(self.path, data)
+        original_datetime = self.original_datetime or exif_original_datetime(self.path)
+        self.signals.done.emit(self.path, data, original_datetime)
 
 
 class FolderUploader(QObject):
@@ -90,6 +107,8 @@ class FolderUploader(QObject):
     progress = Signal(int, int)          # done, total
     finished = Signal(int, str)          # shooting_id, folder
     failed = Signal(str)                 # error message
+    deleteFinished = Signal(int)
+    deleteFailed = Signal(str)
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -109,19 +128,52 @@ class FolderUploader(QObject):
     def busy(self) -> bool:
         return self._folder is not None
 
+    def delete_shooting(self, shooting_id: int) -> None:
+        """Delete an already uploaded shooting from the server."""
+        if self.busy:
+            self.deleteFailed.emit("Дождитесь завершения текущей отправки.")
+            return
+        if not self._api_key:
+            self.deleteFailed.emit("Нет авторизации ShotSync.")
+            return
+        shooting_id = int(shooting_id)
+        request = QNetworkRequest(
+            QUrl(f"{self._base_url}/api/shootings/{shooting_id}/delete/")
+        )
+        request.setRawHeader(API_KEY_HEADER, self._api_key.encode("utf-8"))
+        reply = self._manager.post(request, QByteArray())
+        reply.finished.connect(lambda: self._on_deleted(reply, shooting_id))
+
+    def _on_deleted(self, reply: QNetworkReply, shooting_id: int) -> None:
+        payload = _read_json(reply)
+        error = reply.error()
+        reply.deleteLater()
+        if error != QNetworkReply.NetworkError.NoError or not (payload or {}).get("ok"):
+            self.deleteFailed.emit("Не удалось удалить съёмку с сервера.")
+            return
+        self.deleteFinished.emit(shooting_id)
+
     def _reset(self) -> None:
         self._folder: Path | None = None
         self._title = ""
         self._shooting_id = 0
         self._pending: list[Path] = []
-        self._encoded: list[tuple[Path, bytes]] = []
+        self._encoded: list[tuple[Path, bytes, str | None]] = []
+        self._original_datetimes: dict[str, str | None] = {}
+        self._uploaded_mapping: list[tuple[str, int, int]] = []
         self._inflight = 0
         self._done = 0
         self._total = 0
         self._failed = False
 
     # ----- public API ----------------------------------------------------
-    def start(self, folder: Path, title: str) -> None:
+    def start(
+        self,
+        folder: Path,
+        title: str,
+        original_datetimes: dict[str, str | None] | None = None,
+        ai_faces_series: bool = False,
+    ) -> None:
         """Begin uploading ``folder`` as a new shooting named ``title``."""
         if self.busy:
             self.failed.emit("Отправка уже выполняется.")
@@ -129,21 +181,28 @@ class FolderUploader(QObject):
         if not self._api_key:
             self.failed.emit("Нет авторизации ShotSync.")
             return
-        from .imaging import is_supported_image, is_supported_video
+        from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, is_supported_image, is_supported_video
 
         # Only still images are uploaded; videos are skipped entirely.
-        images = sorted(
+        candidates = sorted(
             p
             for p in folder.iterdir()
             if p.is_file() and is_supported_image(p) and not is_supported_video(p)
         )
+        raw_stems = {path.stem.casefold() for path in candidates if path.suffix.lower() in RAW_EXTENSIONS}
+        images = [
+            path for path in candidates
+            if not (path.suffix.lower() in JPEG_EXTENSIONS and path.stem.casefold() in raw_stems)
+        ]
         if not images:
             self.failed.emit("В папке нет поддерживаемых изображений.")
             return
         self._reset()
         self._folder = folder
         self._title = title
+        self._ai_faces_series = bool(ai_faces_series)
         self._pending = images
+        self._original_datetimes = dict(original_datetimes or {})
         self._total = len(images)
         self._create_shooting()
 
@@ -152,7 +211,10 @@ class FolderUploader(QObject):
         request = QNetworkRequest(QUrl(f"{self._base_url}/api/shootings/create/"))
         request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
         request.setRawHeader(API_KEY_HEADER, self._api_key.encode("utf-8"))
-        body = QByteArray(json.dumps({"title": self._title}).encode("utf-8"))
+        body = QByteArray(json.dumps({
+            "title": self._title,
+            "ai_faces_series": self._ai_faces_series,
+        }).encode("utf-8"))
         reply = self._manager.post(request, body)
         reply.finished.connect(lambda: self._on_shooting_created(reply))
 
@@ -167,16 +229,16 @@ class FolderUploader(QObject):
         self._shooting_id = shooting_id
         # Kick off encoding for every image; uploads start as bytes arrive.
         for path in self._pending:
-            task = _EncodeTask(path)
+            task = _EncodeTask(path, self._original_datetimes.get(path.name))
             task.signals.done.connect(self._on_encoded)
             task.signals.failed.connect(self._on_encode_failed)
             self._pool.start(task)
 
     # ----- encode -> upload pipeline ------------------------------------
-    def _on_encoded(self, path: Path, data: bytes) -> None:
+    def _on_encoded(self, path: Path, data: bytes, original_datetime: str | None) -> None:
         if self._folder is None or self._failed:
             return
-        self._encoded.append((path, data))
+        self._encoded.append((path, data, original_datetime))
         self._pump()
 
     def _on_encode_failed(self, path: Path, error: str) -> None:
@@ -186,10 +248,10 @@ class FolderUploader(QObject):
 
     def _pump(self) -> None:
         while self._encoded and self._inflight < MAX_INFLIGHT_UPLOADS:
-            path, data = self._encoded.pop(0)
-            self._upload_one(path, data)
+            path, data, original_datetime = self._encoded.pop(0)
+            self._upload_one(path, data, original_datetime)
 
-    def _upload_one(self, path: Path, data: bytes) -> None:
+    def _upload_one(self, path: Path, data: bytes, original_datetime: str | None) -> None:
         multipart = QHttpMultiPart(QHttpMultiPart.ContentType.FormDataType)
         part = QHttpPart()
         part.setHeader(
@@ -199,6 +261,17 @@ class FolderUploader(QObject):
         part.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "image/jpeg")
         part.setBody(QByteArray(data))
         multipart.append(part)
+
+        # The generated preview intentionally has no EXIF. Preserve the
+        # source file's EXIF capture timestamp in a separate form field.
+        if original_datetime:
+            datetime_part = QHttpPart()
+            datetime_part.setHeader(
+                QNetworkRequest.KnownHeaders.ContentDispositionHeader,
+                'form-data; name="original_datetime"',
+            )
+            datetime_part.setBody(QByteArray(str(original_datetime).encode("utf-8")))
+            multipart.append(datetime_part)
 
         request = QNetworkRequest(
             QUrl(f"{self._base_url}/api/shootings/{self._shooting_id}/photos/upload/")
@@ -219,6 +292,14 @@ class FolderUploader(QObject):
         if error != QNetworkReply.NetworkError.NoError or not (payload or {}).get("ok"):
             self._abort(f"Не удалось загрузить «{path.name}».")
             return
+        photo_id = int(((payload or {}).get("photo") or {}).get("id") or 0)
+        if not photo_id:
+            self._abort(f"Сервер не вернул идентификатор для «{path.name}».")
+            return
+        # The server stores a JPEG preview (and may therefore rename a RAW
+        # source to .jpg). Keep the original local filename as the key used by
+        # the selection UI and store the returned server id alongside it.
+        self._uploaded_mapping.append((path.name, photo_id, self._shooting_id))
         self._done += 1
         self.progress.emit(self._done, self._total)
         if self._done >= self._total:
@@ -237,6 +318,7 @@ class FolderUploader(QObject):
             names = {p.name for p in self._pending}
             cache = FolderCache(folder, live_names=names, load_from_disk=True)
             cache.set_shotsync_session(shooting_id, title)
+            cache.set_shotsync_photos(self._uploaded_mapping)
             cache.close(flush=True)
         except Exception as exc:  # noqa: BLE001
             self._abort(f"Не удалось пометить папку: {exc}")
@@ -248,8 +330,20 @@ class FolderUploader(QObject):
         if self._failed:
             return
         self._failed = True
+        shooting_id = self._shooting_id
+        # A shooting is created before the first preview is encoded. Remove it
+        # on any later failure so partial uploads never remain in the account.
+        if shooting_id and self._api_key:
+            request = QNetworkRequest(
+                QUrl(f"{self._base_url}/api/shootings/{shooting_id}/delete/")
+            )
+            request.setRawHeader(API_KEY_HEADER, self._api_key.encode("utf-8"))
+            reply = self._manager.post(request, QByteArray())
+            reply.finished.connect(reply.deleteLater)
         self.failed.emit(message)
-        self._reset()
+        # Do not reset _failed here: callbacks from uploads already in flight
+        # must become no-ops. start() resets the state for the next operation.
+        self._folder = None
 
 
 class MarksFetcher(QObject):
@@ -291,7 +385,17 @@ class MarksFetcher(QObject):
         """Write each returned mark into ``cache``; return how many applied."""
         applied = 0
         for mark in payload.get("marks", []):
-            name = str(mark.get("name") or "").strip()
+            name = ""
+            try:
+                local_name_for_id = cache.shotsync_local_name_for_photo_id
+            except AttributeError:
+                local_name_for_id = None
+            if local_name_for_id is not None:
+                try:
+                    name = local_name_for_id(int(mark.get("id") or 0)) or ""
+                except (TypeError, ValueError):
+                    pass
+            name = name or str(mark.get("name") or "").strip()
             if not name:
                 continue
             cache.store_photo_selection(

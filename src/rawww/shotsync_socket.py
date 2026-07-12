@@ -8,6 +8,7 @@ signed-in user through ``wss://shotsync.ru/ws/app/?api_key=…``:
 * ``photo.added``   ``{shooting_id, photo}``  - a new photo finished processing.
 * ``photo.updated`` ``{shooting_id, photo}``  - rating/color/comment changed.
 * ``shooting.updated`` ``{shooting}``          - shooting metadata changed.
+* ``shooting.deleted`` ``{shooting_id}``       - shooting was removed.
 * ``photo.ack`` ``{ok, request_id, …}``        - reply to a mark we sent.
 * ``pong``                                     - reply to our heartbeat ping.
 
@@ -37,6 +38,7 @@ class ShotSyncSocket(QObject):
     photoAdded = Signal(int, dict)            # shooting_id, photo payload
     photoUpdated = Signal(int, dict)          # shooting_id, photo payload
     shootingUpdated = Signal(dict)            # shooting payload
+    shootingDeleted = Signal(int)              # shooting_id
     ackReceived = Signal(dict)                # photo.ack payload
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
@@ -160,5 +162,9 @@ class ShotSyncSocket(QObject):
             shooting = data.get("shooting")
             if isinstance(shooting, dict):
                 self.shootingUpdated.emit(shooting)
+        elif message_type == "shooting.deleted":
+            shooting_id = int(data.get("shooting_id") or 0)
+            if shooting_id:
+                self.shootingDeleted.emit(shooting_id)
         elif message_type == "photo.ack":
             self.ackReceived.emit(data)

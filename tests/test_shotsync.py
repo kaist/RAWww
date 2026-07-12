@@ -12,6 +12,7 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21,7 +22,7 @@ from rawww.shotsync_hub import ShotSyncHub  # noqa: E402
 from rawww.shotsync_receiver import ShotSyncReceiver, safe_filename  # noqa: E402
 from rawww.shotsync_selection import SelectionMarkSyncer  # noqa: E402
 from rawww.shotsync_socket import ShotSyncSocket  # noqa: E402
-from rawww.shotsync_upload import MarksFetcher, encode_preview  # noqa: E402
+from rawww.shotsync_upload import MarksFetcher, encode_preview, exif_original_datetime  # noqa: E402
 
 # The panel (QtWidgets) and the folder cache (QtGui/QImage) both need a
 # display/GL stack (libGL). Keep everything that touches them optional so the
@@ -198,6 +199,14 @@ class HubPersistenceTests(unittest.TestCase):
         restored._restore_targets()
         self.assertFalse(restored.is_receiving(42))
 
+    def test_hub_relays_photo_updates_for_selection_folders(self) -> None:
+        received: list[tuple[int, dict]] = []
+        self.hub.photoUpdated.connect(lambda sid, photo: received.append((sid, photo)))
+        self.hub.socket._on_text_message(
+            '{"type": "photo.updated", "shooting_id": 42, "photo": {"id": 9, "rating": 5}}'
+        )
+        self.assertEqual(received, [(42, {"id": 9, "rating": 5})])
+
 
 @unittest.skipUnless(HAVE_GUI, "QtWidgets/libGL not available in this environment")
 class PanelRenderingTests(unittest.TestCase):
@@ -244,6 +253,8 @@ class CacheShotSyncTests(unittest.TestCase):
         self.assertEqual(self.cache.shotsync_photo_id("a.jpg"), 101)
         self.assertEqual(self.cache.shotsync_photo_id("b.jpg"), 102)
         self.assertIsNone(self.cache.shotsync_photo_id("missing.jpg"))
+        self.assertEqual(self.cache.shotsync_local_name_for_photo_id(101), "a.jpg")
+        self.assertIsNone(self.cache.shotsync_local_name_for_photo_id(999))
 
     def test_pending_queue_coalesces_per_kind(self) -> None:
         self.cache.enqueue_shotsync_mark(photo_id=101, shooting_id=7, kind="rating", payload_json='{"rating": 3}')
@@ -391,6 +402,18 @@ class EncodePreviewTests(unittest.TestCase):
                 self.assertEqual(out.size, (800, 600))
 
 
+class UploadExifTimestampTests(unittest.TestCase):
+    def test_fallback_reads_original_datetime_from_source_exif(self) -> None:
+        with patch(
+            "rawww.exif.extract_metadata_batch",
+            return_value=[("source.CR3", '{"original_datetime":"2026-07-12T10:11:12+03:00"}')],
+        ):
+            self.assertEqual(
+                exif_original_datetime(Path("source.CR3")),
+                "2026-07-12T10:11:12+03:00",
+            )
+
+
 class _CollectingCache:
     """Records store_photo_selection calls for the MarksFetcher test."""
 
@@ -399,6 +422,9 @@ class _CollectingCache:
 
     def store_photo_selection(self, name, *, rating, color_label, comment) -> None:
         self.stored.append((name, rating, color_label, comment))
+
+    def shotsync_local_name_for_photo_id(self, photo_id):
+        return {101: "source.CR3"}.get(photo_id)
 
 
 class MarksFetcherTests(unittest.TestCase):
@@ -414,14 +440,14 @@ class MarksFetcherTests(unittest.TestCase):
         payload = {
             "ok": True,
             "marks": [
-                {"name": "a.jpg", "rating": 5, "color_label": "red", "comment": "hero"},
+                {"id": 101, "name": "a.jpg", "rating": 5, "color_label": "red", "comment": "hero"},
                 {"name": "b.jpg", "rating": None, "color_label": "", "comment": ""},
                 {"name": "", "rating": 3},  # skipped: no name
             ],
         }
         applied = self.fetcher._apply_marks(payload, cache)
         self.assertEqual(applied, 2)
-        self.assertEqual(cache.stored[0], ("a.jpg", 5, "red", "hero"))
+        self.assertEqual(cache.stored[0], ("source.CR3", 5, "red", "hero"))
         self.assertEqual(cache.stored[1], ("b.jpg", None, "", ""))
 
     def test_requires_api_key(self) -> None:
