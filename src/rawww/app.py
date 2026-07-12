@@ -3378,7 +3378,7 @@ class Workspace(QMainWindow):
             action.setIcon(_color_swatch_icon(value))
             action.triggered.connect(lambda _checked=False, value=value: self._apply_mark_to_face(face_id, "color_label", value))
         menu.addSeparator()
-        remove_rating = menu.addAction("Убрать рейтинг")
+        remove_rating = menu.addAction("У��рать рейтинг")
         remove_rating.setIcon(_fomantic_icon("ban", 12))
         remove_rating.triggered.connect(lambda: self._apply_mark_to_face(face_id, "rating", None))
         remove = menu.addAction("Убрать метку")
@@ -5264,6 +5264,13 @@ def _flush_and_close(cache: FolderCache, close: bool) -> None:
 
 
 def main() -> None:
+    # Mandatory for frozen (PyInstaller) Windows builds that use
+    # ProcessPoolExecutor. Without this, each spawned worker re-launches the
+    # GUI, producing an endless cascade of windows. It is a no-op in normal
+    # (non-frozen) runs and when not a multiprocessing child.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     app = QApplication(sys.argv)
     apply_theme(app)
     window = MainWindow()
