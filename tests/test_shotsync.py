@@ -14,19 +14,28 @@ from tempfile import TemporaryDirectory
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QSettings  # noqa: E402
 
 from rawww.shotsync_hub import ShotSyncHub  # noqa: E402
-from rawww.shotsync_panel import ShotSyncPanel  # noqa: E402
 from rawww.shotsync_receiver import ShotSyncReceiver, safe_filename  # noqa: E402
 from rawww.shotsync_socket import ShotSyncSocket  # noqa: E402
+
+# The panel pulls in QtWidgets, which needs a display/GL stack. Keep it optional
+# so the socket/receiver/hub logic can be tested in a headless CI environment.
+try:  # pragma: no cover - environment dependent
+    from PySide6.QtWidgets import QApplication
+    from rawww.shotsync_panel import ShotSyncPanel
+
+    HAVE_QTWIDGETS = True
+except Exception:  # noqa: BLE001 - libGL or similar missing
+    HAVE_QTWIDGETS = False
 
 BASE_URL = "https://shotsync.ru"
 
 
-def _app() -> QApplication:
-    return QApplication.instance() or QApplication([])
+def _app() -> QCoreApplication:
+    """A running Qt event loop object; QtNetwork/QtWebSockets need one."""
+    return QCoreApplication.instance() or QCoreApplication([])
 
 
 class SocketParsingTests(unittest.TestCase):
@@ -183,9 +192,10 @@ class HubPersistenceTests(unittest.TestCase):
         self.assertFalse(restored.is_receiving(42))
 
 
+@unittest.skipUnless(HAVE_QTWIDGETS, "QtWidgets/libGL not available in this environment")
 class PanelRenderingTests(unittest.TestCase):
     def setUp(self) -> None:
-        _app()
+        QApplication.instance() or QApplication([])
         self.panel = ShotSyncPanel()
 
     def test_receiving_indicator_is_shown(self) -> None:

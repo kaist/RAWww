@@ -17,6 +17,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QSettings, Signal
 
 from .shotsync_receiver import ShotSyncReceiver
+from .shotsync_selection import SelectionDownloader
 from .shotsync_socket import ShotSyncSocket
 
 _RECEIVERS_SETTING = "shotsync/receivers"
@@ -29,16 +30,19 @@ class ShotSyncHub(QObject):
     receivingChanged = Signal()                # the set of received shootings changed
     photoDownloaded = Signal(int, str, str)    # shooting_id, folder, filename
     markUpdated = Signal(int, str, dict)       # shooting_id, folder, photo payload
+    ackReceived = Signal(dict)                 # server reply to a mark we sent
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._settings = QSettings("RAWww", "RAWww")
         self.socket = ShotSyncSocket(base_url, self)
         self.receiver = ShotSyncReceiver(base_url, self)
+        self.downloader = SelectionDownloader(base_url, self)
 
         self.socket.photoAdded.connect(self.receiver.on_photo_added)
         self.socket.photoUpdated.connect(self.receiver.on_photo_updated)
         self.socket.connectionChanged.connect(self.connectionChanged)
+        self.socket.ackReceived.connect(self.ackReceived)
         self.receiver.photoDownloaded.connect(self.photoDownloaded)
         self.receiver.markUpdated.connect(self.markUpdated)
 
@@ -46,6 +50,7 @@ class ShotSyncHub(QObject):
     def set_api_key(self, key: str | None) -> None:
         self.socket.set_api_key(key)
         self.receiver.set_api_key(key)
+        self.downloader.set_api_key(key)
         if key:
             self.socket.start()
             self._restore_targets()
