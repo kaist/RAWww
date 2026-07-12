@@ -121,6 +121,7 @@ class VideoThumbnailer(QObject):
         self._current: Path | None = None
         self._current_source: QUrl | None = None
         self._ready_for_frame = False
+        self._generation = 0
         self._active = True
         self._player = QMediaPlayer(self)
         self._sink = QVideoSink(self)
@@ -136,76 +137,81 @@ class VideoThumbnailer(QObject):
             return
         self._queue.append(path)
         self._queued.add(path)
-        if self._current is None:
-            self._start_next()
+        self._maybe_start()
 
     def set_active(self, active: bool) -> None:
         self._active = active
         if not active:
             self._queue.clear()
             self._queued.clear()
-            self._player.stop()
-            self._current = None
-            self._current_source = None
-            self._ready_for_frame = False
+            self._reset_current()
 
-    def _start_next(self) -> None:
-        if not self._active:
-            self._current = None
-            self._current_source = None
-            self._ready_for_frame = False
+    def _reset_current(self) -> None:
+        # Bump the generation so any late status/frame callbacks from the clip
+        # we are abandoning are ignored instead of being attributed elsewhere.
+        self._generation += 1
+        self._player.stop()
+        self._current = None
+        self._current_source = None
+        self._ready_for_frame = False
+
+    def _maybe_start(self) -> None:
+        # Decoding is strictly serialized: never begin a new clip while one is
+        # already in flight, otherwise overlapping starts mislabel thumbnails.
+        if self._current is not None:
             return
-        if not self._queue:
-            self._current = None
-            self._current_source = None
-            self._ready_for_frame = False
+        if not self._active or not self._queue:
             return
-        self._current = self._queue.popleft()
-        self._queued.discard(self._current)
+        self._begin(self._queue.popleft())
+
+    def _begin(self, path: Path) -> None:
+        self._generation += 1
+        self._current = path
+        self._queued.discard(path)
         # A frame must not be accepted until the media for this exact source
         # has finished loading. Otherwise buffered frames from the previous
         # clip can arrive first and be stored under the new path, mixing up
         # thumbnails.
         self._ready_for_frame = False
-        self._current_source = QUrl.fromLocalFile(str(self._current))
+        self._current_source = QUrl.fromLocalFile(str(path))
         self._player.setSource(self._current_source)
         # Playing briefly is the portable way to make all Qt backends deliver
         # a frame; the first frame is enough for a grid thumbnail.
         self._player.play()
 
+    def _is_current_source(self) -> bool:
+        return self._current is not None and self._player.source() == self._current_source
+
     def _media_status_changed(self, status) -> None:
+        # Only open the frame gate for a status that belongs to the clip we are
+        # currently decoding; stale events from a previous source are ignored.
+        if not self._is_current_source():
+            return
         if status in (
             QMediaPlayer.MediaStatus.LoadedMedia,
             QMediaPlayer.MediaStatus.BufferedMedia,
         ):
-            # Only from now on do frames belong to the current source.
-            self._ready_for_frame = self._current is not None
+            self._ready_for_frame = True
 
     def _frame_ready(self, frame) -> None:
-        if self._current is None or not self._ready_for_frame or not frame.isValid():
+        if not self._ready_for_frame or not frame.isValid():
             return
         # Reject frames that do not belong to the source we are decoding now.
-        if self._player.source() != self._current_source:
+        if not self._is_current_source():
             return
         image = frame.toImage()
         if image.isNull():
             return
         path = self._current
-        self._player.stop()
-        self._current = None
-        self._current_source = None
-        self._ready_for_frame = False
+        self._reset_current()
         self.previewReady.emit(path, image)
-        QTimer.singleShot(0, self._start_next)
+        QTimer.singleShot(0, self._maybe_start)
 
     def _finish_current(self) -> None:
         if self._current is None:
             return
-        self._player.stop()
-        self._current = None
-        self._current_source = None
-        self._ready_for_frame = False
-        QTimer.singleShot(0, self._start_next)
+        self._reset_current()
+        QTimer.singleShot(0, self._maybe_start)
 
 
 class FolderNameEditor(QLineEdit):
