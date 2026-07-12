@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 import math
+import base64
+import json
 import ctypes
 from hashlib import sha1
 import plistlib
@@ -13,13 +15,14 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Callable
 
-from PySide6.QtCore import QDir, QEvent, QFileInfo, QFileSystemWatcher, QPoint, QRect, QRectF, QSettings, QSize, Qt, QTimer, Signal, QObject, QStorageInfo, QItemSelectionModel, QUrl
+from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QPoint, QRect, QRectF, QIODevice, QSettings, QSize, Qt, QTimer, Signal, QObject, QStorageInfo, QItemSelectionModel, QUrl
 from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygon
-from PySide6.QtMultimedia import QMediaPlayer, QVideoSink
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QFileSystemModel,
     QFileIconProvider,
     QFrame,
@@ -36,6 +39,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyle,
     QSplitter,
+    QScrollArea,
     QSlider,
     QSizePolicy,
     QStackedWidget,
@@ -43,7 +47,9 @@ from PySide6.QtWidgets import (
     QTreeView,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
     QInputDialog,
+    QMenu,
     QMessageBox,
 )
 
@@ -90,6 +96,7 @@ FOMANTIC_ICON_CODES = {
     "chevron-down": "\uf078", "chevron-up": "\uf077", "bookmark": "\uf02e",
     "step-forward": "\uf051", "keyboard": "\uf11c", "folder": "\uf07c",
     "filter": "\uf0b0", "lightbulb": "\uf0eb", "volume": "\uf028", "close": "\uf00d",
+    "plus": "\uf067", "trash": "\uf1f8",
     "expand": "\uf065", "zoom": "\uf00e", "zoom-out": "\uf010", "play": "\uf04b", "pause": "\uf04c", "film": "\uf008",
 }
 FOMANTIC_ICON_FAMILY = ""
@@ -241,7 +248,7 @@ class PhotoGrid(QListWidget):
             if item is not None:
                 series = item.data(SERIES_ROLE) or {}
                 rect = self.visualItemRect(item)
-                badge = QRect(rect.right() - 52, rect.top() + 5, 46, 22)
+                badge = QRect(rect.right() - 36, rect.top() + 4, 32, 12)
                 if series.get("count", 0) > 1 and badge.contains(event.position().toPoint()):
                     value = item.data(Qt.ItemDataRole.UserRole)
                     if value:
@@ -320,6 +327,8 @@ class PhotoCardDelegate(QStyledItemDelegate):
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         detail = index.data(DETAIL_ROLE) or {}
+        series = index.data(SERIES_ROLE) or {}
+        expanded_series = bool(series.get("expanded") or series.get("member"))
         label = str(detail.get("color_label") or "")
         colors = {"red": "#a25555", "yellow": "#af9440", "green": "#4d9660", "blue": "#537fc2", "purple": "#9760b2"}
         tints = {
@@ -328,7 +337,10 @@ class PhotoCardDelegate(QStyledItemDelegate):
             "purple": QColor(151, 96, 178, 84),
         }
 
-        bg = QColor("#c4c4c4") if selected else QColor("#b3b3b3" if hovered else "#a7a7a7")
+        if expanded_series:
+            bg = QColor("#a0a0a0") if selected else QColor("#888888" if hovered else "#747474")
+        else:
+            bg = QColor("#c4c4c4") if selected else QColor("#b3b3b3" if hovered else "#a7a7a7")
         painter.fillRect(rect, bg)
         if label in tints:
             painter.fillRect(rect, tints[label])
@@ -394,6 +406,12 @@ class PhotoCardDelegate(QStyledItemDelegate):
                 painter.setFont(icon_font)
                 painter.drawText(video_badge, Qt.AlignmentFlag.AlignCenter, FOMANTIC_ICON_CODES["film"] if FOMANTIC_ICON_FAMILY else "▶")
 
+            # A series is a temporary expanded context, not a normal row in
+            # the timeline. Darken its preview as well as the card chrome so
+            # the complete group remains recognisable in grids and strips.
+            if expanded_series:
+                painter.fillRect(image_rect, QColor(0, 0, 0, 76))
+
         # For folders: full width text, no ratings/badges.
         caption_rect = QRect(rect.left() + 5, rect.bottom() - bottom + 2, rect.width() - 10, bottom - 2)
         if path_obj and path_obj.is_dir():
@@ -405,9 +423,9 @@ class PhotoCardDelegate(QStyledItemDelegate):
             text = index.data(Qt.ItemDataRole.DisplayRole) or ""
         color = QColor("#242424")
         painter.setPen(color)
-        font = painter.font()
+        font = QFont(option.font)
         font.setPointSizeF(6.5 if self.compact else 7.5)
-        font.setWeight(QFont.Weight.DemiBold)
+        font.setWeight(QFont.Weight.Normal)
         painter.setFont(font)
         rating = int(detail.get("rating") or 0) if not (path_obj and path_obj.is_dir()) else 0
         rating_text = "★" * rating
@@ -439,22 +457,23 @@ class PhotoCardDelegate(QStyledItemDelegate):
             if rating_text:
                 painter.setPen(QColor("#3a3123"))
                 painter.drawText(rating_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, rating_text)
-            series = index.data(SERIES_ROLE) or {}
             count = int(series.get("count", 0) or 0)
             if count > 1:
-                badge_rect = QRect(rect.right() - 48, rect.top() + 3, 44, 15)
-                painter.fillRect(badge_rect, QColor("#d5d5d5"))
+                badge_width = 26 if self.compact else 32
+                badge_height = 10 if self.compact else 12
+                badge_rect = QRect(rect.right() - badge_width - 4, rect.top() + 4, badge_width, badge_height)
                 painter.setPen(QColor("#262626"))
                 icon_font = QFont(FOMANTIC_ICON_FAMILY or option.font.family())
-                icon_font.setPixelSize(9)
+                icon_font.setPixelSize(7 if self.compact else 8)
                 painter.setFont(icon_font)
-                painter.drawText(QRect(badge_rect.left() + 3, badge_rect.top(), 12, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, FOMANTIC_ICON_CODES["images"] if FOMANTIC_ICON_FAMILY else "▣")
+                icon_width = 8 if self.compact else 10
+                painter.drawText(QRect(badge_rect.left(), badge_rect.top(), icon_width, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, FOMANTIC_ICON_CODES["images"] if FOMANTIC_ICON_FAMILY else "▣")
                 font = painter.font()
-                font.setPixelSize(9)
+                font.setPixelSize(7 if self.compact else 8)
                 painter.setFont(font)
                 marker = "−" if series.get("expanded") else "+"
                 badge_text = str(count) if self.compact else f"{count} {marker}"
-                painter.drawText(QRect(badge_rect.left() + 16, badge_rect.top(), 26, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, badge_text)
+                painter.drawText(QRect(badge_rect.left() + icon_width, badge_rect.top(), badge_width - icon_width, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, badge_text)
         painter.restore()
 
     def sizeHint(self, option, index) -> QSize:
@@ -465,6 +484,7 @@ class PhotoCardDelegate(QStyledItemDelegate):
 
 class ViewerStrip(QListWidget):
     pathActivated = Signal(Path)
+    seriesToggleRequested = Signal(Path)
     viewportChanged = Signal()
 
     def __init__(self, *, vertical: bool = False) -> None:
@@ -484,9 +504,11 @@ class ViewerStrip(QListWidget):
         if vertical:
             self.setFlow(QListWidget.Flow.TopToBottom)
             self.setWrapping(False)
-            self.setGridSize(QSize(82, 76))
-            self.setIconSize(QSize(76, 70))
-            self.setFixedWidth(90)
+            # Keep series cards the same size as the cards in the bottom
+            # strip.  The extra width leaves room for the vertical scrollbar.
+            self.setGridSize(QSize(118, 104))
+            self.setIconSize(QSize(112, 98))
+            self.setFixedWidth(136)
             self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         else:
@@ -509,6 +531,21 @@ class ViewerStrip(QListWidget):
         if value:
             self.setCurrentItem(item)
             self.pathActivated.emit(Path(value))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.position().toPoint())
+            if item is not None:
+                series = item.data(SERIES_ROLE) or {}
+                rect = self.visualItemRect(item).adjusted(2, 2, -2, -2)
+                badge = QRect(rect.right() - 30, rect.top() + 4, 26, 10)
+                if int(series.get("count", 0) or 0) > 1 and badge.contains(event.position().toPoint()):
+                    value = item.data(Qt.ItemDataRole.UserRole)
+                    if value:
+                        self.seriesToggleRequested.emit(Path(value))
+                        event.accept()
+                        return
+        super().mousePressEvent(event)
 
     def set_paths(
         self,
@@ -608,6 +645,238 @@ class VideoSeekSlider(QSlider):
         super().mousePressEvent(event)
 
 
+class ColorLabelButton(QToolButton):
+    """Color swatch with a selection outline painted inside its bounds."""
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not (self.isChecked() or self.underMouse()):
+            return
+        painter = QPainter(self)
+        painter.setPen(QPen(QColor("#e5e5e5"), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self.rect().adjusted(1, 1, -2, -2))
+
+
+class ViewerMetaBar(QWidget):
+    """Shared rating, label, quick-mark and comment controls for grid/full view."""
+
+    ratingRequested = Signal(object)
+    colorRequested = Signal(str)
+    quickMarkRequested = Signal()
+    quickMarkConfigured = Signal(str, object)
+    autoAdvanceChanged = Signal(bool)
+    commentSubmitted = Signal(str)
+
+    def __init__(self, *, settings: QSettings | None = None) -> None:
+        super().__init__()
+        self.setObjectName("viewerMeta")
+        self.settings = settings or QSettings("RAWww", "RAWww")
+        self._quick_mark = ("rating", 5)
+        layout = QHBoxLayout(self)
+        # The bar is 30px tall including its top/bottom borders. Leave an
+        # exact 24px content lane so every fixed-height control is centred
+        # identically in grid and full-view.
+        layout.setContentsMargins(6, 2, 6, 2)
+        layout.setSpacing(5)
+
+        self.quick_mark_button = QToolButton()
+        self.quick_mark_button.setObjectName("fullQuickMark")
+        self.quick_mark_button.setIcon(_fomantic_icon("bookmark", 13))
+        self.quick_mark_button.setText("быстр. метка")
+        self.quick_mark_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.quick_mark_button.setToolTip("Настроить быструю метку; M — применить")
+        self.quick_mark_button.setFixedSize(96, 24)
+        self.quick_mark_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.quick_mark_button.clicked.connect(self._show_quick_mark_menu)
+        layout.addWidget(self.quick_mark_button)
+
+        self.auto_advance_button = QToolButton()
+        self.auto_advance_button.setObjectName("fullAutoAdvance")
+        self.auto_advance_button.setIcon(_fomantic_icon("step-forward", 13))
+        self.auto_advance_button.setCheckable(True)
+        self.auto_advance_button.setToolTip("Автоперелистывание после метки")
+        self.auto_advance_button.setFixedSize(28, 24)
+        self.auto_advance_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.auto_advance_button.toggled.connect(self.autoAdvanceChanged)
+        layout.addWidget(self.auto_advance_button)
+
+        self.color_group = QWidget()
+        self.color_group.setObjectName("viewerColorRow")
+        color_layout = QHBoxLayout(self.color_group)
+        color_layout.setContentsMargins(0, 0, 0, 0)
+        color_layout.setSpacing(0)
+        self.color_buttons: dict[str, QToolButton] = {}
+        for color in ("", "red", "yellow", "green", "blue", "purple"):
+            button = ColorLabelButton()
+            button.setObjectName("viewerColor")
+            button.setProperty("colorLabel", color or "none")
+            button.setCheckable(True)
+            if not color:
+                button.setIcon(_fomantic_icon("ban", 11, "#959595"))
+            button.setToolTip("Сбросить цвет" if not color else color)
+            button.setFixedSize(24, 24)
+            button.clicked.connect(lambda _checked=False, value=color: self.colorRequested.emit(value))
+            color_layout.addWidget(button)
+            self.color_buttons[color] = button
+        layout.addWidget(self.color_group)
+        self.color_group.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+        self.rating_buttons: dict[int, QPushButton] = {}
+        self.rating_group = QWidget()
+        self.rating_group.setObjectName("viewerRatingRow")
+        # Use explicit integer geometry here. QHBoxLayout may distribute its
+        # border-adjusted contents rect fractionally under Windows DPI scaling,
+        # which makes adjacent fixed-size buttons paint over one another.
+        self.rating_group.setFixedSize(149, 24)
+        self.rating_group.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        for rating in range(0, 6):
+            button = QPushButton()
+            button.setObjectName("viewerRating")
+            button.setProperty("ratingClear", rating == 0)
+            button.setFlat(True)
+            button.setCheckable(True)
+            button.setFixedSize(24, 24)
+            button.setIconSize(QSize(18, 18))
+            button.setIcon(_fomantic_icon("ban" if rating == 0 else "star", 17, "#777777"))
+            button.setToolTip("Сбросить рейтинг" if rating == 0 else f"Рейтинг {rating}")
+            button.clicked.connect(lambda _checked=False, value=rating: self.ratingRequested.emit(value or None))
+            button.setParent(self.rating_group)
+            button.move(rating * 25, 0)
+            self.rating_buttons[rating] = button
+        layout.addWidget(self.rating_group)
+
+        self.comment_edit = QLineEdit()
+        self.comment_edit.setObjectName("fullComment")
+        self.comment_edit.setPlaceholderText("Комментарий")
+        self.comment_edit.setFixedHeight(24)
+        self.comment_edit.setMinimumWidth(72)
+        self.comment_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.comment_edit.editingFinished.connect(lambda: self.commentSubmitted.emit(self.comment_edit.text().strip()))
+        layout.addWidget(self.comment_edit, 1)
+
+        self.exif_label = QLabel()
+        self.exif_label.setObjectName("viewerExif")
+        self.exif_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.exif_label.setMinimumWidth(0)
+        self.exif_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.exif_label, 1)
+
+    def _show_quick_mark_menu(self) -> None:
+        # A popup must use the actual top-level widget as its transient
+        # parent. Parenting it to this embedded bar produces QWidgetWindow
+        # "must be a top level window" warnings on Windows.
+        menu = QMenu(self.window())
+        menu.setToolTipsVisible(True)
+        title = menu.addAction("Настроить быструю метку")
+        title.setEnabled(False)
+        menu.addSeparator()
+
+        def add_visual_action(*, selected: bool, visual: str | QIcon, tooltip: str, callback) -> None:
+            action = QWidgetAction(menu)
+            row = QPushButton()
+            row.setObjectName("quickMarkMenuItem")
+            row.setFlat(True)
+            row.setFixedHeight(26)
+            row.setToolTip(tooltip)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(8, 2, 12, 2)
+            row_layout.setSpacing(7)
+            check = QLabel("✓" if selected else "")
+            check.setObjectName("quickMarkMenuCheck")
+            check.setFixedWidth(14)
+            check.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            row_layout.addWidget(check)
+            value = QLabel()
+            value.setObjectName("quickMarkMenuValue")
+            if isinstance(visual, QIcon):
+                value.setPixmap(visual.pixmap(18, 18))
+            else:
+                value.setText(visual)
+            row_layout.addWidget(value)
+            row_layout.addStretch(1)
+            row.clicked.connect(callback)
+            row.clicked.connect(menu.close)
+            action.setDefaultWidget(row)
+            menu.addAction(action)
+
+        for rating in range(5, 0, -1):
+            selected = self._quick_mark == ("rating", rating)
+            add_visual_action(
+                selected=selected,
+                visual="★" * rating,
+                tooltip=f"Рейтинг {rating}",
+                callback=lambda _checked=False, value=rating: self._configure_quick_mark("rating", value),
+            )
+        menu.addSeparator()
+        color_options = (
+            ("red", "Красная метка", "#7a5555"),
+            ("yellow", "Жёлтая метка", "#7f7556"),
+            ("green", "Зелёная метка", "#5d7560"),
+            ("blue", "Синяя метка", "#596b82"),
+            ("purple", "Фиолетовая метка", "#71607d"),
+        )
+        for color, tooltip, swatch in color_options:
+            selected = self._quick_mark == ("color_label", color)
+            add_visual_action(
+                selected=selected,
+                visual=(
+                    _color_swatch_icon(swatch)
+                    if swatch is not None
+                    else _fomantic_icon("ban", 14, "#a0a0a0")
+                ),
+                tooltip=tooltip,
+                callback=lambda _checked=False, value=color: self._configure_quick_mark("color_label", value),
+            )
+        menu.exec(self.quick_mark_button.mapToGlobal(QPoint(0, -menu.sizeHint().height())))
+
+    def _configure_quick_mark(self, kind: str, value: object) -> None:
+        self._quick_mark = (kind, value)
+        self.quickMarkConfigured.emit(kind, value)
+
+    def set_quick_mark(self, kind: str, value: object) -> None:
+        self._quick_mark = (kind, value)
+
+    def set_auto_advance(self, enabled: bool) -> None:
+        self.auto_advance_button.blockSignals(True)
+        self.auto_advance_button.setChecked(enabled)
+        self.auto_advance_button.blockSignals(False)
+
+    def set_comment(self, comment: str) -> None:
+        self.comment_edit.blockSignals(True)
+        self.comment_edit.setText(comment)
+        self.comment_edit.blockSignals(False)
+
+    def set_metadata(self, detail: dict) -> None:
+        color = str(detail.get("color_label") or "")
+        rating = int(detail.get("rating") or 0)
+        for value, button in self.color_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(value == color)
+            button.blockSignals(False)
+        for value, button in self.rating_buttons.items():
+            button.blockSignals(True)
+            button.setChecked((value == 0 and rating == 0) or (value > 0 and value <= rating))
+            button.blockSignals(False)
+        for value, button in self.rating_buttons.items():
+            if value == 0:
+                button.setIcon(_fomantic_icon("ban", 17, "#d0d0d0" if rating == 0 else "#777777"))
+            else:
+                button.setIcon(_fomantic_icon("star", 17, "#d0d0d0" if value <= rating else "#777777"))
+        self.set_comment(str(detail.get("comment") or ""))
+        capture = detail.get("capture_settings") or {}
+        parts = []
+        if capture.get("aperture") is not None:
+            parts.append(f"f/{capture['aperture']:g}")
+        if capture.get("exposure_display"):
+            parts.append(str(capture["exposure_display"]))
+        if capture.get("iso") is not None:
+            parts.append(f"ISO {capture['iso']}")
+        if capture.get("focal_length_mm") is not None:
+            parts.append(f"{capture['focal_length_mm']:g}mm")
+        self.exif_label.setText(" · ".join(parts))
+
+
 class FullView(QFrame):
     exitRequested = Signal()
     nextRequested = Signal()
@@ -615,8 +884,13 @@ class FullView(QFrame):
     pathRequested = Signal(Path)
     ratingRequested = Signal(object)
     colorRequested = Signal(str)
-    faceRequested = Signal(object)
+    faceShowRequested = Signal(object)
+    faceAddRequested = Signal(object)
+    faceFilterClearRequested = Signal()
+    seriesToggleRequested = Signal(Path)
     quickMarkRequested = Signal()
+    quickMarkConfigured = Signal(str, object)
+    autoAdvanceChanged = Signal(bool)
     commentSubmitted = Signal(str)
     stripViewportChanged = Signal()
     videoPlaybackChanged = Signal(bool)
@@ -634,13 +908,16 @@ class FullView(QFrame):
 
         self.image_view = FullImageView()
         self.image_view.setObjectName("fullImageView")
-        self.image_view.faceRequested.connect(self.faceRequested)
+        self.image_view.faceClicked.connect(self._show_face_actions)
         self.video_widget = QVideoWidget()
         self.video_widget.setObjectName("fullVideoView")
         self.media_stack = QStackedWidget()
         self.media_stack.addWidget(self.image_view)
         self.media_stack.addWidget(self.video_widget)
         self.video_player = QMediaPlayer(self)
+        self.video_audio = QAudioOutput(self)
+        self.video_audio.setVolume(1.0)
+        self.video_player.setAudioOutput(self.video_audio)
         self.video_player.setVideoOutput(self.video_widget)
         self.video_player.positionChanged.connect(self._video_position_changed)
         self.video_player.durationChanged.connect(self._video_duration_changed)
@@ -648,8 +925,11 @@ class FullView(QFrame):
         self._is_video = False
         self.video_controls = QFrame()
         self.video_controls.setObjectName("videoControls")
-        self.video_controls.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        self.video_controls.setMaximumWidth(420)
+        # QVideoWidget may use a native child surface on Windows. Make the
+        # controls native too, otherwise that surface can cover them once the
+        # first frame arrives.
+        self.video_controls.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.video_controls.setFixedWidth(360)
         self.video_controls_layout = QHBoxLayout(self.video_controls)
         self.video_controls_layout.setContentsMargins(8, 5, 8, 5)
         self.video_controls_layout.setSpacing(7)
@@ -661,6 +941,7 @@ class FullView(QFrame):
 
         self.photo_strip = ViewerStrip()
         self.photo_strip.pathActivated.connect(self.pathRequested)
+        self.photo_strip.seriesToggleRequested.connect(self.seriesToggleRequested)
         self.photo_strip.viewportChanged.connect(self.stripViewportChanged)
         self.series_strip = ViewerStrip(vertical=True)
         self.series_strip.pathActivated.connect(self.pathRequested)
@@ -693,13 +974,33 @@ class FullView(QFrame):
         stage_layout.setContentsMargins(0, 0, 0, 0)
         stage_layout.setSpacing(12)
         stage_layout.addWidget(self.series_panel)
-        media_panel = QWidget()
-        media_layout = QVBoxLayout(media_panel)
+        self.media_panel = QWidget()
+        media_layout = QVBoxLayout(self.media_panel)
         media_layout.setContentsMargins(0, 0, 0, 0)
         media_layout.setSpacing(0)
         media_layout.addWidget(self.media_stack, 1)
-        media_layout.addWidget(self.video_controls, 0, Qt.AlignmentFlag.AlignHCenter)
-        stage_layout.addWidget(media_panel, 1)
+        stage_layout.addWidget(self.media_panel, 1)
+
+        self.face_filter_chip = QFrame(self.media_panel)
+        self.face_filter_chip.setObjectName("fullFaceFilterChip")
+        face_chip_layout = QHBoxLayout(self.face_filter_chip)
+        face_chip_layout.setContentsMargins(5, 3, 4, 3)
+        face_chip_layout.setSpacing(4)
+        self.face_filter_avatar = QLabel()
+        self.face_filter_avatar.setFixedSize(26, 26)
+        self.face_filter_avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        face_chip_layout.addWidget(self.face_filter_avatar)
+        self.face_filter_clear = QToolButton()
+        self.face_filter_clear.setObjectName("fullFaceFilterClear")
+        self.face_filter_clear.setIcon(_fomantic_icon("close", 12))
+        self.face_filter_clear.setFixedSize(20, 20)
+        self.face_filter_clear.setIconSize(QSize(12, 12))
+        self.face_filter_clear.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.face_filter_clear.setAutoRaise(True)
+        self.face_filter_clear.setToolTip("Сбросить фильтр по лицу")
+        self.face_filter_clear.clicked.connect(self.faceFilterClearRequested)
+        face_chip_layout.addWidget(self.face_filter_clear)
+        self.face_filter_chip.hide()
 
         strip_header = QWidget()
         strip_header.setObjectName("stripHeader")
@@ -712,17 +1013,10 @@ class FullView(QFrame):
         self.strip_toggle.setToolTip("Свернуть ленту превью")
         self.strip_toggle.clicked.connect(self.toggle_strip)
         strip_header_layout.addWidget(self.strip_toggle)
-        self.quick_mark_button = QToolButton()
-        self.quick_mark_button.setObjectName("fullQuickMark")
-        self.quick_mark_button.setIcon(_fomantic_icon("bookmark", 13))
-        self.quick_mark_button.setToolTip("Быстрая метка (M)")
-        self.quick_mark_button.clicked.connect(self.quickMarkRequested)
-        strip_header_layout.addWidget(self.quick_mark_button)
         self.video_play_button = QToolButton()
         self.video_play_button.setObjectName("videoPlay")
         self.video_play_button.setIcon(_fomantic_icon("play", 12))
-        self.video_play_button.setText("Пуск")
-        self.video_play_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.video_play_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.video_play_button.setToolTip("Воспроизвести / пауза (Пробел)")
         self.video_play_button.clicked.connect(self._toggle_video_playback)
         self.video_seek = VideoSeekSlider(Qt.Orientation.Horizontal)
@@ -733,35 +1027,21 @@ class FullView(QFrame):
         self.video_seek.seekRequested.connect(self.video_player.setPosition)
         self.video_time_label = QLabel("0:00 / 0:00")
         self.video_time_label.setObjectName("videoTime")
+        self.video_controls.setParent(self.media_panel)
         self.video_controls_layout.addWidget(self.video_play_button)
         self.video_controls_layout.addWidget(self.video_seek, 1)
         self.video_controls_layout.addWidget(self.video_time_label)
-        self.color_buttons: dict[str, QToolButton] = {}
-        for color in ("", "red", "yellow", "green", "blue", "purple"):
-            button = QToolButton()
-            button.setObjectName("viewerColor")
-            button.setProperty("colorLabel", color or "none")
-            button.setCheckable(True)
-            if not color:
-                button.setIcon(_fomantic_icon("ban", 11, "#959595"))
-            button.clicked.connect(lambda _checked=False, value=color: self.colorRequested.emit(value))
-            strip_header_layout.addWidget(button)
-            self.color_buttons[color] = button
-        self.rating_buttons: dict[int, QToolButton] = {}
-        for rating in range(0, 6):
-            button = QToolButton()
-            button.setObjectName("viewerRating")
-            button.setIcon(_fomantic_icon("ban" if rating == 0 else "star", 10, "#95866b"))
-            button.setCheckable(True)
-            button.clicked.connect(lambda _checked=False, value=rating: self.ratingRequested.emit(value or None))
-            strip_header_layout.addWidget(button)
-            self.rating_buttons[rating] = button
-        self.full_comment_edit = QLineEdit()
-        self.full_comment_edit.setObjectName("fullComment")
-        self.full_comment_edit.setPlaceholderText("Комментарий для выбранных фото")
-        self.full_comment_edit.editingFinished.connect(lambda: self.commentSubmitted.emit(self.full_comment_edit.text().strip()))
-        strip_header_layout.addWidget(self.full_comment_edit, 1)
-        strip_header_layout.addWidget(self.info_label, 1)
+        self.meta_bar = ViewerMetaBar()
+        self.meta_bar.ratingRequested.connect(self.ratingRequested)
+        self.meta_bar.colorRequested.connect(self.colorRequested)
+        self.meta_bar.quickMarkRequested.connect(self.quickMarkRequested)
+        self.meta_bar.quickMarkConfigured.connect(self.quickMarkConfigured)
+        self.meta_bar.autoAdvanceChanged.connect(self.autoAdvanceChanged)
+        self.meta_bar.commentSubmitted.connect(self.commentSubmitted)
+        self.color_buttons = self.meta_bar.color_buttons
+        self.rating_buttons = self.meta_bar.rating_buttons
+        self.full_comment_edit = self.meta_bar.comment_edit
+        strip_header_layout.addWidget(self.meta_bar, 1)
 
         self.strip_panel = QFrame()
         self.strip_panel.setObjectName("stripPanel")
@@ -787,6 +1067,12 @@ class FullView(QFrame):
         self.strip_toggle.setToolTip("Развернуть ленту превью" if visible else "Свернуть ленту превью")
         QSettings("RAWww", "RAWww").setValue("viewer_strip_collapsed", visible)
 
+    def set_quick_mark(self, kind: str, value: object) -> None:
+        self.meta_bar.set_quick_mark(kind, value)
+
+    def set_auto_advance(self, enabled: bool) -> None:
+        self.meta_bar.set_auto_advance(enabled)
+
     def set_navigation(
         self,
         paths: list[Path],
@@ -798,6 +1084,7 @@ class FullView(QFrame):
         *,
         series_current: Path | None = None,
         strip_series_cards: dict[Path, dict] | None = None,
+        show_series_strip: bool = True,
     ) -> None:
         # The bottom strip represents collapsed series and therefore selects
         # its leader. The vertical strip represents every member and must keep
@@ -814,9 +1101,13 @@ class FullView(QFrame):
                 item = self.photo_strip.item_for_path(path)
                 if item is not None:
                     item.setData(SERIES_ROLE, series_card)
-        self.series_strip.set_paths(series, series_current, details, previews)
+        series_cards = (
+            {path: {"expanded": index == 0, "member": index > 0} for index, path in enumerate(series)}
+            if len(series) > 1 else None
+        )
+        self.series_strip.set_paths(series, series_current, details, previews, series_cards)
         self._series_paths = list(series)
-        self.series_panel.setVisible(len(series) > 1)
+        self.series_panel.setVisible(show_series_strip and len(series) > 1)
         self._update_series_navigation(series_current)
 
     def update_preview(self, path: Path, preview: QImage) -> None:
@@ -826,23 +1117,63 @@ class FullView(QFrame):
     def set_faces(self, faces: list[dict] | None) -> None:
         self.image_view.set_faces(faces)
 
+    def face_avatar(self, face: dict, size: int = 40) -> QPixmap:
+        return self.image_view.face_avatar(face, size)
+
+    def set_face_filter(self, avatar: QPixmap | None) -> None:
+        if avatar is not None and not avatar.isNull():
+            self.face_filter_avatar.setPixmap(avatar.scaled(
+                26, 26, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            ))
+        else:
+            self.face_filter_avatar.setPixmap(_fomantic_icon("user", 13).pixmap(16, 16))
+        self.face_filter_chip.show()
+        self._position_face_filter_chip()
+
+    def clear_face_filter(self) -> None:
+        self.face_filter_chip.hide()
+
+    def _show_face_actions(self, face: object, position: object) -> None:
+        if not isinstance(face, dict) or not isinstance(position, QPoint):
+            return
+        # FullView is embedded in a stacked page. A popup needs the actual
+        # top-level parent on Windows, otherwise Qt creates an invalid child
+        # QWidgetWindow and emits a warning for every click.
+        menu = QMenu(self.window())
+        menu.setObjectName("faceActionMenu")
+        action = QWidgetAction(menu)
+        row = QWidget(menu)
+        layout = QVBoxLayout(row)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(5)
+        show_button = QToolButton(row)
+        show_button.setObjectName("faceActionButton")
+        show_button.setIcon(_fomantic_icon("images", 14))
+        show_button.setText("Показать фото с этим лицом")
+        show_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        add_button = QToolButton(row)
+        add_button.setObjectName("faceActionButton")
+        add_button.setIcon(_fomantic_icon("plus", 14))
+        add_button.setText("Добавить лицо в набор")
+        add_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        for button in (show_button, add_button):
+            button.setFixedWidth(250)
+            layout.addWidget(button)
+        show_button.clicked.connect(lambda: self.faceShowRequested.emit(face))
+        show_button.clicked.connect(menu.close)
+        add_button.clicked.connect(lambda: self.faceAddRequested.emit(face))
+        add_button.clicked.connect(menu.close)
+        action.setDefaultWidget(row)
+        menu.addAction(action)
+        menu.popup(self.image_view.mapToGlobal(position))
+
     def set_comment(self, comment: str) -> None:
         self.full_comment_edit.blockSignals(True)
         self.full_comment_edit.setText(comment)
         self.full_comment_edit.blockSignals(False)
 
     def set_metadata(self, detail: dict, paths: tuple[Path, ...] = ()) -> None:
-        color = str(detail.get("color_label") or "")
-        rating = int(detail.get("rating") or 0)
-        for value, button in self.color_buttons.items():
-            button.blockSignals(True)
-            button.setChecked(value == color)
-            button.blockSignals(False)
-        for value, button in self.rating_buttons.items():
-            button.blockSignals(True)
-            button.setChecked((value == 0 and rating == 0) or (value > 0 and value <= rating))
-            button.blockSignals(False)
-        self.set_comment(str(detail.get("comment") or ""))
+        self.meta_bar.set_metadata(detail)
         for path in paths or ((self._path,) if self._path is not None else ()):
             self.photo_strip.update_details(path, detail)
             self.series_strip.update_details(path, detail)
@@ -895,8 +1226,9 @@ class FullView(QFrame):
         self.video_seek.setRange(0, 0)
         self.video_time_label.setText("0:00 / 0:00")
         self.video_play_button.setIcon(_fomantic_icon("play", 12))
-        self.video_play_button.setText("Пуск")
+        self.video_controls.setParent(self.media_panel)
         self.video_controls.show()
+        self._position_video_controls()
         self.media_stack.setCurrentWidget(self.image_view)
         if preview is not None and not preview.isNull():
             self._pixmap = QPixmap.fromImage(preview)
@@ -914,13 +1246,18 @@ class FullView(QFrame):
         if self.video_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.video_player.pause()
         else:
+            self.video_controls.setParent(self.video_widget)
             self.media_stack.setCurrentWidget(self.video_widget)
+            self._position_video_controls()
+            self.video_controls.show()
             self.video_player.play()
 
     def _video_position_changed(self, position: int) -> None:
         if not self.video_seek.isSliderDown():
             self.video_seek.setValue(position)
         self._update_video_time(position, self.video_player.duration())
+        if self.video_controls.isVisible():
+            self.video_controls.raise_()
 
     def _video_duration_changed(self, duration: int) -> None:
         self.video_seek.setRange(0, max(0, duration))
@@ -938,7 +1275,6 @@ class FullView(QFrame):
     def _video_state_changed(self, state) -> None:
         playing = state == QMediaPlayer.PlaybackState.PlayingState
         self.video_play_button.setIcon(_fomantic_icon("pause" if playing else "play", 12))
-        self.video_play_button.setText("Пауза" if playing else "Пуск")
         self.videoPlaybackChanged.emit(playing)
 
     @property
@@ -949,9 +1285,32 @@ class FullView(QFrame):
     def has_image(self) -> bool:
         return self._pixmap is not None and not self._pixmap.isNull()
 
+    def _position_video_controls(self) -> None:
+        host = self.video_controls.parentWidget()
+        if host is not self.media_panel and host is not self.video_widget:
+            return
+        height = self.video_controls.sizeHint().height()
+        self.video_controls.resize(self.video_controls.width(), height)
+        self.video_controls.move(
+            max(8, (host.width() - self.video_controls.width()) // 2),
+            max(8, host.height() - height - 14),
+        )
+        self.video_controls.raise_()
+
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self.image_view.update()
+        QTimer.singleShot(0, self._position_video_controls)
+        QTimer.singleShot(0, self._position_face_filter_chip)
+
+    def _position_face_filter_chip(self) -> None:
+        if not self.face_filter_chip.isVisible():
+            return
+        self.face_filter_chip.adjustSize()
+        self.face_filter_chip.move(
+            max(8, self.media_panel.width() - self.face_filter_chip.width() - 12), 12
+        )
+        self.face_filter_chip.raise_()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()
@@ -991,7 +1350,7 @@ class FullView(QFrame):
 
 
 class FullImageView(QWidget):
-    faceRequested = Signal(object)
+    faceClicked = Signal(object, QPoint)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1038,7 +1397,7 @@ class FullImageView(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             hit = self._face_at(event.position())
             if hit >= 0:
-                self.faceRequested.emit(self._faces[hit])
+                self.faceClicked.emit(self._faces[hit], event.position().toPoint())
                 event.accept()
                 return
         super().mouseReleaseEvent(event)
@@ -1065,6 +1424,44 @@ class FullImageView(QWidget):
             image_rect.left() + x * image_rect.width(), image_rect.top() + y * image_rect.height(),
             width * image_rect.width(), height * image_rect.height(),
         )
+
+    def face_avatar(self, face: dict, size: int) -> QPixmap:
+        """Return a circular crop of a detected face for chips and face sets."""
+        if self._pixmap is None or self._pixmap.isNull():
+            return QPixmap()
+        return self.face_avatar_from_pixmap(self._pixmap, face, size)
+
+    @staticmethod
+    def face_avatar_from_pixmap(pixmap: QPixmap, face: dict, size: int) -> QPixmap:
+        """Crop a face from the decoded source instead of a UI thumbnail."""
+        if pixmap.isNull():
+            return QPixmap()
+        bbox = face.get("bbox") or {}
+        try:
+            source = QRectF(
+                float(bbox["x"]) * pixmap.width(),
+                float(bbox["y"]) * pixmap.height(),
+                float(bbox["width"]) * pixmap.width(),
+                float(bbox["height"]) * pixmap.height(),
+            ).toAlignedRect().intersected(pixmap.rect())
+        except (KeyError, TypeError, ValueError):
+            return QPixmap()
+        if source.isEmpty():
+            return QPixmap()
+        crop = pixmap.copy(source).scaled(
+            size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        result = QPixmap(size, size)
+        result.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(result)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        clip = QPainterPath()
+        clip.addEllipse(0, 0, size, size)
+        painter.setClipPath(clip)
+        painter.drawPixmap(0, 0, crop)
+        painter.end()
+        return result
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -1246,11 +1643,29 @@ class Workspace(QMainWindow):
         self.expanded_series: set[Path] = set()
         self.photo_details: dict[str, dict] = {}
         self.image_embeddings: dict[str, bytes] = {}
-        self.quick_mark: tuple[str, object] = ("rating", 5)
-        self.auto_advance = False
-        self.face_reference: list[float] | None = None
-        self.last_move_direction = 1
         self.settings = QSettings("RAWww", "RAWww")
+        quick_kind = self.settings.value("quick_mark_kind", "rating", str)
+        quick_value = (
+            self.settings.value("quick_mark_value", 5, int)
+            if quick_kind == "rating"
+            else self.settings.value("quick_mark_value", "", str)
+        )
+
+        if quick_kind not in {"rating", "color_label"}:
+            quick_kind, quick_value = "rating", 5
+        self.quick_mark: tuple[str, object] = (quick_kind, quick_value)
+        self.auto_advance = self.settings.value("auto_advance", False, bool)
+        stored_face_filter = self.settings.value("face_filter_embedding", "", str)
+        try:
+            stored_embedding = json.loads(stored_face_filter) if stored_face_filter else None
+        except (TypeError, ValueError):
+            stored_embedding = None
+        self.face_reference: list[float] | None = stored_embedding if isinstance(stored_embedding, list) else None
+        self.face_filter_avatar = self._face_avatar_from_entry({
+            "avatar": self.settings.value("face_filter_avatar", "", str),
+        })
+        self.face_sets = self._load_face_sets()
+        self.last_move_direction = 1
         self.current_dir = initial_directory or self._initial_directory()
         thumbnail_size = max(0, min(3, self.settings.value("thumbnail_size", 1, int)))
         self.workspace_state = WorkspaceState(self.current_dir, thumbnail_size=thumbnail_size)
@@ -1282,8 +1697,15 @@ class Workspace(QMainWindow):
         self.full_view.stripViewportChanged.connect(self._prioritize_visible_full_strip_thumbs)
         self.full_view.ratingRequested.connect(self._set_selected_rating)
         self.full_view.colorRequested.connect(self._set_selected_color)
-        self.full_view.faceRequested.connect(self._filter_face_from_full_view)
+        self.full_view.faceShowRequested.connect(self._filter_face_from_full_view)
+        self.full_view.faceAddRequested.connect(self._add_face_to_set)
+        self.full_view.faceFilterClearRequested.connect(self._clear_face_search)
+        self.full_view.seriesToggleRequested.connect(self._toggle_grid_series)
         self.full_view.quickMarkRequested.connect(self._apply_quick_mark)
+        self.full_view.quickMarkConfigured.connect(self._configure_quick_mark)
+        self.full_view.autoAdvanceChanged.connect(self._set_auto_advance)
+        self.full_view.set_quick_mark(*self.quick_mark)
+        self.full_view.set_auto_advance(self.auto_advance)
         self.full_view.commentSubmitted.connect(self._save_full_comment)
         self.stack.addWidget(self.grid_page)
         self.stack.addWidget(self.full_view)
@@ -1324,6 +1746,7 @@ class Workspace(QMainWindow):
 
         self._create_actions()
         QTimer.singleShot(0, lambda: self.load_directory(self.current_dir))
+        QTimer.singleShot(0, self._restore_face_filter_chip)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # Future callbacks run on worker threads. Mark shutdown before stopping
@@ -1541,16 +1964,37 @@ class Workspace(QMainWindow):
         toolbar_layout.setContentsMargins(10, 8, 10, 8)
         toolbar_layout.setSpacing(7)
 
+        filter_panel = QWidget()
+        filter_panel.setObjectName("viewerFiltersPanel")
+        filter_layout = QHBoxLayout(filter_panel)
+        filter_layout.setContentsMargins(7, 4, 7, 4)
+        filter_layout.setSpacing(6)
+        filter_icon = QLabel()
+        filter_icon.setPixmap(_fomantic_icon("filter", 14, "#a8b0bd").pixmap(QSize(14, 14)))
+        filter_layout.addWidget(filter_icon)
+
         
         self.rating_filter = QComboBox()
         self.rating_filter.addItem("Все рейтинги", None)
-        for rating in range(5, 0, -1):
-            self.rating_filter.addItem(f"{rating} ★", rating)
         self.rating_filter.setItemIcon(0, _fomantic_icon("star", 12, "#a8b0bd"))
+        for rating in range(5, 0, -1):
+            self.rating_filter.addItem("★" * rating, rating)
+            self.rating_filter.setItemIcon(self.rating_filter.count() - 1, _fomantic_icon("star", 12, "#a8b0bd"))
+        self.rating_filter.setFixedWidth(148)
         self.color_filter = QComboBox()
         for label, value in (("Все цвета", None), ("Без цвета", ""), ("Красный", "red"), ("Жёлтый", "yellow"), ("Зелёный", "green"), ("Синий", "blue"), ("Фиолетовый", "purple")):
             self.color_filter.addItem(label, value)
+            if value is not None:
+                self.color_filter.setItemIcon(self.color_filter.count() - 1, _color_swatch_icon(value or None))
         self.color_filter.setItemIcon(0, _fomantic_icon("brush", 12, "#a8b0bd"))
+        self.color_filter.setFixedWidth(148)
+        self.media_filter = QComboBox()
+        for label, value in (("Фото и видео", None), ("Фото", "image"), ("Видео", "video")):
+            self.media_filter.addItem(label, value)
+        self.media_filter.setItemIcon(0, _fomantic_icon("media", 12, "#a8b0bd"))
+        self.media_filter.setItemIcon(1, _fomantic_icon("images", 12, "#a8b0bd"))
+        self.media_filter.setItemIcon(2, _fomantic_icon("film", 12, "#a8b0bd"))
+        self.media_filter.setFixedWidth(148)
         self.shot_filter = QComboBox()
         for label, value in (("Все планы", None), ("Крупный", "closeup"), ("Средний", "medium"), ("Общий", "wide"), ("Без лиц", "no_face")):
             self.shot_filter.addItem(label, value)
@@ -1559,15 +2003,52 @@ class Workspace(QMainWindow):
         for label, value in (("По имени ↑", "name"), ("По имени ↓", "name_desc"), ("По времени ↑", "time"), ("По времени ↓", "time_desc"), ("По рейтингу", "rating")):
             self.sort_combo.addItem(label, value)
         self.sort_combo.setItemIcon(0, _fomantic_icon("sort", 12, "#a8b0bd"))
+        for index in range(1, self.sort_combo.count()):
+            self.sort_combo.setItemIcon(index, _fomantic_icon("sort", 12, "#a8b0bd"))
+        self.sort_combo.setCurrentIndex(self.sort_combo.findData("time"))
+        self.sort_combo.setFixedWidth(148)
+        search_box = QWidget()
+        search_box.setObjectName("viewerSearchBox")
+        search_layout = QHBoxLayout(search_box)
+        search_layout.setContentsMargins(5, 0, 5, 0)
+        search_layout.setSpacing(3)
+        search_icon = QLabel()
+        search_icon.setObjectName("viewerSearchIcon")
+        search_icon.setPixmap(_fomantic_icon("search", 14, "#a8b0bd").pixmap(QSize(14, 14)))
+        search_layout.addWidget(search_icon)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Поиск по имени или комментарию")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.addAction(_fomantic_icon("search", 13, "#a8b0bd"), QLineEdit.ActionPosition.LeadingPosition)
-        for control in (self.rating_filter, self.color_filter, self.shot_filter, self.sort_combo):
+        self.search_edit.setFixedWidth(148)
+        search_layout.addWidget(self.search_edit)
+        for control in (self.rating_filter, self.color_filter, self.media_filter, self.shot_filter, self.sort_combo):
             control.currentIndexChanged.connect(self._apply_view)
-            toolbar_layout.addWidget(control)
+            filter_layout.addWidget(control)
         self.search_edit.textChanged.connect(self._apply_view)
-        toolbar_layout.addWidget(self.search_edit, 1)
+        filter_layout.addWidget(search_box)
+
+        self.face_filter_chip = QFrame()
+        self.face_filter_chip.setObjectName("fullFaceFilterChip")
+        chip_layout = QHBoxLayout(self.face_filter_chip)
+        chip_layout.setContentsMargins(5, 3, 4, 3)
+        chip_layout.setSpacing(4)
+        self.face_filter_avatar_label = QLabel()
+        self.face_filter_avatar_label.setFixedSize(26, 26)
+        self.face_filter_avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        chip_layout.addWidget(self.face_filter_avatar_label)
+        self.face_clear_button = QToolButton()
+        self.face_clear_button.setObjectName("fullFaceFilterClear")
+        self.face_clear_button.setIcon(_fomantic_icon("close", 12))
+        self.face_clear_button.setFixedSize(20, 20)
+        self.face_clear_button.setIconSize(QSize(12, 12))
+        self.face_clear_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.face_clear_button.setAutoRaise(True)
+        self.face_clear_button.setToolTip("Сбросить фильтр по лицу")
+        self.face_clear_button.clicked.connect(self._clear_face_search)
+        chip_layout.addWidget(self.face_clear_button)
+        self.face_filter_chip.hide()
+        filter_layout.addWidget(self.face_filter_chip)
+
         self.ai_button = QPushButton("Обработать новые фото")
         self.ai_button.clicked.connect(self._start_ai_analysis)
         toolbar_layout.addWidget(self.ai_button)
@@ -1577,26 +2058,14 @@ class Workspace(QMainWindow):
         self.ai_progress.setFormat("AI не запускался")
         self.ai_progress.setFixedWidth(150)
         toolbar_layout.addWidget(self.ai_progress)
-        self.face_search_button = QPushButton("Найти лицо")
-        self.face_search_button.setToolTip("Найти фото с лицом из выбранной карточки")
-        self.face_search_button.clicked.connect(self._search_selected_face)
-        self.face_search_button.hide()
-        toolbar_layout.addWidget(self.face_search_button)
-        self.face_clear_button = QToolButton()
-        self.face_clear_button.setText("×")
-        self.face_clear_button.setToolTip("Сбросить поиск по лицу")
-        self.face_clear_button.setEnabled(False)
-        self.face_clear_button.clicked.connect(self._clear_face_search)
-        self.face_clear_button.hide()
-        self.face_clear_button.setIcon(_fomantic_icon("close", 12))
-        self.face_clear_button.setText("")
-        toolbar_layout.addWidget(self.face_clear_button)
         for icon, delta in (("zoom-out", -1), ("zoom", 1)):
             button = QToolButton()
             button.setIcon(_fomantic_icon(icon, 13))
             button.setToolTip("Размер превью")
             button.clicked.connect(lambda _checked=False, d=delta: self.grid.change_card_size(d))
             toolbar_layout.addWidget(button)
+        toolbar_layout.addStretch(1)
+        toolbar_layout.addWidget(filter_panel)
 
         self.ai_panel = QWidget()
         self.ai_panel.setObjectName("viewerAiPanel")
@@ -1623,7 +2092,7 @@ class Workspace(QMainWindow):
         self.faces_panel_button.setObjectName("aiFilter")
         self.faces_panel_button.setIcon(_fomantic_icon("user", 13))
         self.faces_panel_button.setText("Лица")
-        self.faces_panel_button.clicked.connect(self._search_selected_face)
+        self.faces_panel_button.clicked.connect(self._show_face_sets)
         series_faces_layout.addWidget(self.faces_panel_button)
         ai_layout.addWidget(self.series_faces_group)
 
@@ -1648,42 +2117,18 @@ class Workspace(QMainWindow):
         ai_layout.addStretch(1)
         self.ai_panel.hide()
 
-        meta = QWidget()
-        meta.setObjectName("viewerMeta")
-        meta_layout = QHBoxLayout(meta)
-        meta_layout.setContentsMargins(10, 7, 10, 7)
-        meta_layout.setSpacing(6)
         self.selection_label = QLabel("Не выбрано")
-        meta_layout.addWidget(self.selection_label)
-        self.quick_button = QPushButton("M  Быстрая: ★ 5")
-        self.quick_button.setIcon(_fomantic_icon("bookmark", 13))
-        self.quick_button.clicked.connect(self._apply_quick_mark)
-        meta_layout.addWidget(self.quick_button)
-        self.auto_button = QPushButton("Автопереход")
-        self.auto_button.setIcon(_fomantic_icon("step-forward", 13))
-        self.auto_button.setCheckable(True)
-        self.auto_button.toggled.connect(lambda value: setattr(self, "auto_advance", value))
-        meta_layout.addWidget(self.auto_button)
-        for color, title in (("", ""), ("red", ""), ("yellow", ""), ("green", ""), ("blue", ""), ("purple", "")):
-            button = QToolButton()
-            button.setText(title)
-            if not color:
-                button.setIcon(_fomantic_icon("ban", 11, "#959595"))
-            button.setProperty("colorLabel", color or "none")
-            button.setToolTip("Сбросить цвет" if not color else color)
-            button.clicked.connect(lambda _checked=False, value=color: self._set_selected_color(value))
-            meta_layout.addWidget(button)
-        for rating in range(0, 6):
-            button = QToolButton()
-            button.setText("")
-            button.setIcon(_fomantic_icon("ban" if rating == 0 else "star", 11, "#95866b"))
-            button.setToolTip("Сбросить рейтинг" if rating == 0 else f"Рейтинг {rating}")
-            button.clicked.connect(lambda _checked=False, value=rating: self._set_selected_rating(value or None))
-            meta_layout.addWidget(button)
-        self.comment_edit = QLineEdit()
-        self.comment_edit.setPlaceholderText("Комментарий")
-        self.comment_edit.editingFinished.connect(self._save_comment)
-        meta_layout.addWidget(self.comment_edit, 1)
+        self.meta_bar = ViewerMetaBar(settings=self.settings)
+        self.meta_bar.ratingRequested.connect(self._set_selected_rating)
+        self.meta_bar.colorRequested.connect(self._set_selected_color)
+        self.meta_bar.quickMarkRequested.connect(self._apply_quick_mark)
+        self.meta_bar.quickMarkConfigured.connect(self._configure_quick_mark)
+        self.meta_bar.autoAdvanceChanged.connect(self._set_auto_advance)
+        self.meta_bar.commentSubmitted.connect(self._save_comment)
+        self.comment_edit = self.meta_bar.comment_edit
+        self.meta_bar.set_quick_mark(*self.quick_mark)
+        self.meta_bar.set_auto_advance(self.auto_advance)
+        meta = self.meta_bar
 
         content_layout.addWidget(self.grid, 1)
         content_layout.addWidget(meta)
@@ -2233,7 +2678,7 @@ class Workspace(QMainWindow):
                 break
             path, visible_priority = next_path
             if is_supported_video(path):
-                self.video_thumbnailer.request(path)
+                self._submit_video_thumbnail(path, visible_priority=visible_priority)
             else:
                 self._submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=visible_priority)
             submitted += 1
@@ -2326,24 +2771,48 @@ class Workspace(QMainWindow):
         self._apply_view()
 
     def _update_analysis_controls(self) -> None:
-        if not hasattr(self, "face_search_button"):
+        if not hasattr(self, "faces_panel_button"):
             return
         has_faces = any(detail.get("faces") for detail in self.photo_details.values())
         has_series = self._has_available_series(self.view_paths or self.all_paths)
-        self.face_search_button.setVisible(has_faces)
-        self.face_clear_button.setVisible(has_faces and self.face_reference is not None)
         if hasattr(self, "ai_panel"):
             self.ai_panel.setVisible(has_faces or has_series)
             self.series_faces_group.setVisible(has_faces or has_series)
-            self.series_toggle.setVisible(has_series)
+            self.series_toggle.setVisible(True)
             self.faces_panel_button.setVisible(has_faces)
             self.shot_group.setVisible(has_faces)
             counts = {value: 0 for value in self.shot_buttons}
-            for detail in self.photo_details.values():
+            rating = self.rating_filter.currentData()
+            color = self.color_filter.currentData()
+            media = self.media_filter.currentData()
+            needle = self.search_edit.text().strip().casefold()
+            matching_paths: list[Path] = []
+            for path in self.all_paths:
+                if not path.is_file():
+                    continue
+                if media == "video" and not is_supported_video(path):
+                    continue
+                if media == "image" and is_supported_video(path):
+                    continue
+                detail = self.photo_details.get(path.name, {})
+                if rating is not None and detail.get("rating") != rating:
+                    continue
+                if self.color_filter.currentIndex() > 0 and detail.get("color_label", "") != color:
+                    continue
+                if self.face_reference is not None and not any(
+                    self._face_similarity(self.face_reference, face.get("embedding", [])) >= 0.42
+                    for face in detail.get("faces", []) if isinstance(face, dict)
+                ):
+                    continue
+                if needle and needle not in path.name.casefold() and needle not in str(detail.get("comment", "")).casefold():
+                    continue
+                matching_paths.append(path)
+            for path in matching_paths:
+                detail = self.photo_details.get(path.name, {})
                 counts[self._shot_size(detail)] = counts.get(self._shot_size(detail), 0) + 1
             for value, button in self.shot_buttons.items():
                 button.setChecked(self.shot_filter.currentData() == value)
-                count = len(self.all_paths) if value is None else counts.get(value, 0)
+                count = len(matching_paths) if value is None else counts.get(value, 0)
                 label = button.property("shotLabel") or button.text().split("  ")[0]
                 button.setProperty("shotLabel", label)
                 button.setText(f"{label}  {count}")
@@ -2479,6 +2948,7 @@ class Workspace(QMainWindow):
             return
         rating = self.rating_filter.currentData()
         color = self.color_filter.currentData()
+        media = self.media_filter.currentData()
         shot = self.shot_filter.currentData()
         needle = self.search_edit.text().strip().casefold()
 
@@ -2487,6 +2957,10 @@ class Workspace(QMainWindow):
             if path.is_dir():
                 return True
             # All filters only apply to actual image files
+            if media == "video" and not is_supported_video(path):
+                return False
+            if media == "image" and is_supported_video(path):
+                return False
             detail = self.photo_details.get(path.name, {})
             if rating is not None and detail.get("rating") != rating:
                 return False
@@ -2582,6 +3056,8 @@ class Workspace(QMainWindow):
             self.expanded_series.clear()
             self.expanded_series.add(leader)
         self._apply_view()
+        if self.stack.currentWidget() is self.full_view and self.current_path is not None:
+            self._refresh_full_view_navigation(self.current_path)
 
     def _selected_paths(self) -> list[Path]:
         return [Path(item.data(Qt.ItemDataRole.UserRole)) for item in self.grid.selectedItems()]
@@ -2595,11 +3071,24 @@ class Workspace(QMainWindow):
             self.comment_edit.clear()
 
     def _update_selection(self, **changes) -> None:
-        paths = self._selected_paths()
+        selected_paths = self._selected_paths()
+        paths = list(selected_paths)
         if self.current_path is not None and self.stack.currentWidget() is self.full_view:
             # The grid retains the series leader as its selection. In the
             # viewer, metadata belongs exclusively to the opened series frame.
             paths = [self.current_path]
+        elif {"rating", "color_label"}.intersection(changes):
+            # A collapsed series is represented by one leader card, so a mark
+            # on that card belongs to every hidden frame. Once expanded, each
+            # visible card is an independent target.
+            targets: list[Path] = []
+            for path in paths:
+                series = self.series_cards.get(path) or {}
+                if int(series.get("count", 0) or 0) > 1 and not series.get("expanded"):
+                    targets.extend(self._series_for_path(path))
+                else:
+                    targets.append(path)
+            paths = list(dict.fromkeys(targets))
         for path in paths:
             detail = self.photo_details.setdefault(path.name, {})
             detail.update(changes)
@@ -2614,17 +3103,21 @@ class Workspace(QMainWindow):
                     comment=detail.get("comment", ""),
                 )
         self.grid.viewport().update()
+        if self.stack.currentWidget() is self.grid_page:
+            self.meta_bar.set_metadata(
+                self.photo_details.get(selected_paths[0].name, {}) if len(selected_paths) == 1 else {}
+            )
         if self.current_path is not None and self.stack.currentWidget() is self.full_view:
             self.full_view.set_metadata(
                 self.photo_details.get(self.current_path.name, {}),
                 (self.current_path,),
             )
             self._refresh_full_view_navigation(self.current_path)
-        if self.auto_advance and len(paths) == 1:
+        if self.auto_advance and len(selected_paths) == 1:
             if self.stack.currentWidget() is self.full_view:
                 self._move(1)
             else:
-                item = self.items_by_path.get(paths[0])
+                item = self.items_by_path.get(selected_paths[0])
                 row = self.grid.row(item) if item is not None else -1
                 if 0 <= row + 1 < self.grid.count():
                     self.grid.clearSelection()
@@ -2642,6 +3135,16 @@ class Workspace(QMainWindow):
     def _save_full_comment(self, comment: str) -> None:
         self._update_selection(comment=comment)
 
+    def _configure_quick_mark(self, kind: str, value: object) -> None:
+        self.quick_mark = (kind, value)
+        self.settings.setValue("quick_mark_kind", kind)
+        self.settings.setValue("quick_mark_value", value)
+        self.full_view.set_quick_mark(kind, value)
+
+    def _set_auto_advance(self, enabled: bool) -> None:
+        self.auto_advance = enabled
+        self.settings.setValue("auto_advance", enabled)
+
     def _apply_quick_mark(self) -> None:
         kind, value = self.quick_mark
         paths = self._selected_paths()
@@ -2651,6 +3154,203 @@ class Workspace(QMainWindow):
             return
         current = self.photo_details.get(paths[0].name, {}).get(kind)
         self._update_selection(**{kind: None if current == value else value})
+
+    def _load_face_sets(self) -> list[dict]:
+        """Load globally saved people independently of the current folder cache."""
+        raw = self.settings.value("face_sets", "", str)
+        try:
+            entries = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            return []
+        return [entry for entry in entries if isinstance(entry, dict) and isinstance(entry.get("embedding"), list)]
+
+    def _save_face_sets(self) -> None:
+        self.settings.setValue("face_sets", json.dumps(self.face_sets, ensure_ascii=False, separators=(",", ":")))
+
+    @staticmethod
+    def _pixmap_to_base64(pixmap: QPixmap) -> str:
+        if pixmap.isNull():
+            return ""
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        pixmap.toImage().save(buffer, "PNG")
+        return bytes(buffer.data().toBase64()).decode("ascii")
+
+    @staticmethod
+    def _face_avatar_from_entry(entry: dict, size: int = 40) -> QPixmap:
+        try:
+            image = QImage.fromData(base64.b64decode(str(entry.get("avatar") or "")))
+        except (ValueError, TypeError):
+            image = QImage()
+        if image.isNull():
+            return QPixmap()
+        return QPixmap.fromImage(image).scaled(
+            size, size, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+    def _current_face_avatar(self, face: dict, size: int = 80) -> QPixmap:
+        """Prefer the largest decoded frame; the on-screen image can be 640px fallback."""
+        if self.current_path is not None:
+            candidates = [
+                (variant, decoded) for (path, variant), decoded in self.memory_cache.items()
+                if path == self.current_path and variant > THUMB_SIZE
+            ]
+            if candidates:
+                _variant, decoded = max(candidates, key=lambda candidate: candidate[0])
+                return FullImageView.face_avatar_from_pixmap(QPixmap.fromImage(decoded.image), face, size)
+        return self.full_view.face_avatar(face, size)
+
+    def _add_face_to_set(self, face: object) -> None:
+        if not isinstance(face, dict) or not isinstance(face.get("embedding"), list):
+            return
+        embedding = face["embedding"]
+        if any(self._face_similarity(embedding, item.get("embedding", [])) >= 0.98 for item in self.face_sets):
+            return
+        avatar = self._current_face_avatar(face, 80)
+        self.face_sets.append({
+            "id": sha1(json.dumps(embedding).encode()).hexdigest()[:12],
+            "name": "Без имени",
+            "embedding": embedding,
+            "avatar": self._pixmap_to_base64(avatar),
+        })
+        self._save_face_sets()
+        self._update_analysis_controls()
+
+    def _face_set_by_id(self, face_id: str) -> dict | None:
+        return next((entry for entry in self.face_sets if entry.get("id") == face_id), None)
+
+    def _show_face_sets(self) -> None:
+        dialog = QDialog(self)
+        dialog.setObjectName("faceSetsDialog")
+        dialog.setWindowTitle("Наборы лиц")
+        dialog.resize(560, 420)
+        layout = QVBoxLayout(dialog)
+        title = QLabel("Наборы лиц")
+        title.setObjectName("faceSetsTitle")
+        layout.addWidget(title)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(6, 6, 6, 6)
+        body_layout.setSpacing(6)
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
+        close = QPushButton("Закрыть")
+        close.setFixedHeight(34)
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+
+        def rebuild() -> None:
+            while body_layout.count():
+                child = body_layout.takeAt(0)
+                if child.widget() is not None:
+                    child.widget().deleteLater()
+            if not self.face_sets:
+                body_layout.addWidget(QLabel("Добавьте лицо, нажав «В набор» на фотографии."))
+                body_layout.addStretch(1)
+                return
+            for entry in self.face_sets:
+                face_id = str(entry["id"])
+                row = QFrame()
+                row.setObjectName("faceSetRow")
+                row_layout = QHBoxLayout(row)
+                avatar = QLabel()
+                avatar.setFixedSize(44, 44)
+                avatar.setObjectName("faceSetAvatar")
+                avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                pixmap = self._face_avatar_from_entry(entry, 40)
+                avatar.setPixmap(pixmap if not pixmap.isNull() else _fomantic_icon("user", 18).pixmap(22, 22))
+                row_layout.addWidget(avatar)
+                name = QLineEdit(str(entry.get("name") or ""))
+                name.setPlaceholderText("Имя")
+                name.setFixedHeight(34)
+                name.editingFinished.connect(lambda face_id=face_id, edit=name: self._rename_face_set(face_id, edit.text()))
+                row_layout.addWidget(name, 1)
+                mark = QToolButton()
+                mark.setText("Быстрая метка")
+                mark.setIcon(_fomantic_icon("bookmark", 13))
+                mark.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+                mark.setFixedHeight(34)
+                mark.clicked.connect(lambda _checked=False, button=mark, face_id=face_id: self._show_face_mark_menu(button, face_id))
+                row_layout.addWidget(mark)
+                show = QToolButton()
+                show.setIcon(_fomantic_icon("images", 13))
+                show.setToolTip("Показать фото с этим лицом")
+                show.setFixedSize(34, 34)
+                show.clicked.connect(lambda _checked=False, face_id=face_id: self._show_face_set(face_id, dialog))
+                row_layout.addWidget(show)
+                delete = QToolButton()
+                delete.setIcon(_fomantic_icon("trash", 13))
+                delete.setToolTip("Удалить из набора")
+                delete.setFixedSize(34, 34)
+                delete.clicked.connect(lambda _checked=False, face_id=face_id: self._delete_face_set(face_id, rebuild))
+                row_layout.addWidget(delete)
+                body_layout.addWidget(row)
+            body_layout.addStretch(1)
+
+        rebuild()
+        dialog.exec()
+
+    def _rename_face_set(self, face_id: str, name: str) -> None:
+        entry = self._face_set_by_id(face_id)
+        if entry is not None:
+            entry["name"] = name.strip() or "Без имени"
+            self._save_face_sets()
+
+    def _delete_face_set(self, face_id: str, rebuild: Callable[[], None]) -> None:
+        self.face_sets = [entry for entry in self.face_sets if entry.get("id") != face_id]
+        self._save_face_sets()
+        rebuild()
+
+    def _show_face_set(self, face_id: str, dialog: QDialog) -> None:
+        entry = self._face_set_by_id(face_id)
+        if entry is None:
+            return
+        self._set_face_reference(entry["embedding"], self._face_avatar_from_entry(entry))
+        dialog.accept()
+
+    def _show_face_mark_menu(self, button: QToolButton, face_id: str) -> None:
+        menu = QMenu(button)
+        for rating in range(5, 0, -1):
+            action = menu.addAction("★" * rating)
+            action.triggered.connect(lambda _checked=False, value=rating: self._apply_mark_to_face(face_id, "rating", value))
+        menu.addSeparator()
+        for label, value in (("Красная", "red"), ("Жёлтая", "yellow"), ("Зелёная", "green"), ("Синяя", "blue"), ("Фиолетовая", "purple")):
+            action = menu.addAction(label)
+            action.setIcon(_color_swatch_icon(value))
+            action.triggered.connect(lambda _checked=False, value=value: self._apply_mark_to_face(face_id, "color_label", value))
+        menu.addSeparator()
+        remove_rating = menu.addAction("Убрать рейтинг")
+        remove_rating.setIcon(_fomantic_icon("ban", 12))
+        remove_rating.triggered.connect(lambda: self._apply_mark_to_face(face_id, "rating", None))
+        remove = menu.addAction("Убрать метку")
+        remove.setIcon(_fomantic_icon("ban", 12))
+        remove.triggered.connect(lambda: self._apply_mark_to_face(face_id, "color_label", ""))
+        menu.popup(button.mapToGlobal(QPoint(0, button.height())))
+
+    def _apply_mark_to_face(self, face_id: str, kind: str, value: object) -> None:
+        entry = self._face_set_by_id(face_id)
+        if entry is None:
+            return
+        embedding = entry["embedding"]
+        paths = [
+            path for path in self.all_paths if path.is_file() and any(
+                self._face_similarity(embedding, face.get("embedding", [])) >= 0.42
+                for face in self.photo_details.get(path.name, {}).get("faces", []) if isinstance(face, dict)
+            )
+        ]
+        for path in paths:
+            detail = self.photo_details.setdefault(path.name, {})
+            detail[kind] = value
+            if self.folder_cache is not None and self.cache_ready:
+                self.folder_cache.store_photo_selection(
+                    path.name, rating=detail.get("rating"), color_label=detail.get("color_label", ""),
+                    comment=detail.get("comment", ""),
+                )
+        self.grid.viewport().update()
+        self._apply_view()
 
     @staticmethod
     def _face_similarity(left: list[float], right: list[float]) -> float:
@@ -2678,36 +3378,43 @@ class Workspace(QMainWindow):
             return "medium"
         return "wide"
 
-    def _search_selected_face(self) -> None:
-        paths = self._selected_paths()
-        if not paths:
-            return
-        faces = self.photo_details.get(paths[0].name, {}).get("faces") or []
-        if not faces:
-            self.selection_label.setText("На выбранном фото лица не найдены")
-            return
-        best = max(faces, key=lambda face: float(face.get("confidence", 0)))
-        embedding = best.get("embedding")
-        if not isinstance(embedding, list) or not embedding:
-            return
-        self._set_face_reference(embedding)
-
     def _filter_face_from_full_view(self, face: object) -> None:
         embedding = face.get("embedding") if isinstance(face, dict) else None
         if isinstance(embedding, list) and embedding:
-            self._set_face_reference(embedding)
+            self._set_face_reference(embedding, self._current_face_avatar(face))
 
-    def _set_face_reference(self, embedding: list[float]) -> None:
+    def _set_face_reference(self, embedding: list[float], avatar: QPixmap | None = None) -> None:
         self.face_reference = embedding
-        self.face_clear_button.setEnabled(True)
-        self.face_clear_button.setVisible(True)
+        self.face_filter_avatar = avatar or QPixmap()
+        self.settings.setValue("face_filter_embedding", json.dumps(embedding, separators=(",", ":")))
+        self.settings.setValue("face_filter_avatar", self._pixmap_to_base64(self.face_filter_avatar))
+        if not self.face_filter_avatar.isNull():
+            self.face_filter_avatar_label.setPixmap(self.face_filter_avatar.scaled(
+                24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            ))
+        else:
+            self.face_filter_avatar_label.setPixmap(_fomantic_icon("user", 13).pixmap(16, 16))
+        self.face_filter_chip.show()
+        self.full_view.set_face_filter(self.face_filter_avatar)
         self._apply_view()
+        if self.stack.currentWidget() is self.full_view and self.current_path is not None:
+            self._refresh_full_view_navigation(self.current_path)
 
     def _clear_face_search(self) -> None:
         self.face_reference = None
-        self.face_clear_button.setEnabled(False)
+        self.face_filter_avatar = QPixmap()
+        self.settings.remove("face_filter_embedding")
+        self.settings.remove("face_filter_avatar")
+        self.face_filter_chip.hide()
+        self.full_view.clear_face_filter()
         self._update_analysis_controls()
         self._apply_view()
+        if self.stack.currentWidget() is self.full_view and self.current_path is not None:
+            self._refresh_full_view_navigation(self.current_path)
+
+    def _restore_face_filter_chip(self) -> None:
+        if self.face_reference:
+            self._set_face_reference(self.face_reference, self.face_filter_avatar)
 
     def _submit_decode(
         self,
@@ -2745,6 +3452,49 @@ class Workspace(QMainWindow):
         # Full-view images deliberately bypass the disk cache. They are decoded
         # from the source on demand and live only in the bounded RAM LRU.
         self._submit_process_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
+
+    def _submit_video_thumbnail(self, path: Path, *, visible_priority: bool) -> None:
+        """Use RAM, then SQLite, before falling back to Qt frame decoding."""
+        key = (path, THUMB_SIZE)
+        preview = self._thumbnail_cache_get(path)
+        if preview is not None:
+            self.bridge.decoded.emit(
+                (DecodedImage(path=path, image=preview, width=preview.width(), height=preview.height()), THUMB_SIZE)
+            )
+            return
+        cached = self._cache_get(key)
+        if cached is not None:
+            self.bridge.decoded.emit((cached, THUMB_SIZE))
+            return
+        if key in self.pending or self.folder_cache is None:
+            return
+        executor = self.visible_thumb_cache_lookup_executor if visible_priority else self.background_cache_lookup_executor
+        future = executor.submit(self.folder_cache.load, path, THUMB_SIZE)
+        self.pending[key] = future
+        if visible_priority:
+            self.visible_thumb_pending.add(key)
+        future.add_done_callback(
+            lambda done, p=path, vp=visible_priority: self._video_thumbnail_cache_lookup_done(p, vp, done)
+        )
+
+    def _video_thumbnail_cache_lookup_done(self, path: Path, visible_priority: bool, future: Future) -> None:
+        key = (path, THUMB_SIZE)
+        if self.pending.get(key) is future:
+            self.pending.pop(key, None)
+        self.visible_thumb_pending.discard(key)
+        if self.closing or future.cancelled():
+            return
+        try:
+            decoded = future.result()
+        except Exception as exc:
+            self.bridge.failed.emit(str(path), str(exc))
+            return
+        if decoded is not None:
+            self._cache_put(key, decoded)
+            self.bridge.decoded.emit((decoded, THUMB_SIZE))
+            return
+        if self.workspace_active:
+            self.video_thumbnailer.request(path)
 
     def _submit_process_decode(
         self,
@@ -2845,7 +3595,13 @@ class Workspace(QMainWindow):
                 item.setData(PREVIEW_ROLE, decoded.image)
                 self.grid.update(self.grid.visualItemRect(item))
             self.full_view.update_preview(decoded.path, decoded.image)
-        if self.stack.currentWidget() is self.full_view and decoded.path == self.current_path:
+            if is_supported_video(decoded.path):
+                self.full_view.set_video_preview(decoded.path, decoded.image)
+        if (
+            self.stack.currentWidget() is self.full_view
+            and decoded.path == self.current_path
+            and not is_supported_video(decoded.path)
+        ):
             if max_size > THUMB_SIZE or not self.full_view.has_image or self.full_view.is_fallback:
                 self.full_view.set_image(decoded, fallback=max_size == THUMB_SIZE)
         if max_size > THUMB_SIZE and decoded.path == self.current_path:
@@ -2893,6 +3649,8 @@ class Workspace(QMainWindow):
         path = Path(value)
         self.current_path = path
         self.workspace_state.current_photo = path
+        if self.stack.currentWidget() is self.grid_page and hasattr(self, "meta_bar"):
+            self.meta_bar.set_metadata(self.photo_details.get(path.name, {}))
         self.pending_grid_full_request = path
         self.grid_full_request_timer.start(70)
 
@@ -3046,6 +3804,7 @@ class Workspace(QMainWindow):
             self.view_generation,
             series_current=current,
             strip_series_cards={path: self.series_cards.get(path, {}) for path in strip_paths},
+            show_series_strip=not (len(series) > 1 and series[0] in self.expanded_series),
         )
         self._prioritize_full_strip_thumbs(current, strip_paths, series)
 
@@ -3090,17 +3849,28 @@ class Workspace(QMainWindow):
                 self.visible_thumb_pending.discard(key)
 
     def _photo_mode_paths(self) -> list[Path]:
-        """Collapse each adjacent CLIP series to its leading photograph. Exclude folders from strip."""
+        """Build the strip order, expanding the same series as the grid."""
         # Filter out directories - only show actual image files in the viewer strip
         image_only_paths = [p for p in self.view_paths if p.is_file()]
         if not self.series_toggle.isChecked():
             return list(image_only_paths)
         result: list[Path] = []
-        previous: Path | None = None
+        group: list[Path] = []
+
+        def flush() -> None:
+            if not group:
+                return
+            if group[0] in self.expanded_series:
+                result.extend(group)
+            else:
+                result.append(group[0])
+            group.clear()
+
         for path in image_only_paths:
-            if previous is None or self._embedding_similarity(previous, path) < 0.92:
-                result.append(path)
-            previous = path
+            if group and self._embedding_similarity(group[-1], path) < 0.92:
+                flush()
+            group.append(path)
+        flush()
         return result
 
     def _series_for_path(self, path: Path) -> list[Path]:
@@ -3748,6 +4518,94 @@ def apply_theme(app: QApplication) -> None:
             color: #ededed;
             padding-left: 9px;
         }
+        QWidget#viewerFiltersPanel {
+            min-height: 32px;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 rgba(46, 46, 46, 0.96), stop:1 rgba(35, 35, 35, 0.96));
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            padding: 0;
+        }
+        QWidget#viewerFiltersPanel QLabel {
+            background: transparent;
+            border: 0;
+            padding: 0;
+        }
+        QWidget#viewerSearchBox {
+            background: transparent;
+            border: 0;
+            padding: 0;
+        }
+        QLabel#viewerSearchIcon {
+            min-width: 14px;
+            max-width: 14px;
+            min-height: 14px;
+            max-height: 14px;
+        }
+        QWidget#viewerFiltersPanel QComboBox,
+        QWidget#viewerFiltersPanel QLineEdit {
+            min-height: 24px;
+            max-height: 24px;
+        }
+        QFrame#faceFilterChip {
+            background: #343434;
+            border: 1px solid #5a5a5a;
+            border-radius: 16px;
+        }
+        QFrame#faceFilterChip QLabel, QFrame#fullFaceFilterChip QLabel,
+        QLabel#faceSetAvatar {
+            background: transparent;
+            border: none;
+        }
+        QToolButton#faceFilterClear {
+            border: none;
+            background: transparent;
+            padding: 0;
+            min-width: 0;
+            min-height: 0;
+        }
+        QFrame#fullFaceFilterChip {
+            background: #343434;
+            border: 1px solid #5a5a5a;
+            border-radius: 16px;
+        }
+        QToolButton#fullFaceFilterClear {
+            border: none;
+            background: transparent;
+            padding: 0;
+            min-width: 0;
+            min-height: 0;
+        }
+        QWidget#viewerToolbar QToolButton#fullFaceFilterClear,
+        QWidget#viewerToolbar QToolButton#fullFaceFilterClear:hover,
+        QWidget#viewerToolbar QToolButton#fullFaceFilterClear:pressed {
+            background: transparent;
+            border: none;
+            border-radius: 0;
+            padding: 0;
+            min-width: 0;
+            min-height: 0;
+        }
+        QMenu#faceActionMenu { padding: 0; }
+        QToolButton#faceActionButton {
+            min-height: 30px;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 3px 7px;
+        }
+        QToolButton#faceActionButton:hover { background: #3d3d3d; }
+        QDialog#faceSetsDialog { background: #292929; }
+        QLabel#faceSetsTitle { font-size: 16px; font-weight: 600; }
+        QFrame#faceSetRow { background: transparent; border: none; }
+        QWidget#viewerFiltersPanel QComboBox {
+            padding-left: 7px;
+            padding-right: 4px;
+        }
+        QWidget#viewerFiltersPanel QLineEdit {
+            background: #303030;
+            padding-left: 9px;
+            padding-right: 9px;
+        }
         QWidget#viewerToolbar QComboBox:hover, QWidget#viewerToolbar QPushButton:hover,
         QWidget#viewerToolbar QToolButton:hover {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -3756,8 +4614,7 @@ def apply_theme(app: QApplication) -> None:
         }
         QWidget#viewerAiPanel {
             min-height: 36px;
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #292929, stop:1 #222222);
+            background: transparent;
             border-bottom: 1px solid #131313;
             border-top: 1px solid rgba(255, 255, 255, 0.05);
         }
@@ -3818,30 +4675,33 @@ def apply_theme(app: QApplication) -> None:
             color: #252525;
         }
         QWidget#viewerMeta {
-            min-height: 42px;
+            min-height: 30px;
+            max-height: 30px;
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #303030, stop:1 #222222);
+                stop:0 #303030, stop:1 #272727);
             border-top: 1px solid #111111;
+            border-bottom: 1px solid #454545;
         }
         QWidget#viewerMeta QPushButton, QWidget#viewerMeta QToolButton {
-            min-height: 25px;
-            color: #c5c5c5;
-            background: #3c3c3c;
+            color: #c9c9c9;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #4a4a4a, stop:1 #3c3c3c);
             border: 1px solid #171717;
-            border-radius: 2px;
-            padding: 2px 7px;
+            border-radius: 0;
+            padding: 0 6px;
+            font-size: 11px;
         }
         QWidget#viewerMeta QPushButton:hover, QWidget#viewerMeta QToolButton:hover {
             background: #505050;
             color: #f4f4f4;
         }
         QWidget#viewerMeta QLineEdit {
-            min-height: 25px;
-            background: #202020;
+            background: #1f1f1f;
             color: #e1e1e1;
             border: 1px solid #111111;
-            border-radius: 2px;
-            padding: 2px 8px;
+            border-radius: 0;
+            padding: 0 7px;
+            font-size: 11px;
         }
         QTreeView {
             background: #252525;
@@ -3860,14 +4720,14 @@ def apply_theme(app: QApplication) -> None:
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #373737, stop:1 #2a2a2a);
         }
         QWidget#stripHeader {
-            min-height: 29px;
+            min-height: 24px;
             background: transparent;
         }
         QToolButton#stripToggle {
             min-width: 46px;
             max-width: 46px;
-            min-height: 20px;
-            max-height: 20px;
+            min-height: 16px;
+            max-height: 16px;
             border: 1px solid #333333;
             border-radius: 8px;
             background: #181818;
@@ -3876,18 +4736,33 @@ def apply_theme(app: QApplication) -> None:
         }
         QToolButton#stripToggle:hover { background: #242424; }
         QToolButton#fullQuickMark {
-            min-width: 28px;
-            max-width: 28px;
-            min-height: 22px;
-            max-height: 22px;
+            min-width: 96px;
+            max-width: 96px;
+            min-height: 24px;
+            max-height: 24px;
             border: 1px solid #1a1a1a;
-            border-radius: 3px;
+            border-radius: 0;
             background: #3c3c3c;
         }
         QToolButton#fullQuickMark:hover { background: #505050; }
+        QToolButton#fullAutoAdvance {
+            min-width: 28px;
+            max-width: 28px;
+            min-height: 24px;
+            max-height: 24px;
+            border: 1px solid #1a1a1a;
+            border-radius: 0;
+            background: #3c3c3c;
+        }
+        QToolButton#fullAutoAdvance:hover { background: #505050; }
+        QToolButton#fullAutoAdvance:checked {
+            color: #9fc3f5;
+            background: #38495f;
+            border-color: #607fa8;
+        }
         QToolButton#videoPlay {
-            min-width: 58px;
-            max-width: 76px;
+            min-width: 28px;
+            max-width: 28px;
             min-height: 22px;
             max-height: 22px;
             border: 1px solid #1a1a1a;
@@ -3899,17 +4774,19 @@ def apply_theme(app: QApplication) -> None:
             border: 1px solid #121212;
             border-radius: 7px;
         }
-        QLabel#videoTime { min-width: 82px; color: #d5d5d5; font-size: 11px; font-weight: 600; }
+        QLabel#videoTime { min-width: 82px; background: transparent; color: #d5d5d5; font-size: 11px; font-weight: 600; }
+        QSlider#videoSeek { background: transparent; }
         QSlider#videoSeek::groove:horizontal { height: 4px; background: #1b1b1b; border-radius: 2px; }
         QSlider#videoSeek::handle:horizontal { width: 10px; margin: -4px 0; background: #c8c8c8; border-radius: 5px; }
         QLineEdit#fullComment {
-            min-width: 180px;
-            max-width: 360px;
+            min-width: 72px;
+            max-width: 420px;
             min-height: 24px;
+            max-height: 24px;
             background: #202020;
             color: #e1e1e1;
             border: 1px solid #111111;
-            border-radius: 2px;
+            border-radius: 0;
             padding: 2px 8px;
         }
         QListWidget#photoStrip {
@@ -3931,8 +4808,8 @@ def apply_theme(app: QApplication) -> None:
             padding: 0;
         }
         QFrame#seriesPanel {
-            min-width: 90px;
-            max-width: 90px;
+            min-width: 136px;
+            max-width: 136px;
             border: 1px solid #383838;
             border-radius: 10px;
             background: #151515;
@@ -3948,34 +4825,102 @@ def apply_theme(app: QApplication) -> None:
         }
         QToolButton#seriesNav:hover { background: #484848; }
         QToolButton#seriesNav:disabled { color: #666666; background: #292929; }
-        QToolButton#viewerColor, QToolButton#viewerRating {
-            min-width: 18px;
-            max-width: 18px;
-            min-height: 18px;
-            max-height: 18px;
+        QWidget#viewerMeta QToolButton#viewerColor {
+            min-width: 23px;
+            max-width: 23px;
+            min-height: 22px;
+            max-height: 22px;
             padding: 0;
-            border: 1px solid #1a1a1a;
-            border-radius: 2px;
+            border: 1px solid #181818;
+            border-left: 0;
+            border-radius: 0;
             background: #4e4e4e;
             color: #b8b8b8;
             font-size: 10px;
         }
-        QToolButton#viewerColor[colorLabel="red"] { background: #7a5555; }
-        QToolButton#viewerColor[colorLabel="yellow"] { background: #7f7556; }
-        QToolButton#viewerColor[colorLabel="green"] { background: #5d7560; }
-        QToolButton#viewerColor[colorLabel="blue"] { background: #596b82; }
-        QToolButton#viewerColor[colorLabel="purple"] { background: #71607d; }
-        QToolButton#viewerRating { color: #95866b; background: #363636; }
-        QToolButton#viewerColor:hover, QToolButton#viewerRating:hover {
-            border-color: #d6d6d6;
+        QWidget#viewerRatingRow {
+            min-width: 149px;
+            max-width: 149px;
+            min-height: 24px;
+            max-height: 24px;
+            border: 0;
+            border-radius: 0;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #4a4a4a, stop:1 #3b3b3b);
         }
-        QToolButton#viewerColor:checked {
-            border-color: #f1f1f1;
-            box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.52);
+        QWidget#viewerMeta QPushButton#viewerRating {
+            min-width: 24px;
+            max-width: 24px;
+            min-height: 24px;
+            max-height: 24px;
+            padding: 0;
+            border: 0;
+            border-left: 0;
+            border-radius: 0;
+            background: transparent;
+            color: rgba(230, 230, 230, 0.22);
+            font-size: 10px;
         }
-        QToolButton#viewerRating:checked {
-            color: #f1c453;
-            background: #4a4538;
+        QWidget#viewerMeta QPushButton#viewerRating[ratingClear="true"] { border-left: 0; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="red"] { background: #7a5555; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="yellow"] { background: #7f7556; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="green"] { background: #5d7560; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="blue"] { background: #596b82; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="purple"] { background: #71607d; }
+        QWidget#viewerMeta QToolButton#viewerColor:hover {
+            border-color: #181818;
+        }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="none"] {
+            min-width: 22px;
+            max-width: 22px;
+            border-left: 1px solid #181818;
+        }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="none"]:hover { background: #696969; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="red"]:hover { background: #a96a6a; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="yellow"]:hover { background: #aa9a65; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="green"]:hover { background: #719477; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="blue"]:hover { background: #708caa; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="purple"]:hover { background: #9175a2; }
+        QWidget#viewerMeta QToolButton#viewerColor:checked {
+            border-color: #181818;
+        }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="none"]:checked {
+            border-left-color: #181818;
+        }
+        QWidget#viewerMeta QPushButton#viewerRating:hover { background: rgba(255, 255, 255, 0.08); }
+        QWidget#viewerMeta QPushButton#viewerRating:checked {
+            color: #d8d8d8;
+            background: rgba(255, 255, 255, 0.04);
+        }
+        QWidget#viewerMeta QPushButton#viewerRating[ratingClear="true"] {
+            color: rgba(220, 220, 220, 0.42);
+        }
+        QWidget#viewerMeta QPushButton#viewerRating[ratingClear="true"]:checked {
+            color: #c8c8c8;
+        }
+        QLabel#viewerExif {
+            min-width: 0;
+            background: transparent;
+            border: 0;
+            color: #9fa7b3;
+            font-size: 11px;
+        }
+        QMenu QPushButton#quickMarkMenuItem {
+            min-width: 170px;
+            min-height: 26px;
+            max-height: 26px;
+            padding: 0;
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+            text-align: left;
+        }
+        QMenu QPushButton#quickMarkMenuItem:hover { background: #454545; }
+        QMenu QLabel#quickMarkMenuCheck,
+        QMenu QLabel#quickMarkMenuValue {
+            background: transparent;
+            border: 0;
+            color: #dedede;
+            font-size: 13px;
         }
         """
     )
@@ -4023,6 +4968,19 @@ def _fomantic_icon(name: str, size: int = 18, color: str = "#d6d6d6") -> QIcon:
     painter.setFont(font)
     painter.setPen(QColor(color))
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, glyph)
+    painter.end()
+    return QIcon(pixmap)
+
+
+def _color_swatch_icon(color: str | None) -> QIcon:
+    """Return a compact colored square for the color filter choices."""
+    pixmap = QPixmap(18, 18)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor("#8c8c8c"), 1))
+    painter.setBrush(QColor(color) if color else QColor("#686868"))
+    painter.drawRect(QRect(3, 3, 12, 12))
     painter.end()
     return QIcon(pixmap)
 
