@@ -1,0 +1,188 @@
+"""Networking layer for the ShotSync (shotsync.ru) integration.
+
+The client talks to the ShotSync REST API using Qt's own
+``QNetworkAccessManager`` so the desktop app gains no extra third-party
+dependency. Every call is asynchronous and reports back through Qt signals so
+the UI thread is never blocked while waiting on the network.
+
+API contract (confirmed against the shotsync server):
+
+* ``POST /api/users/login/`` with JSON ``{"login", "password"}``
+  -> ``{"ok": true, "user": {...}, "key": "..."}`` on success,
+     ``{"ok": false, "error": "..."}`` on failure (HTTP 200 either way).
+* ``GET /api/users/me/`` with header ``X-Api-Key``
+  -> ``{"ok": true, "user": {...}}``.
+* ``GET /api/shootings/`` with header ``X-Api-Key``
+  -> ``{"ok": true, "shootings": [...]}``.
+"""
+
+from __future__ import annotations
+
+import json
+
+from PySide6.QtCore import QByteArray, QObject, QUrl, Signal
+from PySide6.QtGui import QImage
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+
+DEFAULT_BASE_URL = "https://shotsync.ru"
+API_KEY_HEADER = b"X-Api-Key"
+
+
+class ShotSyncClient(QObject):
+    """Asynchronous wrapper around the ShotSync HTTP API."""
+
+    loginSucceeded = Signal(dict, str)  # user payload, api key
+    loginFailed = Signal(str)           # human readable error
+    sessionVerified = Signal(dict)      # user payload (from /me)
+    sessionInvalid = Signal(str)        # stored key no longer works
+    shootingsLoaded = Signal(list)      # list of shooting payloads
+    shootingsFailed = Signal(str)
+    avatarLoaded = Signal(QImage)       # decoded profile avatar
+
+    def __init__(self, base_url: str = DEFAULT_BASE_URL, parent: QObject | None = None) -> None:
+        super().__init__(parent)
+        self._base_url = base_url.rstrip("/")
+        self._api_key: str = ""
+        self._manager = QNetworkAccessManager(self)
+
+    # ----- key management ------------------------------------------------
+    @property
+    def api_key(self) -> str:
+        return self._api_key
+
+    def set_api_key(self, key: str | None) -> None:
+        self._api_key = (key or "").strip()
+
+    def has_key(self) -> bool:
+        return bool(self._api_key)
+
+    def logout(self) -> None:
+        """Forget the current key locally.
+
+        The server issues throwaway keys, so simply dropping it is enough to
+        end the session from the client's point of view.
+        """
+        self._api_key = ""
+
+    # ----- request helpers ----------------------------------------------
+    def _url(self, path: str) -> QUrl:
+        return QUrl(f"{self._base_url}/{path.lstrip('/')}")
+
+    def _request(self, path: str, *, with_key: bool = False) -> QNetworkRequest:
+        request = QNetworkRequest(self._url(path))
+        request.setAttribute(
+            QNetworkRequest.Attribute.RedirectPolicyAttribute,
+            QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy,
+        )
+        if with_key and self._api_key:
+            request.setRawHeader(API_KEY_HEADER, self._api_key.encode("utf-8"))
+        return request
+
+    @staticmethod
+    def _parse_json(reply: QNetworkReply) -> dict:
+        raw = bytes(reply.readAll())
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _error_message(data: dict, reply: QNetworkReply, fallback: str) -> str:
+        message = data.get("error")
+        if not message:
+            errors = data.get("errors")
+            if isinstance(errors, dict):
+                for value in errors.values():
+                    if isinstance(value, (list, tuple)) and value:
+                        message = str(value[0])
+                        break
+                    if isinstance(value, str):
+                        message = value
+                        break
+        if not message and reply.error() != QNetworkReply.NetworkError.NoError:
+            message = reply.errorString()
+        return message or fallback
+
+    # ----- public API ----------------------------------------------------
+    def login(self, login: str, password: str) -> None:
+        request = self._request("/api/users/login/")
+        request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
+        body = QByteArray(json.dumps({"login": login, "password": password}).encode("utf-8"))
+        reply = self._manager.post(request, body)
+        reply.finished.connect(lambda: self._handle_login(reply))
+
+    def verify_session(self) -> None:
+        if not self._api_key:
+            self.sessionInvalid.emit("Требуется авторизация.")
+            return
+        reply = self._manager.get(self._request("/api/users/me/", with_key=True))
+        reply.finished.connect(lambda: self._handle_me(reply))
+
+    def fetch_shootings(self) -> None:
+        if not self._api_key:
+            self.shootingsFailed.emit("Требуется авторизация.")
+            return
+        reply = self._manager.get(self._request("/api/shootings/", with_key=True))
+        reply.finished.connect(lambda: self._handle_shootings(reply))
+
+    def fetch_avatar(self, avatar_url: str) -> None:
+        if not avatar_url:
+            return
+        url = avatar_url
+        if url.startswith("/"):
+            url = f"{self._base_url}{url}"
+        request = QNetworkRequest(QUrl(url))
+        request.setAttribute(
+            QNetworkRequest.Attribute.RedirectPolicyAttribute,
+            QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy,
+        )
+        reply = self._manager.get(request)
+        reply.finished.connect(lambda: self._handle_avatar(reply))
+
+    # ----- reply handlers ------------------------------------------------
+    def _handle_login(self, reply: QNetworkReply) -> None:
+        reply.deleteLater()
+        data = self._parse_json(reply)
+        key = data.get("key")
+        user = data.get("user")
+        if data.get("ok") and key and isinstance(user, dict):
+            self._api_key = str(key)
+            self.loginSucceeded.emit(user, self._api_key)
+            return
+        self.loginFailed.emit(
+            self._error_message(data, reply, "Не удалось войти. Попробуйте ещё раз.")
+        )
+
+    def _handle_me(self, reply: QNetworkReply) -> None:
+        reply.deleteLater()
+        data = self._parse_json(reply)
+        user = data.get("user")
+        if data.get("ok") and isinstance(user, dict):
+            self.sessionVerified.emit(user)
+            return
+        self._api_key = ""
+        self.sessionInvalid.emit(
+            self._error_message(data, reply, "Сессия истекла, войдите заново.")
+        )
+
+    def _handle_shootings(self, reply: QNetworkReply) -> None:
+        reply.deleteLater()
+        data = self._parse_json(reply)
+        shootings = data.get("shootings")
+        if data.get("ok") and isinstance(shootings, list):
+            self.shootingsLoaded.emit(shootings)
+            return
+        self.shootingsFailed.emit(
+            self._error_message(data, reply, "Не удалось загрузить съёмки.")
+        )
+
+    def _handle_avatar(self, reply: QNetworkReply) -> None:
+        reply.deleteLater()
+        if reply.error() != QNetworkReply.NetworkError.NoError:
+            return
+        image = QImage()
+        if image.loadFromData(bytes(reply.readAll())) and not image.isNull():
+            self.avatarLoaded.emit(image)
