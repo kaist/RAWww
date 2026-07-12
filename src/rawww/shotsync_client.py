@@ -20,9 +20,15 @@ from __future__ import annotations
 
 import json
 
-from PySide6.QtCore import QByteArray, QObject, QUrl, Signal
+from PySide6.QtCore import QByteArray, QFile, QObject, QUrl, Signal
 from PySide6.QtGui import QImage
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtNetwork import (
+    QHttpMultiPart,
+    QHttpPart,
+    QNetworkAccessManager,
+    QNetworkReply,
+    QNetworkRequest,
+)
 
 DEFAULT_BASE_URL = "https://shotsync.ru"
 API_KEY_HEADER = b"X-Api-Key"
@@ -141,6 +147,56 @@ class ShotSyncClient(QObject):
         )
         reply = self._manager.get(request)
         reply.finished.connect(lambda: self._handle_avatar(reply))
+
+    def request_json(self, path: str, callback, *, method: str = "GET", payload: dict | None = None) -> None:
+        """Call an authenticated JSON endpoint without blocking the UI.
+
+        ``callback`` receives ``(ok, payload, error)``.  It deliberately
+        lives here rather than in a widget so every ShotSync feature uses the
+        same key, redirect policy and error handling.
+        """
+        if not self._api_key:
+            callback(False, {}, "Требуется авторизация в ShotSync.")
+            return
+        request = self._request(path, with_key=True)
+        method = method.upper()
+        if method == "GET":
+            reply = self._manager.get(request)
+        else:
+            request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
+            body = QByteArray(json.dumps(payload or {}, ensure_ascii=False).encode("utf-8"))
+            reply = self._manager.post(request, body)
+        reply.finished.connect(lambda: self._finish_json_request(reply, callback))
+
+    def upload_file(self, path: str, file_path: str, callback) -> None:
+        """POST a code-import file as ``file`` to an authenticated endpoint."""
+        if not self._api_key:
+            callback(False, {}, "Требуется авторизация в ShotSync.")
+            return
+        file = QFile(file_path)
+        if not file.open(QFile.OpenModeFlag.ReadOnly):
+            callback(False, {}, "Не удалось открыть файл импорта.")
+            return
+        multi = QHttpMultiPart(QHttpMultiPart.ContentType.FormDataType)
+        part = QHttpPart()
+        filename = file.fileName().replace(chr(92), "/").rsplit("/", 1)[-1]
+        part.setHeader(
+            QNetworkRequest.KnownHeaders.ContentDispositionHeader,
+            f'form-data; name="file"; filename="{filename}"',
+        )
+        part.setBodyDevice(file)
+        file.setParent(multi)
+        multi.append(part)
+        reply = self._manager.post(self._request(path, with_key=True), multi)
+        multi.setParent(reply)
+        reply.finished.connect(lambda: self._finish_json_request(reply, callback))
+
+    def _finish_json_request(self, reply: QNetworkReply, callback) -> None:
+        data = self._parse_json(reply)
+        ok = bool(data.get("ok")) and reply.error() == QNetworkReply.NetworkError.NoError
+        error = "" if ok else self._error_message(data, reply, "Не удалось выполнить запрос к ShotSync.")
+        reply.deleteLater()
+        callback(ok, data, error)
 
     # ----- reply handlers ------------------------------------------------
     def _handle_login(self, reply: QNetworkReply) -> None:

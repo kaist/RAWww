@@ -22,7 +22,8 @@ uv run rawww
 - In the ShotSync panel, shooting cards open their local folder when one exists; cloud-only shootings offer **Take for selection** or **Watch**. Sending a shooting opens a dialog to choose its name, source folder, and server-side AI face/series processing.
 - Use Ctrl/Shift to select multiple cards, then assign a 0-5 rating, color label, comment, or the 5-star quick mark. Selection metadata is stored in the central folder cache and survives restarts.
 - Select a processed photo and press **Find face** to show photos containing a matching face; the × button clears face search. **No faces** is available in the shot-size filter.
-- Hotkeys: `1`-`5` assign a rating, `0` clears it, `M` toggles the quick mark, and `C` focuses the comment field.
+- Hotkeys: `1`-`5` assign a rating, `0` clears it, `M` toggles the quick mark, and `C` opens the comment editor.
+- **Коды замены** are available from the keyboard button beside a comment. They are shared with the signed-in ShotSync account: create sets, edit codes, or import CSV/TSV/XLSX. In every comment field type `{`, `\`, `=` or `@` to open and filter code suggestions; RAWww stores the marker (for example `{name}`) and shows its expanded value directly in the field when it is not being edited.
 - Full view: double-click a photo or press `F`. Hold the left mouse button for a temporary 100% inspection and drag to pan; press `Z` to toggle it. The inspector decodes and caches the full JPEG or the embedded RAW preview (falling back to RAW decoding only when needed), focusing the largest recognized face when available (otherwise the cursor position or image centre); arrow keys pan by 5% while it is active.
 - Back to grid: `Esc`, `Enter`, or `G`.
 - Toggle fullscreen: `F11`.

@@ -7,6 +7,7 @@ import shutil
 import base64
 import json
 import ctypes
+import re
 from datetime import datetime
 from hashlib import sha1
 import plistlib
@@ -17,13 +18,14 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Callable
 
-from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QPoint, QPointF, QRect, QRectF, QIODevice, QSettings, QSize, Qt, QTimer, Signal, QObject, QStorageInfo, QItemSelectionModel, QUrl
-from PySide6.QtGui import QAction, QColor, QCursor, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygon
+from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QRect, QRectF, QIODevice, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QUrl, QStringListModel
+from PySide6.QtGui import QAction, QColor, QCursor, QFont, QFontDatabase, QFontMetricsF, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QCompleter,
     QCheckBox,
     QDialog,
     QFileSystemModel,
@@ -48,7 +50,10 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QTabBar,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
+    QTextEdit,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -800,6 +805,589 @@ class ColorLabelButton(QToolButton):
         painter.drawRect(self.rect().adjusted(1, 1, -2, -2))
 
 
+class CodeReplacementsDialog(QDialog):
+    """Desktop editor for the same code sets used by the ShotSync web app."""
+
+    def __init__(self, client: ShotSyncClient, settings: QSettings, changed: Callable[[list[dict]], None], parent=None) -> None:
+        super().__init__(parent)
+        self.client, self.settings, self._changed = client, settings, changed
+        self.setWindowTitle("Коды замены")
+        self.resize(620, 460)
+        self.setModal(True)
+        self.setObjectName("codeReplacementsDialog")
+        self.sets: list[dict] = []
+        layout = QVBoxLayout(self)
+        toolbar = QHBoxLayout()
+        self.set_combo = QComboBox()
+        self.set_combo.currentIndexChanged.connect(self._set_changed)
+        toolbar.addWidget(self.set_combo, 1)
+        for text, handler, tip in (
+            ("+ Набор", self._create_set, "Создать набор"),
+            ("Переименовать", self._rename_set, "Переименовать набор"),
+            ("Удалить", self._delete_set, "Удалить набор"),
+            ("Импорт…", self._import_codes, "Импорт CSV, TSV или XLSX"),
+        ):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.clicked.connect(handler)
+            toolbar.addWidget(button)
+        layout.addLayout(toolbar)
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Код", "Значение", ""])
+        self.table.setColumnWidth(0, 150)
+        self.table.setColumnWidth(2, 44)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(1, self.table.horizontalHeader().ResizeMode.Stretch)
+        self.table.verticalHeader().hide()
+        self.table.itemChanged.connect(self._update_code)
+        layout.addWidget(self.table, 1)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        close = QPushButton("Закрыть")
+        close.clicked.connect(self.accept)
+        layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+        self._load()
+
+    def _active_set(self) -> dict | None:
+        index = self.set_combo.currentIndex()
+        return self.sets[index] if 0 <= index < len(self.sets) else None
+
+    def _load(self, *, select_id: int | None = None, focus_new: bool = False) -> None:
+        self.status.setText("Синхронизация с ShotSync…")
+        def done(ok: bool, data: dict, error: str) -> None:
+            if not ok:
+                self.status.setText(error)
+                return
+            self.sets = [item for item in data.get("sets", []) if isinstance(item, dict)]
+            wanted = select_id or self.settings.value("code_replacements/active_set_id", 0, int)
+            self.set_combo.blockSignals(True)
+            self.set_combo.clear()
+            chosen = 0
+            for index, item in enumerate(self.sets):
+                self.set_combo.addItem(str(item.get("name") or "Без названия"))
+                if item.get("id") == wanted:
+                    chosen = index
+            self.set_combo.setCurrentIndex(chosen if self.sets else -1)
+            self.set_combo.blockSignals(False)
+            self._set_changed()
+            self.status.setText("Синхронизировано")
+            self._changed(self.sets)
+            if focus_new:
+                QTimer.singleShot(0, self._focus_new_code)
+        self.client.request_json("/api/users/code-replacements/", done)
+
+    def _set_changed(self) -> None:
+        active = self._active_set()
+        if active:
+            self.settings.setValue("code_replacements/active_set_id", int(active["id"]))
+        self._render_table()
+        self._changed(self.sets)
+
+    def _render_table(self) -> None:
+        active = self._active_set()
+        codes = active.get("codes", []) if active else []
+        self.table.blockSignals(True)
+        self.table.setRowCount(len(codes) + (1 if active else 0))
+        for row, entry in enumerate(codes):
+            self.table.setItem(row, 0, QTableWidgetItem(str(entry.get("code") or "")))
+            self.table.setItem(row, 1, QTableWidgetItem(str(entry.get("value") or "")))
+            remove = QToolButton()
+            remove.setIcon(_fomantic_icon("trash", 12))
+            remove.setToolTip("Удалить код")
+            remove.clicked.connect(lambda _checked=False, code_id=entry.get("id"): self._delete_code(code_id))
+            self.table.setCellWidget(row, 2, remove)
+        if active:
+            row = len(codes)
+            code = QLineEdit()
+            code.setPlaceholderText("Код")
+            code.setMaxLength(80)
+            value = QLineEdit()
+            value.setPlaceholderText("Значение")
+            code.returnPressed.connect(lambda: value.setFocus())
+            code.installEventFilter(self)
+            value.installEventFilter(self)
+            self.table.setCellWidget(row, 0, code)
+            self.table.setCellWidget(row, 1, value)
+        self.table.blockSignals(False)
+
+    def _focus_new_code(self) -> None:
+        field = self.table.cellWidget(self.table.rowCount() - 1, 0)
+        if isinstance(field, QLineEdit):
+            field.setFocus()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        """Mirror the web editor's Tab flow in the table's trailing row."""
+        if event.type() != QEvent.Type.KeyPress or watched not in (self.table.cellWidget(self.table.rowCount() - 1, 0), self.table.cellWidget(self.table.rowCount() - 1, 1)):
+            return super().eventFilter(watched, event)
+        code = self.table.cellWidget(self.table.rowCount() - 1, 0)
+        value = self.table.cellWidget(self.table.rowCount() - 1, 1)
+        if not isinstance(code, QLineEdit) or not isinstance(value, QLineEdit):
+            return super().eventFilter(watched, event)
+        if watched is code and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Return, Qt.Key.Key_Enter) and code.text().strip():
+            value.setFocus(); event.accept(); return True
+        if watched is value and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Return, Qt.Key.Key_Enter) and code.text().strip() and value.text().strip():
+            self._add_code(code.text(), value.text()); event.accept(); return True
+        return super().eventFilter(watched, event)
+
+    def _create_set(self) -> None:
+        name, ok = QInputDialog.getText(self, "Новый набор", "Название:")
+        if not ok or not name.strip(): return
+        self.client.request_json("/api/users/code-replacements/", lambda ok, data, error: self._load(select_id=data.get("set", {}).get("id") if ok else None), method="POST", payload={"name": name.strip()})
+
+    def _rename_set(self) -> None:
+        active = self._active_set()
+        if not active: return
+        name, ok = QInputDialog.getText(self, "Переименовать набор", "Название:", text=str(active.get("name") or ""))
+        if not ok or not name.strip(): return
+        self.client.request_json(f"/api/users/code-replacements/{active['id']}/", lambda ok, _data, error: self._load(select_id=active["id"]) if ok else self.status.setText(error), method="POST", payload={"name": name.strip()})
+
+    def _delete_set(self) -> None:
+        active = self._active_set()
+        if not active:
+            return
+        confirm = QMessageBox(QMessageBox.Icon.Warning, "Удалить набор", "Удалить набор и все его коды?", parent=self)
+        confirm.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        confirm.button(QMessageBox.StandardButton.Yes).setText("Удалить")
+        confirm.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+        if confirm.exec() != QMessageBox.StandardButton.Yes:
+            return
+        self.client.request_json(f"/api/users/code-replacements/{active['id']}/delete/", lambda ok, _data, error: self._load() if ok else self.status.setText(error), method="POST")
+
+    def _add_code(self, code: str, value: str) -> None:
+        active = self._active_set(); code, value = code.strip(), value.strip()
+        if not active or not code or not value: return
+        def done(ok: bool, _data: dict, error: str) -> None:
+            if ok:
+                self._load(select_id=active["id"], focus_new=True)
+            else: self.status.setText(error)
+        self.client.request_json(f"/api/users/code-replacements/{active['id']}/codes/", done, method="POST", payload={"code": code, "value": value})
+
+    def _delete_code(self, code_id: object) -> None:
+        active = self._active_set()
+        if not active or not code_id: return
+        self.client.request_json(f"/api/users/code-replacements/{active['id']}/codes/{code_id}/delete/", lambda ok, _data, error: self._load(select_id=active["id"]) if ok else self.status.setText(error), method="POST")
+
+    def _update_code(self, item: QTableWidgetItem) -> None:
+        active = self._active_set()
+        if not active or item.column() not in (0, 1): return
+        codes = active.get("codes", [])
+        if item.row() >= len(codes): return
+        entry = codes[item.row()]
+        code = self.table.item(item.row(), 0).text().strip()
+        value = self.table.item(item.row(), 1).text().strip()
+        if not code or not value or (code == entry.get("code") and value == entry.get("value")): return
+        self.client.request_json(
+            f"/api/users/code-replacements/{active['id']}/codes/{entry['id']}/",
+            lambda ok, _data, error: self._load(select_id=active["id"]) if ok else self.status.setText(error),
+            method="POST", payload={"code": code, "value": value},
+        )
+
+    def _import_codes(self) -> None:
+        active = self._active_set()
+        if not active: return
+        path, _ = QFileDialog.getOpenFileName(self, "Импорт кодов", "", "Таблицы (*.csv *.tsv *.xlsx)")
+        if not path: return
+        self.status.setText("Импорт…")
+        def done(ok: bool, data: dict, error: str) -> None:
+            if ok:
+                self.status.setText(f"Импортировано: {data.get('imported', 0)}, пропущено: {data.get('skipped', 0)}")
+                self._load(select_id=active["id"])
+            else: self.status.setText(error)
+        self.client.upload_file(f"/api/users/code-replacements/{active['id']}/import/", path, done)
+
+
+class CodeCompletingLineEdit(QLineEdit):
+    """Comment editor that inserts ShotSync-compatible ``{code}`` markers."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._codes: list[dict] = []
+        self._lookup: dict[str, str] = {}
+        self._raw = ""
+        self._showing_preview = False
+        self._opener = "{"
+        self._start = 0
+        self._labels: dict[str, str] = {}
+        self._model = QStringListModel(self)
+        self._completer = QCompleter(self._model, self)
+        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        # The model is already filtered by code *and* expansion value below;
+        # don't let QCompleter discard value-only matches a second time.
+        self._completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
+        self.setCompleter(self._completer)
+        self.textEdited.connect(self._remember_raw)
+        self.textEdited.connect(self._offer_codes)
+        self._completer.activated.connect(self._insert_code)
+        self._suggestion_popup = QListWidget(self)
+        # Popup steals focus and immediately triggers QTextEdit.focusOutEvent;
+        # ToolTip is a frameless non-activating top-level suggestion surface.
+        self._suggestion_popup.setWindowFlags(Qt.WindowType.ToolTip)
+        self._suggestion_popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._suggestion_popup.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._suggestion_popup.setObjectName("codeSuggestionPopup")
+        self._suggestion_popup.itemClicked.connect(lambda item: self._insert_code(item.text()))
+        self._suggestion_popup.hide()
+
+    def set_codes(self, sets: list[dict], active_id: int) -> None:
+        self._codes = [entry for group in sets if not active_id or group.get("id") == active_id for entry in group.get("codes", []) if isinstance(entry, dict)]
+        self._lookup = {str(entry.get("code") or ""): str(entry.get("value") or "") for entry in self._codes}
+        self.setToolTip(self._raw)
+        self.update()
+
+    def text(self) -> str:  # noqa: N802 - matches QLineEdit's Qt API
+        return self._raw
+
+    def setText(self, text: str) -> None:  # noqa: N802 - matches QLineEdit's Qt API
+        self._raw = str(text or "")
+        self._showing_preview = False
+        super().setText(self._raw)
+        self.setToolTip(self._raw)
+
+    def focusInEvent(self, event) -> None:  # noqa: N802
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        self._raw = super().text()
+        super().focusOutEvent(event)
+        self.update()
+
+    def _remember_raw(self, value: str) -> None:
+        self._raw = value
+        self.setToolTip(value)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        """Paint web-style replacement chips over the raw QLineEdit text.
+
+        QLineEdit remains the editing model (and thus retains native keyboard,
+        clipboard and completer behaviour); the raw marker is merely hidden by
+        a value chip while its actual contents are unchanged.
+        """
+        super().paintEvent(event)
+        if not self._raw:
+            return
+        painter = QPainter(self)
+        content = self.contentsRect().adjusted(10, 1, -10, -1)
+        painter.fillRect(content, self.palette().base())
+        painter.setFont(self.font())
+        metrics = painter.fontMetrics()
+        x, baseline = content.left(), content.top() + (content.height() + metrics.ascent() - metrics.descent()) // 2
+        last = 0
+        raw_cursor = self.cursorPosition()
+        cursor_x: int | None = None
+        token_re = re.compile(r"\{([^}]+)\}|\\([^\\]+)\\|=([^=]+)=|@([\w]+)|#([\w]+)")
+        for match in token_re.finditer(self._raw):
+            plain = self._raw[last:match.start()]
+            painter.setPen(self.palette().text().color())
+            painter.drawText(x, baseline, plain)
+            if cursor_x is None and last <= raw_cursor <= match.start():
+                cursor_x = x + metrics.horizontalAdvance(self._raw[last:raw_cursor])
+            x += metrics.horizontalAdvance(plain)
+            tag = match.group(5) is not None
+            code = next(value for value in match.groups() if value is not None)
+            value = match.group(0) if tag else self._lookup.get(code)
+            if value is None:
+                painter.drawText(x, baseline, match.group(0))
+                x += metrics.horizontalAdvance(match.group(0))
+            else:
+                width = metrics.horizontalAdvance(value) + 10
+                chip = QRect(x, content.top() + 2, width, max(18, content.height() - 4))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor("#765b9a") if tag else QColor("#3867a8"))
+                painter.drawRoundedRect(chip, 4, 4)
+                painter.setPen(QColor("#f7fbff"))
+                painter.drawText(chip.adjusted(5, 0, -5, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, value)
+                x += width + 2
+            if cursor_x is None and match.start() < raw_cursor <= match.end():
+                # A replacement is an atomic visual token, just as in /v/.
+                cursor_x = x
+            last = match.end()
+        tail = self._raw[last:]
+        painter.setPen(self.palette().text().color())
+        painter.drawText(x, baseline, tail)
+        if cursor_x is None:
+            cursor_x = x + metrics.horizontalAdvance(self._raw[last:raw_cursor])
+        if self.hasFocus() and self.cursorPosition() >= 0:
+            painter.setPen(QPen(QColor("#f4f7fb"), 1))
+            painter.drawLine(cursor_x, content.top() + 4, cursor_x, content.bottom() - 4)
+        painter.end()
+
+    def _offer_codes(self, _text: str) -> None:
+        before = self.text()[:self.cursorPosition()]
+        candidates = [(before.rfind(mark), mark) for mark in ("{", "\\", "=", "@")]
+        start, opener = max(candidates)
+        if start < 0: self._suggestion_popup.hide(); return
+        fragment = before[start + 1:]
+        if "\n" in fragment or (opener == "@" and not fragment.replace("_", "a").isalnum()):
+            self._suggestion_popup.hide(); return
+        if opener != "@" and ("}" if opener == "{" else opener) in fragment:
+            self._completer.popup().hide(); return
+        self._start, self._opener = start, opener
+        self._labels = {f"{entry.get('code', '')} — {entry.get('value', '')}": str(entry.get("code") or "") for entry in self._codes}
+        labels = [label for label in self._labels if fragment.casefold() in label.casefold()]
+        self._model.setStringList(labels)
+        self._completer.setCompletionPrefix(fragment)
+        if labels:
+            self._completer.complete(self.cursorRect())
+
+    def _insert_code(self, label: str) -> None:
+        code = self._labels.get(label)
+        if not code: return
+        closer = "}" if self._opener == "{" else ("" if self._opener == "@" else self._opener)
+        end = self.cursorPosition()
+        insertion = f"{self._opener}{code}{closer}"
+        self.setText(self.text()[:self._start] + insertion + self.text()[end:])
+        self.setCursorPosition(self._start + len(insertion))
+
+
+_CODE_TOKEN_OBJECT = int(QTextFormat.ObjectTypes.UserObject) + 1
+_CODE_TOKEN_RAW = 1025
+_CODE_TOKEN_VALUE = 1026
+_CODE_TOKEN_TAG = 1027
+
+
+class CodeTokenObject(QObject, QTextObjectInterface):
+    """An atomic, painted inline token stored as one object character."""
+
+    def intrinsicSize(self, doc, _pos, fmt):  # noqa: N802
+        metrics = QFontMetricsF(doc.defaultFont())
+        return QSizeF(metrics.horizontalAdvance(str(fmt.property(_CODE_TOKEN_VALUE))) + 12, metrics.height() + 2)
+
+    def drawObject(self, painter, rect, _doc, _pos, fmt):  # noqa: N802
+        tag = bool(fmt.property(_CODE_TOKEN_TAG))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#765b9a") if tag else QColor("#3867a8"))
+        painter.drawRoundedRect(rect.adjusted(0, 1, 0, -1), 4, 4)
+        painter.setPen(QColor("#f7fbff"))
+        painter.drawText(rect.adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, str(fmt.property(_CODE_TOKEN_VALUE)))
+
+
+class RichCodeCommentEdit(QTextEdit):
+    """Single-line rich editor: visible tokens retain their raw marker."""
+
+    editingFinished = Signal()
+    returnPressed = Signal()
+    _RAW_TOKEN = _CODE_TOKEN_RAW
+    _TOKEN_RE = re.compile(r"\{([^}]+)\}|\\([^\\]+)\\|=([^=]+)=|@([\w]+)|#([\w]+)")
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._lookup: dict[str, str] = {}
+        self._rendering = False
+        self._opener = "{"
+        self._start = 0
+        self._labels: dict[str, str] = {}
+        self._model = QStringListModel(self)
+        self._completer = QCompleter(self._model, self)
+        self._completer.setWidget(self)
+        self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
+        self._completer.activated.connect(self._insert_code)
+        self._suggestion_popup = QListWidget(self)
+        self._suggestion_popup.setWindowFlags(Qt.WindowType.ToolTip)
+        self._suggestion_popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._suggestion_popup.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._suggestion_popup.setObjectName("codeSuggestionPopup")
+        self._suggestion_popup.itemClicked.connect(lambda item: self._insert_code(item.text()))
+        self._suggestion_popup.hide()
+        self._token_renderer = CodeTokenObject(self)
+        self.document().documentLayout().registerHandler(_CODE_TOKEN_OBJECT, self._token_renderer)
+        self.setAcceptRichText(False)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTabChangesFocus(True)
+        self.textChanged.connect(self._retokenize)
+
+    def set_codes(self, sets: list[dict], active_id: int) -> None:
+        entries = [entry for group in sets if not active_id or group.get("id") == active_id for entry in group.get("codes", []) if isinstance(entry, dict)]
+        self._lookup = {str(entry.get("code") or ""): str(entry.get("value") or "") for entry in entries}
+        self._render(self.text())
+
+    def text(self) -> str:  # noqa: N802
+        output: list[str] = []
+        block = self.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                fmt = fragment.charFormat()
+                output.append(str(fmt.property(self._RAW_TOKEN)) if fmt.hasProperty(self._RAW_TOKEN) else fragment.text())
+                iterator += 1
+            if block.next().isValid(): output.append("\n")
+            block = block.next()
+        return "".join(output)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self._render(str(text or ""))
+
+    def _render(self, raw: str, raw_cursor: int | None = None) -> None:
+        if raw_cursor is None: raw_cursor = len(raw)
+        self._rendering = True
+        cursor = self.textCursor()
+        cursor.select(cursor.SelectionType.Document)
+        cursor.removeSelectedText()
+        cursor.beginEditBlock()
+        last = 0
+        for match in self._TOKEN_RE.finditer(raw):
+            cursor.setCharFormat(QTextCharFormat())
+            cursor.insertText(raw[last:match.start()], QTextCharFormat())
+            marker = match.group(0)
+            tag = match.group(5) is not None
+            code = next(value for value in match.groups() if value is not None)
+            value = marker if tag else self._lookup.get(code)
+            if value is None:
+                cursor.insertText(marker)
+            else:
+                fmt = cursor.charFormat()
+                fmt.setProperty(_CODE_TOKEN_RAW, marker)
+                fmt.setForeground(QColor("#f7fbff"))
+                fmt.setBackground(QColor("#765b9a") if tag else QColor("#3867a8"))
+                fmt.setFontWeight(QFont.Weight.DemiBold)
+                cursor.insertText(value, fmt)
+            last = match.end()
+        cursor.setCharFormat(QTextCharFormat())
+        cursor.insertText(raw[last:], QTextCharFormat())
+        cursor.endEditBlock()
+        self._rendering = False
+        self._set_raw_cursor(raw_cursor)
+        self.setToolTip(raw)
+
+    def _raw_cursor(self) -> int:
+        position = self.textCursor().position()
+        raw, visual = 0, 0
+        block = self.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment(); display = fragment.text(); length = len(display)
+                marker = fragment.charFormat().property(self._RAW_TOKEN) if fragment.charFormat().hasProperty(self._RAW_TOKEN) else display
+                if position <= visual + length:
+                    return raw + (len(str(marker)) if fragment.charFormat().hasProperty(self._RAW_TOKEN) else position - visual)
+                raw += len(str(marker)); visual += length; iterator += 1
+            block = block.next()
+        return raw
+
+    def _set_raw_cursor(self, target: int) -> None:
+        raw, visual = 0, 0
+        block = self.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment(); display = fragment.text(); length = len(display)
+                token = fragment.charFormat().hasProperty(self._RAW_TOKEN)
+                marker = str(fragment.charFormat().property(self._RAW_TOKEN)) if token else display
+                if target <= raw + len(marker):
+                    cursor = self.textCursor()
+                    cursor.setPosition(visual + (length if token else target - raw))
+                    # Never let following typing inherit a token's hidden raw
+                    # marker; otherwise serialization would swallow it.
+                    cursor.setCharFormat(QTextCharFormat())
+                    self.setTextCursor(cursor)
+                    return
+                raw += len(marker); visual += length; iterator += 1
+            block = block.next()
+
+    def _retokenize(self) -> None:
+        if self._rendering: return
+        raw, position = self.text(), self._raw_cursor()
+        self._render(raw, position)
+        QTimer.singleShot(0, self._offer_codes)
+
+    def _offer_codes(self) -> None:
+        before = self.text()[:self._raw_cursor()]
+        start, opener = max((before.rfind(mark), mark) for mark in ("{", "\\", "=", "@"))
+        if start < 0: self._suggestion_popup.hide(); return
+        fragment = before[start + 1:]
+        if (opener == "@" and fragment and not fragment.replace("_", "a").isalnum()) or (opener != "@" and ("}" if opener == "{" else opener) in fragment):
+            self._suggestion_popup.hide(); return
+        if opener == "@" and fragment in self._lookup:
+            self._suggestion_popup.hide(); return
+        self._start, self._opener = start, opener
+        self._labels = {f"{code} — {value}": code for code, value in self._lookup.items()}
+        labels = [label for label in self._labels if fragment.casefold() in label.casefold()]
+        self._suggestion_popup.clear()
+        self._suggestion_popup.addItems(labels)
+        if not labels:
+            self._suggestion_popup.hide()
+            return
+        self._suggestion_popup.setCurrentRow(0)
+        self._suggestion_popup.setFixedWidth(max(240, self.width()))
+        self._suggestion_popup.setFixedHeight(min(180, self._suggestion_popup.sizeHintForRow(0) * len(labels) + 4))
+        self._suggestion_popup.move(self.mapToGlobal(self.cursorRect().bottomLeft()))
+        self._suggestion_popup.show()
+
+    def _insert_code(self, label: str) -> None:
+        code = self._labels.get(label)
+        if not code: return
+        raw = self.text(); end = self._raw_cursor()
+        close = "}" if self._opener == "{" else ("" if self._opener == "@" else self._opener)
+        insertion = f"{self._opener}{code}{close}"
+        self._render(raw[:self._start] + insertion + raw[end:], self._start + len(insertion))
+        self._suggestion_popup.hide()
+        self._completer.popup().hide()
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
+        # QCompleter releases its popup focus after the activation callback.
+        QTimer.singleShot(0, lambda: self.setFocus(Qt.FocusReason.OtherFocusReason))
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if self._suggestion_popup.isVisible():
+            if event.key() == Qt.Key.Key_Down:
+                self._suggestion_popup.setCurrentRow(min(self._suggestion_popup.count() - 1, self._suggestion_popup.currentRow() + 1)); event.accept(); return
+            if event.key() == Qt.Key.Key_Up:
+                self._suggestion_popup.setCurrentRow(max(0, self._suggestion_popup.currentRow() - 1)); event.accept(); return
+            if event.key() == Qt.Key.Key_Tab:
+                item = self._suggestion_popup.currentItem()
+                if item: self._insert_code(item.text())
+                event.accept(); return
+            if event.key() == Qt.Key.Key_Escape:
+                self._suggestion_popup.hide(); event.accept(); return
+            if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+                self._suggestion_popup.hide()
+        if event.key() == Qt.Key.Key_Escape:
+            dialog = self.window()
+            if isinstance(dialog, QDialog):
+                dialog.reject()
+                event.accept()
+                return
+        if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+            self.returnPressed.emit(); self.editingFinished.emit(); event.accept(); return
+        cursor = self.textCursor()
+        if not cursor.hasSelection() and event.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            position = cursor.position()
+            target = position - 1 if event.key() == Qt.Key.Key_Backspace else position
+            probe = self.textCursor()
+            probe.setPosition(max(0, target))
+            probe.movePosition(probe.MoveOperation.Right, probe.MoveMode.KeepAnchor)
+            if probe.charFormat().hasProperty(_CODE_TOKEN_RAW):
+                block = self.document().begin()
+                while block.isValid():
+                    iterator = block.begin()
+                    while not iterator.atEnd():
+                        fragment = iterator.fragment()
+                        if fragment.position() <= target < fragment.position() + fragment.length() and fragment.charFormat().hasProperty(_CODE_TOKEN_RAW):
+                            token = self.textCursor()
+                            token.setPosition(fragment.position())
+                            token.setPosition(fragment.position() + fragment.length(), token.MoveMode.KeepAnchor)
+                            token.removeSelectedText()
+                            self.setTextCursor(token)
+                            event.accept()
+                            return
+                        iterator += 1
+                    block = block.next()
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        super().focusOutEvent(event)
+        self._completer.popup().hide()
+        self._suggestion_popup.hide()
+        self.editingFinished.emit()
+
+
 class ViewerMetaBar(QWidget):
     """Shared rating, label, quick-mark and comment controls for grid/full view."""
 
@@ -809,6 +1397,7 @@ class ViewerMetaBar(QWidget):
     quickMarkConfigured = Signal(str, object)
     autoAdvanceChanged = Signal(bool)
     commentSubmitted = Signal(str)
+    codesRequested = Signal()
 
     def __init__(self, *, settings: QSettings | None = None) -> None:
         super().__init__()
@@ -888,7 +1477,14 @@ class ViewerMetaBar(QWidget):
             self.rating_buttons[rating] = button
         layout.addWidget(self.rating_group)
 
-        self.comment_edit = QLineEdit()
+        self.codes_button = QToolButton()
+        self.codes_button.setIcon(_fomantic_icon("keyboard", 13))
+        self.codes_button.setToolTip("Коды замены")
+        self.codes_button.setFixedSize(28, 24)
+        self.codes_button.clicked.connect(self.codesRequested)
+        layout.addWidget(self.codes_button)
+
+        self.comment_edit = RichCodeCommentEdit()
         self.comment_edit.setObjectName("fullComment")
         self.comment_edit.setPlaceholderText("Комментарий")
         self.comment_edit.setFixedHeight(24)
@@ -2398,6 +2994,7 @@ class Workspace(QMainWindow):
         self._resuming_shotsync_selections: set[int] = set()
         self._deleting_shotsync_folders: dict[int, Path] = {}
         self.shotsync_client = ShotSyncClient(SHOTSYNC_BASE_URL, self)
+        self.code_replacement_sets: list[dict] = []
         self.shotsync_client.set_api_key(self.settings.value("shotsync/api_key", "", str))
         self.shotsync_client.loginSucceeded.connect(self._shotsync_login_succeeded)
         self.shotsync_client.loginFailed.connect(self._shotsync_login_failed)
@@ -2509,6 +3106,7 @@ class Workspace(QMainWindow):
         self.full_view.set_quick_mark(*self.quick_mark)
         self.full_view.set_auto_advance(self.auto_advance)
         self.full_view.commentSubmitted.connect(self._save_full_comment)
+        self.full_view.meta_bar.codesRequested.connect(self._show_code_replacements)
         self.stack.addWidget(self.grid_page)
         self.stack.addWidget(self.full_view)
         self.shotsync_action_page = self._build_shotsync_action_page()
@@ -3021,6 +3619,7 @@ class Workspace(QMainWindow):
         self.meta_bar.quickMarkConfigured.connect(self._configure_quick_mark)
         self.meta_bar.autoAdvanceChanged.connect(self._set_auto_advance)
         self.meta_bar.commentSubmitted.connect(self._save_comment)
+        self.meta_bar.codesRequested.connect(self._show_code_replacements)
         self.comment_edit = self.meta_bar.comment_edit
         self.meta_bar.set_quick_mark(*self.quick_mark)
         self.meta_bar.set_auto_advance(self.auto_advance)
@@ -3118,7 +3717,7 @@ class Workspace(QMainWindow):
 
         comment = QAction("Comment", self)
         comment.setShortcut(QKeySequence(Qt.Key.Key_C))
-        comment.triggered.connect(lambda: (self.comment_edit.setFocus(), self.comment_edit.selectAll()))
+        comment.triggered.connect(self._show_comment_dialog)
         self.addAction(comment)
 
         for rating in range(0, 6):
@@ -3502,6 +4101,7 @@ class Workspace(QMainWindow):
             self.shotsync_client.fetch_avatar(avatar_url)
         self.shotsync_panel.set_shootings_loading()
         self.shotsync_client.fetch_shootings()
+        self._sync_code_replacements()
         self._refresh_shotsync_shortcuts()
 
     def _shotsync_login_failed(self, error: str) -> None:
@@ -3516,6 +4116,7 @@ class Workspace(QMainWindow):
             self.shotsync_client.fetch_avatar(avatar_url)
         self.shotsync_panel.set_shootings_loading()
         self.shotsync_client.fetch_shootings()
+        self._sync_code_replacements()
         self._refresh_shotsync_shortcuts()
 
     def _shotsync_session_invalid(self, error: str) -> None:
@@ -3525,6 +4126,31 @@ class Workspace(QMainWindow):
         if self.shotsync_active:
             self.shotsync_panel.show_login()
         self._refresh_shotsync_shortcuts()
+
+    def _sync_code_replacements(self) -> None:
+        """Pull the current web sets; mutations are posted immediately by the dialog."""
+        if not self.shotsync_client.has_key():
+            return
+        self.shotsync_client.request_json(
+            "/api/users/code-replacements/",
+            lambda ok, data, _error: self._set_code_replacements(data.get("sets", [])) if ok else None,
+        )
+
+    def _set_code_replacements(self, sets: list[dict]) -> None:
+        self.code_replacement_sets = [entry for entry in sets if isinstance(entry, dict)]
+        active_id = self.settings.value("code_replacements/active_set_id", 0, int)
+        if not active_id and self.code_replacement_sets:
+            active_id = int(self.code_replacement_sets[0].get("id") or 0)
+            self.settings.setValue("code_replacements/active_set_id", active_id)
+        for editor in (self.comment_edit, self.full_view.full_comment_edit):
+            editor.set_codes(self.code_replacement_sets, active_id)
+
+    def _show_code_replacements(self) -> None:
+        if not self.shotsync_client.has_key():
+            QMessageBox.information(self, "Коды замены", "Войдите в ShotSync, чтобы синхронизировать коды замены.")
+            return
+        CodeReplacementsDialog(self.shotsync_client, self.settings, self._set_code_replacements, self).exec()
+        self._sync_code_replacements()
 
     def _shotsync_shootings_loaded(self, shootings: list) -> None:
         self._shotsync_shootings = [shooting for shooting in shootings if isinstance(shooting, dict)]
@@ -5198,6 +5824,54 @@ class Workspace(QMainWindow):
 
     def _save_comment(self) -> None:
         self._update_selection(comment=self.comment_edit.text().strip())
+
+    def _show_comment_dialog(self) -> None:
+        """Edit a comment without letting a hotkey steal focus from the grid."""
+        selected = self._selected_paths()
+        in_full_view = self.stack.currentWidget() is self.full_view
+        if not in_full_view and not selected:
+            return
+        if in_full_view and self.current_path is not None:
+            path = self.current_path
+        elif selected:
+            path = selected[0]
+        else:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Комментарий")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(520)
+        layout = QVBoxLayout(dialog)
+        edit = RichCodeCommentEdit()
+        edit.setFixedHeight(34)
+        edit.setText(str(self.photo_details.get(path.name, {}).get("comment") or ""))
+        active_id = self.settings.value("code_replacements/active_set_id", 0, int)
+        edit.set_codes(self.code_replacement_sets, active_id)
+        cursor = edit.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        edit.setTextCursor(cursor)
+        layout.addWidget(edit)
+        set_select = QComboBox()
+        for group in self.code_replacement_sets:
+            set_select.addItem(str(group.get("name") or "Без названия"), int(group.get("id") or 0))
+        if set_select.count() > 1:
+            set_select.setCurrentIndex(max(0, set_select.findData(active_id)))
+            layout.addWidget(set_select)
+        else:
+            set_select.hide()
+        def change_set(index: int) -> None:
+            nonlocal active_id
+            active_id = int(set_select.itemData(index) or 0)
+            self.settings.setValue("code_replacements/active_set_id", active_id)
+            edit.set_codes(self.code_replacement_sets, active_id)
+            self._set_code_replacements(self.code_replacement_sets)
+        set_select.currentIndexChanged.connect(change_set)
+        edit.returnPressed.connect(dialog.accept)
+        QTimer.singleShot(0, edit.setFocus)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.comment_edit.setText(edit.text())
+            self.full_view.set_comment(edit.text())
+            self._update_selection(comment=edit.text().strip())
 
     def _save_full_comment(self, comment: str) -> None:
         self._update_selection(comment=comment)
@@ -7355,7 +8029,7 @@ def apply_theme(app: QApplication) -> None:
         QSlider#videoSeek { background: transparent; }
         QSlider#videoSeek::groove:horizontal { height: 4px; background: #1b1b1b; border-radius: 2px; }
         QSlider#videoSeek::handle:horizontal { width: 10px; margin: -4px 0; background: #c8c8c8; border-radius: 5px; }
-        QLineEdit#fullComment {
+        QLineEdit#fullComment, QTextEdit#fullComment {
             min-width: 72px;
             max-width: 420px;
             min-height: 24px;
@@ -7364,7 +8038,7 @@ def apply_theme(app: QApplication) -> None:
             color: #e1e1e1;
             border: 1px solid #111111;
             border-radius: 0;
-            padding: 2px 8px;
+            padding: 2px 12px;
         }
         QListWidget#photoStrip {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #373737, stop:1 #2a2a2a);
@@ -7791,6 +8465,9 @@ def main() -> None:
 
     multiprocessing.freeze_support()
     app = QApplication(sys.argv)
+    qt_ru = QTranslator(app)
+    if qt_ru.load("qtbase_ru", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(qt_ru)
     apply_theme(app)
     window = MainWindow()
     window.showMaximized()
