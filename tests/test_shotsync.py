@@ -14,21 +14,26 @@ from tempfile import TemporaryDirectory
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QCoreApplication, QSettings  # noqa: E402
+from PySide6.QtCore import QCoreApplication, QObject, QSettings, Signal  # noqa: E402
 
 from rawww.shotsync_hub import ShotSyncHub  # noqa: E402
 from rawww.shotsync_receiver import ShotSyncReceiver, safe_filename  # noqa: E402
+from rawww.shotsync_selection import SelectionMarkSyncer  # noqa: E402
 from rawww.shotsync_socket import ShotSyncSocket  # noqa: E402
 
-# The panel pulls in QtWidgets, which needs a display/GL stack. Keep it optional
-# so the socket/receiver/hub logic can be tested in a headless CI environment.
+# The panel (QtWidgets) and the folder cache (QtGui/QImage) both need a
+# display/GL stack (libGL). Keep everything that touches them optional so the
+# pure socket/receiver/hub/syncer logic can still be tested in a headless CI
+# environment; the guarded suites run on a normal desktop.
 try:  # pragma: no cover - environment dependent
     from PySide6.QtWidgets import QApplication
+
+    from rawww.cache import FolderCache
     from rawww.shotsync_panel import ShotSyncPanel
 
-    HAVE_QTWIDGETS = True
+    HAVE_GUI = True
 except Exception:  # noqa: BLE001 - libGL or similar missing
-    HAVE_QTWIDGETS = False
+    HAVE_GUI = False
 
 BASE_URL = "https://shotsync.ru"
 
@@ -192,7 +197,7 @@ class HubPersistenceTests(unittest.TestCase):
         self.assertFalse(restored.is_receiving(42))
 
 
-@unittest.skipUnless(HAVE_QTWIDGETS, "QtWidgets/libGL not available in this environment")
+@unittest.skipUnless(HAVE_GUI, "QtWidgets/libGL not available in this environment")
 class PanelRenderingTests(unittest.TestCase):
     def setUp(self) -> None:
         QApplication.instance() or QApplication([])
@@ -212,6 +217,145 @@ class PanelRenderingTests(unittest.TestCase):
         # Emit directly to avoid opening a native menu in the test.
         self.panel.receiveRequested.emit(shooting)
         self.assertEqual(emitted, [shooting])
+
+
+@unittest.skipUnless(HAVE_GUI, "QtGui/libGL not available in this environment")
+class CacheShotSyncTests(unittest.TestCase):
+    """Selection session state persisted in the folder cache (feature 2)."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.folder = Path(self._tmp.name)
+        self.cache = FolderCache(self.folder, {"a.jpg", "b.jpg"}, load_from_disk=True)
+
+    def tearDown(self) -> None:
+        self.cache.close(flush=False)
+        self._tmp.cleanup()
+
+    def test_session_roundtrip(self) -> None:
+        self.assertIsNone(self.cache.shotsync_session())
+        self.cache.set_shotsync_session(7, "Wedding")
+        self.assertEqual(self.cache.shotsync_session(), (7, "Wedding"))
+
+    def test_photo_map_lookup(self) -> None:
+        self.cache.set_shotsync_photos([("a.jpg", 101, 7), ("b.jpg", 102, 7)])
+        self.assertEqual(self.cache.shotsync_photo_id("a.jpg"), 101)
+        self.assertEqual(self.cache.shotsync_photo_id("b.jpg"), 102)
+        self.assertIsNone(self.cache.shotsync_photo_id("missing.jpg"))
+
+    def test_pending_queue_coalesces_per_kind(self) -> None:
+        self.cache.enqueue_shotsync_mark(photo_id=101, shooting_id=7, kind="rating", payload_json='{"rating": 3}')
+        self.cache.enqueue_shotsync_mark(photo_id=101, shooting_id=7, kind="rating", payload_json='{"rating": 5}')
+        self.cache.enqueue_shotsync_mark(photo_id=101, shooting_id=7, kind="meta", payload_json='{"color_label": "red"}')
+        pending = self.cache.pending_shotsync_marks()
+        self.assertEqual(self.cache.pending_shotsync_count(), 2)
+        rating = next(m for m in pending if m["kind"] == "rating")
+        self.assertEqual(rating["payload_json"], '{"rating": 5}')
+
+    def test_clear_pending(self) -> None:
+        self.cache.enqueue_shotsync_mark(photo_id=101, shooting_id=7, kind="rating", payload_json='{"rating": 3}')
+        self.cache.clear_shotsync_mark(101, "rating")
+        self.assertEqual(self.cache.pending_shotsync_count(), 0)
+
+
+class _FakeHub(QObject):
+    """Minimal stand-in for ShotSyncHub used by the mark-syncer tests."""
+
+    ackReceived = Signal(dict)
+    connectionChanged = Signal(bool)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.connected = False
+        self.sent: list[dict] = []
+
+    def send_json(self, payload: dict) -> bool:
+        if not self.connected:
+            return False
+        self.sent.append(payload)
+        return True
+
+
+class _FakeCache:
+    """In-memory stand-in for the ShotSync bits of :class:`FolderCache`.
+
+    Mirrors the coalescing pending-queue semantics so the syncer logic can be
+    exercised without QtGui/libGL (which the real cache pulls in).
+    """
+
+    def __init__(self, photos: dict[str, int]) -> None:
+        self._photos = dict(photos)
+        self._pending: dict[tuple[int, str], dict] = {}
+        self._seq = 0
+
+    def shotsync_photo_id(self, name: str) -> int | None:
+        return self._photos.get(name)
+
+    def enqueue_shotsync_mark(self, *, photo_id, shooting_id, kind, payload_json) -> None:
+        self._seq += 1
+        self._pending[(photo_id, kind)] = {
+            "photo_id": photo_id,
+            "kind": kind,
+            "shooting_id": shooting_id,
+            "payload_json": payload_json,
+            "seq": self._seq,
+        }
+
+    def pending_shotsync_marks(self) -> list[dict]:
+        return sorted(self._pending.values(), key=lambda m: m["seq"])
+
+    def clear_shotsync_mark(self, photo_id, kind) -> None:
+        self._pending.pop((photo_id, kind), None)
+
+    def pending_shotsync_count(self) -> int:
+        return len(self._pending)
+
+
+class SelectionMarkSyncerTests(unittest.TestCase):
+    """Marks are queued offline and flushed/cleared once the socket is live."""
+
+    def setUp(self) -> None:
+        _app()
+        self.cache = _FakeCache({"a.jpg": 101})
+        self.hub = _FakeHub()
+        self.syncer = SelectionMarkSyncer(self.hub, self.cache, 7)
+
+    def tearDown(self) -> None:
+        self.syncer.detach()
+
+    def test_mark_queued_while_offline(self) -> None:
+        self.syncer.queue_mark("a.jpg", detail={"rating": 4}, changes={"rating": 4})
+        self.assertEqual(self.hub.sent, [])
+        self.assertEqual(self.cache.pending_shotsync_count(), 1)
+
+    def test_flush_on_reconnect_sends_and_ack_clears(self) -> None:
+        self.syncer.queue_mark("a.jpg", detail={"rating": 4}, changes={"rating": 4})
+        # Socket comes online -> syncer flushes queued marks.
+        self.hub.connected = True
+        self.hub.connectionChanged.emit(True)
+        self.assertEqual(len(self.hub.sent), 1)
+        message = self.hub.sent[0]
+        self.assertEqual(message["type"], "photo.rate")
+        self.assertEqual(message["photo_ids"], [101])
+        self.assertEqual(message["rating"], 4)
+        # Server acks -> queue is cleared.
+        self.hub.ackReceived.emit({"ok": True, "request_id": message["request_id"]})
+        self.assertEqual(self.cache.pending_shotsync_count(), 0)
+
+    def test_failed_ack_keeps_mark_queued(self) -> None:
+        self.hub.connected = True
+        self.syncer.queue_mark("a.jpg", detail={"color_label": "red", "comment": ""}, changes={"color_label": "red"})
+        self.assertEqual(len(self.hub.sent), 1)
+        message = self.hub.sent[0]
+        self.assertEqual(message["type"], "photo.meta")
+        self.hub.ackReceived.emit({"ok": False, "request_id": message["request_id"]})
+        self.assertEqual(self.cache.pending_shotsync_count(), 1)
+
+    def test_unknown_photo_is_ignored(self) -> None:
+        self.hub.connected = True
+        self.syncer.queue_mark("missing.jpg", detail={"rating": 2}, changes={"rating": 2})
+        self.assertEqual(self.hub.sent, [])
+        self.assertEqual(self.cache.pending_shotsync_count(), 0)
 
 
 if __name__ == "__main__":

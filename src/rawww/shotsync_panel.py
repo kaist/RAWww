@@ -66,6 +66,7 @@ class ShotSyncPanel(QWidget):
     refreshRequested = Signal()
     shootingActivated = Signal(dict)    # emitted on double-click (future use)
     receiveRequested = Signal(dict)     # toggle live "receive photos" for a shooting
+    selectRequested = Signal(dict)      # download a shooting locally for selection
 
     def __init__(self, icon_provider: IconProvider | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -326,11 +327,14 @@ class ShotSyncPanel(QWidget):
             return
         receiving = int(shooting.get("id") or 0) in self._receiving_ids
         menu = QMenu(self)
-        label = "Остановить приём фото" if receiving else "Получать новые фото…"
-        action = menu.addAction(label)
+        receive_label = "Остановить приём фото" if receiving else "Получать новые фото…"
+        receive_action = menu.addAction(receive_label)
+        select_action = menu.addAction("Взять на отбор…")
         chosen = menu.exec(self.shooting_list.mapToGlobal(pos))
-        if chosen is action:
+        if chosen is receive_action:
             self.receiveRequested.emit(shooting)
+        elif chosen is select_action:
+            self.selectRequested.emit(shooting)
 
 
 def _humanize_login_error(raw: str) -> str:

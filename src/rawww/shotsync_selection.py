@@ -21,11 +21,15 @@ import json
 import uuid
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 from PySide6.QtCore import QObject, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
-from .cache import FolderCache, cache_root
 from .shotsync_receiver import safe_filename
+
+if TYPE_CHECKING:  # avoid importing the GUI/QtGui stack at module load
+    from .cache import FolderCache
 
 API_KEY_HEADER = b"X-Api-Key"
 SELECTION_DIR = "shotsync-selections"
@@ -33,6 +37,8 @@ SELECTION_DIR = "shotsync-selections"
 
 def selection_root() -> Path:
     """Directory that holds locally downloaded selection folders."""
+    from .cache import cache_root
+
     return cache_root().parent.parent / SELECTION_DIR
 
 
@@ -165,6 +171,8 @@ class SelectionDownloader(QObject):
         folder = run["folder"]
         names = {name for name, *_ in run["mapping"]}
         try:
+            from .cache import FolderCache
+
             cache = FolderCache(folder, live_names=names, load_from_disk=True)
             cache.set_shotsync_session(shooting_id, run["title"])
             cache.set_shotsync_photos(run["mapping"])
