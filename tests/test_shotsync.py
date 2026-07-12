@@ -360,8 +360,13 @@ class SelectionMarkSyncerTests(unittest.TestCase):
         self.assertEqual(self.cache.pending_shotsync_count(), 0)
 
 
+@unittest.skipUnless(HAVE_GUI, "imaging pipeline (QtGui/libGL) not available")
 class EncodePreviewTests(unittest.TestCase):
-    """Client-side 1920px JPEG preview generation (feature 3)."""
+    """Client-side 1920px JPEG preview generation (feature 3).
+
+    Now routes through :func:`rawww.imaging.decode_pixels` so RAW files are
+    handled; that pulls in QtGui, hence the GUI guard.
+    """
 
     def test_downscales_large_image_to_jpeg(self) -> None:
         from PIL import Image
