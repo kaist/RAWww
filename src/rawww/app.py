@@ -49,12 +49,14 @@ from PySide6.QtWidgets import (
     QWidget,
     QWidgetAction,
     QInputDialog,
+    QFileDialog,
     QMenu,
     QMessageBox,
 )
 
 from .cache import FolderCache
 from .shotsync_client import ShotSyncClient
+from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
 from .ai import AiPipeline
 from .exif import MetadataPipeline
@@ -1759,10 +1761,24 @@ class MacDockProgress:
         self._tile.display()
 
 
+def _safe_folder_name(title: str) -> str:
+    """Turn a shooting title into a filesystem-safe folder name."""
+    cleaned = "".join(c if c not in '<>:"/\\|?*' else "_" for c in str(title or "").strip())
+    cleaned = cleaned.rstrip(". ").strip()
+    return cleaned or "shotsync"
+
+
+def _shotsync_photo_filename(photo: dict) -> str:
+    """Basename of a ShotSync photo payload, without any path components."""
+    raw = str(photo.get("name") or "").replace("\\", "/")
+    return Path(raw).name.strip()
+
+
 class Workspace(QMainWindow):
     fullViewRequested = Signal(object)
     fullscreenRequested = Signal(object)
     gridRequested = Signal()
+    openFolderRequested = Signal(object)   # Path: open (or focus) a folder tab
 
     def __init__(self, initial_directory: Path | None = None) -> None:
         super().__init__()
@@ -1833,6 +1849,15 @@ class Workspace(QMainWindow):
         self.shotsync_client.shootingsLoaded.connect(self._shotsync_shootings_loaded)
         self.shotsync_client.shootingsFailed.connect(self._shotsync_shootings_failed)
         self.shotsync_client.avatarLoaded.connect(self._shotsync_avatar_loaded)
+
+        # A single socket is shared by every tab (see shotsync_hub). The hub
+        # keeps a live connection whenever a key is stored and pushes photo
+        # arrivals / mark changes back to whichever tab shows the folder.
+        self.shotsync = shotsync_hub(SHOTSYNC_BASE_URL)
+        self.shotsync.set_api_key(self.shotsync_client.api_key)
+        self.shotsync.photoDownloaded.connect(self._on_shotsync_photo_downloaded)
+        self.shotsync.markUpdated.connect(self._on_shotsync_mark_updated)
+        self.shotsync.receivingChanged.connect(self._refresh_shotsync_receiving)
 
         quick_kind = self.settings.value("quick_mark_kind", "rating", str)
         quick_value = (
@@ -2177,6 +2202,7 @@ class Workspace(QMainWindow):
         self.shotsync_panel = ShotSyncPanel(icon_provider=_fomantic_icon)
         self.shotsync_panel.loginSubmitted.connect(self._shotsync_login)
         self.shotsync_panel.logoutRequested.connect(self._shotsync_logout)
+        self.shotsync_panel.receiveRequested.connect(self._shotsync_receive_requested)
 
         self.sidebar_stack.addWidget(local_page)
         self.sidebar_stack.addWidget(self.shotsync_panel)
@@ -2773,11 +2799,13 @@ class Workspace(QMainWindow):
         self.shotsync_client.logout()
         self._shotsync_checked = False
         self.settings.remove("shotsync/api_key")
+        self.shotsync.set_api_key("")
         self.shotsync_panel.show_login()
 
     def _shotsync_login_succeeded(self, user: dict, key: str) -> None:
         self._shotsync_checked = True
         self.settings.setValue("shotsync/api_key", key)
+        self.shotsync.set_api_key(key)
         self.shotsync_panel.show_logged_in(user)
         avatar_url = user.get("avatar_url")
         if avatar_url:
@@ -2790,6 +2818,7 @@ class Workspace(QMainWindow):
 
     def _shotsync_session_verified(self, user: dict) -> None:
         self._shotsync_checked = True
+        self.shotsync.set_api_key(self.shotsync_client.api_key)
         self.shotsync_panel.show_logged_in(user)
         avatar_url = user.get("avatar_url")
         if avatar_url:
@@ -2800,17 +2829,85 @@ class Workspace(QMainWindow):
     def _shotsync_session_invalid(self, error: str) -> None:
         self._shotsync_checked = False
         self.settings.remove("shotsync/api_key")
+        self.shotsync.set_api_key("")
         if self.shotsync_active:
             self.shotsync_panel.show_login()
 
     def _shotsync_shootings_loaded(self, shootings: list) -> None:
         self.shotsync_panel.set_shootings(shootings)
+        self._refresh_shotsync_receiving()
 
     def _shotsync_shootings_failed(self, error: str) -> None:
         self.shotsync_panel.set_shootings_error(error)
 
     def _shotsync_avatar_loaded(self, image) -> None:
         self.shotsync_panel.set_avatar(image)
+
+    # ----- live receive (feature 1) -------------------------------------
+    def _refresh_shotsync_receiving(self) -> None:
+        """Reflect which shootings are currently being received in the panel."""
+        self.shotsync_panel.set_receiving_ids(self.shotsync.receiving_ids())
+
+    def _shotsync_receive_requested(self, shooting: dict) -> None:
+        """Toggle live receiving for a shooting, choosing a target folder."""
+        shooting_id = int(shooting.get("id") or 0)
+        if not shooting_id:
+            return
+        if self.shotsync.is_receiving(shooting_id):
+            self.shotsync.stop_receiving(shooting_id)
+            return
+        title = shooting.get("title") or "Съёмка ShotSync"
+        base = QFileDialog.getExistingDirectory(
+            self, f"Куда сохранять фото «{title}»", str(self.current_dir)
+        )
+        if not base:
+            return
+        folder = Path(base) / _safe_folder_name(title)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "ShotSync", f"Не удалось создать папку:\n{exc}")
+            return
+        self.shotsync.start_receiving(shooting_id, folder, title)
+        self.openFolderRequested.emit(folder)
+
+    def _on_shotsync_photo_downloaded(self, shooting_id: int, folder: str, filename: str) -> None:
+        """A new original landed on disk; refresh the tab showing that folder."""
+        if Path(folder) == self.current_dir:
+            self.load_directory(self.current_dir)
+
+    def _on_shotsync_mark_updated(self, shooting_id: int, folder: str, photo: dict) -> None:
+        """Mirror an owner mark that arrived over the socket into this folder."""
+        if Path(folder) != self.current_dir:
+            return
+        name = _shotsync_photo_filename(photo)
+        if not name:
+            return
+        self._apply_external_selection(
+            name,
+            rating=photo.get("rating"),
+            color_label=photo.get("color_label") or "",
+            comment=photo.get("comment") or "",
+        )
+
+    def _apply_external_selection(
+        self, name: str, *, rating: int | None, color_label: str, comment: str
+    ) -> None:
+        """Apply rating/color/comment to a single file by name and repaint it."""
+        detail = self.photo_details.setdefault(name, {})
+        detail.update(rating=rating, color_label=color_label, comment=comment)
+        for path, item in self.items_by_path.items():
+            if path.name == name:
+                item.setData(DETAIL_ROLE, dict(detail))
+                break
+        if self.folder_cache is not None and self.cache_ready:
+            self.folder_cache.store_photo_selection(
+                name, rating=rating, color_label=color_label, comment=comment
+            )
+        self.grid.viewport().update()
+        if self.current_path is not None and self.current_path.name == name:
+            if self.stack.currentWidget() is self.full_view:
+                self.full_view.set_metadata(dict(detail), (self.current_path,))
 
     def load_directory(self, directory: Path) -> None:
         if self._folder_context_active:
@@ -4658,9 +4755,21 @@ class MainWindow(QMainWindow):
         workspace.fullViewRequested.connect(self._show_full_view)
         workspace.fullscreenRequested.connect(self._toggle_workspace_fullscreen)
         workspace.gridRequested.connect(self._leave_full_view)
+        workspace.openFolderRequested.connect(self._open_folder_tab)
         self.tabs.setCurrentIndex(index)
         self._select_workspace(self.tabs.currentIndex())
         self._update_tab_geometry()
+
+    def _open_folder_tab(self, folder: Path) -> None:
+        """Focus an existing tab for ``folder`` or open a new one."""
+        folder = Path(folder)
+        for index in range(self.workspace_stack.count()):
+            workspace = self.workspace_stack.widget(index)
+            if isinstance(workspace, Workspace) and workspace.current_dir == folder:
+                self.tabs.setCurrentIndex(index)
+                self._select_workspace(index)
+                return
+        self._add_workspace(folder)
 
     def _create_actions(self) -> None:
         next_tab = QAction("Next workspace", self)
