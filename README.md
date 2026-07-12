@@ -32,7 +32,7 @@ JPEG files are decoded with draft downsampling for fast previews. RAW files use 
 
 The last opened folder is restored on startup.
 
-The grid keeps its fast 256px JPEG cache. The currently open folder is watched for added, removed, renamed, and changed files and is refreshed after a short debounce. Unchanged cache and AI records are retained. EXIF batches share the background preview worker pool; every worker keeps one bundled ExifTool subprocess open instead of starting it per photo. CLIP embeddings and face detection/recognition start only when **Process new photos** is pressed and report progress in the sidebar. The button queues only new, changed, or previously unfinished photos. A 640px JPEG is prepared and shared by the two independent AI workers entirely in memory, then discarded; SQLite stores only the final embeddings and face data. The CLIP and InsightFace processes are created lazily for each manual run and terminated when its queue finishes, releasing their models from memory. ONNX models and the complete Windows ExifTool distribution live inside the application package, so no system installation or `PATH` configuration is required. Set `RAWWW_DISABLE_AI=1` before starting the app to disable background analysis.
+The grid keeps its fast 256px JPEG cache. The currently open folder is watched for added, removed, renamed, and changed files and is refreshed after a short debounce. Unchanged cache and AI records are retained. EXIF uses one dedicated process with one bundled stay-open ExifTool subprocess, so metadata never occupies thumbnail or full-preview decode workers. CLIP embeddings and face detection/recognition start only when **Process new photos** is pressed and report progress in the toolbar status panel, Windows taskbar, and as a percentage badge in the macOS Dock. The button queues only new, changed, or previously unfinished photos. A 640px JPEG is prepared and shared by the two independent AI workers entirely in memory, then discarded; SQLite stores only the final embeddings and face data. The CLIP and InsightFace processes are created lazily for each manual run and terminated when its queue finishes, releasing their models from memory. ONNX models and the complete Windows ExifTool distribution live inside the application package, so no system installation or `PATH` configuration is required. Set `RAWWW_DISABLE_AI=1` before starting the app to disable background analysis.
 
 Preview caches are kept centrally in the operating system's application-data directory, under `RAWww/cache/folder-caches`, with one SQLite file per browsed folder. The application writes only small JPEG grid previews, and entries are invalidated by file size and modification time. Existing larger preview variants are left untouched. SQLite is accessed directly on disk in WAL mode, so opening a folder does not duplicate its complete cache in application memory. Full-view images are decoded from their source files on demand and kept only in a bounded RAM LRU; up to ten neighbours in each direction are preloaded in the background.
 
@@ -57,6 +57,8 @@ uv run python -m rawww.ai_benchmark --limit 32
 ```
 
 ## Decode benchmark
+
+The output compares thumbnail creation with and without blocking EXIF extraction; SQLite thumbnail hits never invoke ExifTool.
 
 ```powershell
 uv run python -m rawww.benchmark "D:\фото\на обработку\а ню" --limit 30 --full-limit 8 --full-size 2560

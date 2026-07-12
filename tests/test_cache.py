@@ -173,7 +173,7 @@ class CacheTests(unittest.TestCase):
             cache.load_or_decode(path, 256)
             self.assertEqual(cache.missing_ai_paths([path], "image_embeddings"), [path])
             self.assertEqual(cache.missing_ai_paths([path], "face_analysis"), [path])
-            self.assertEqual(cache.missing_ai_paths([path], "photo_metadata"), [path])
+            self.assertEqual(cache.missing_metadata_paths([path]), [path])
 
             cache.store_image_embeddings([(str(path), b"embedding")])
             self.assertEqual(cache.missing_ai_paths([path], "image_embeddings"), [])
@@ -182,7 +182,19 @@ class CacheTests(unittest.TestCase):
             cache.store_face_analysis([(str(path), "[]")])
             self.assertEqual(cache.missing_ai_paths([path], "face_analysis"), [])
             cache.store_photo_metadata([(str(path), '{"rating":3}')])
-            self.assertEqual(cache.missing_ai_paths([path], "photo_metadata"), [])
+            self.assertEqual(cache.missing_metadata_paths([path]), [])
+            cache.close(flush=False)
+
+    def test_photo_details_can_skip_exif_table(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            path = folder / "sample.jpg"
+            Image.new("RGB", (32, 32)).save(path)
+            cache = FolderCache(folder, {path.name}, cache_root=folder / "cache")
+            cache.store_photo_metadata([(str(path), '{"original_datetime":"2026-01-02T03:04:05"}')])
+
+            self.assertIn("original_datetime", cache.load_photo_details()[path.name])
+            self.assertNotIn(path.name, cache.load_photo_details(include_metadata=False))
             cache.close(flush=False)
 
 

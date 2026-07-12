@@ -6,6 +6,9 @@ import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import Future, ProcessPoolExecutor
+
+from .cache import FolderCache
 
 from .worker_priority import lower_background_priority
 
@@ -14,8 +17,10 @@ EXIFTOOL_TAGS = [
     "-DateTimeOriginal", "-SubSecDateTimeOriginal", "-CreateDate", "-OffsetTimeOriginal",
     "-Orientation", "-Rating", "-XMP:Rating", "-EXIF:Rating", "-ExposureTime",
     "-ShutterSpeedValue", "-ISO", "-FNumber", "-ApertureValue", "-FocalLength",
+    "-Model", "-SerialNumber", "-InternalSerialNumber",
 ]
 BUNDLED_EXIFTOOL = Path(__file__).with_name("tools") / "exiftool.exe"
+METADATA_BATCH_SIZE = 32
 
 
 class ExifToolError(RuntimeError):
@@ -110,6 +115,7 @@ def extract_metadata_batch(paths: list[str]) -> list[tuple[str, str]]:
                 "orientation": normalize_orientation(first_tag(exif, "EXIF:Orientation", "Orientation")),
                 "rating": normalize_rating(first_tag(exif, "XMP:Rating", "EXIF:Rating", "Rating")),
                 "capture_settings": capture_settings(exif),
+                "camera": camera_details(exif),
                 "original_datetime": original_datetime(exif),
             }
             results.append((path, json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))))
@@ -186,6 +192,18 @@ def capture_settings(exif: dict) -> dict:
     return result
 
 
+def camera_details(exif: dict) -> dict:
+    """Return camera identity; the serial is stored but never displayed."""
+    result = {}
+    model = first_tag(exif, "EXIF:Model", "Model", "UniqueCameraModel")
+    serial = first_tag(exif, "EXIF:SerialNumber", "SerialNumber", "InternalSerialNumber")
+    if model not in (None, ""):
+        result["model"] = str(model).strip()
+    if serial not in (None, ""):
+        result["serial_number"] = str(serial).strip()
+    return result
+
+
 def _exposure_display(value: float) -> str:
     if value <= 0:
         return str(value)
@@ -216,3 +234,66 @@ def _close_client() -> None:
 
 
 atexit.register(_close_client)
+
+
+class MetadataPipeline:
+    """Background EXIF queue, deliberately independent from AI progress."""
+
+    def __init__(self) -> None:
+        self.workers: ProcessPoolExecutor | None = None
+        self.futures: set[Future] = set()
+        self._lock = threading.Lock()
+        self._shutting_down = False
+
+    def scan(self, paths: list[Path], cache: FolderCache, on_complete=None) -> None:
+        missing = cache.missing_metadata_paths(paths)
+        if not missing:
+            return
+        with self._lock:
+            if self._shutting_down:
+                return
+            if self.workers is None:
+                self.workers = ProcessPoolExecutor(max_workers=1)
+            workers = self.workers
+        for start in range(0, len(missing), METADATA_BATCH_SIZE):
+            batch = [str(path) for path in missing[start:start + METADATA_BATCH_SIZE]]
+            try:
+                future = workers.submit(extract_metadata_batch, batch)
+            except RuntimeError:
+                break
+            with self._lock:
+                if self._shutting_down:
+                    future.cancel()
+                    break
+                self.futures.add(future)
+            future.add_done_callback(
+                lambda done, target=cache, callback=on_complete: self._finished(
+                    done, target, callback
+                )
+            )
+
+    def _finished(self, future: Future, cache: FolderCache, on_complete) -> None:
+        with self._lock:
+            self.futures.discard(future)
+            if self._shutting_down:
+                return
+        if future.cancelled():
+            return
+        try:
+            results = future.result()
+            cache.store_photo_metadata(results)
+            if on_complete is not None:
+                on_complete(results)
+        except Exception:
+            pass
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._shutting_down = True
+            futures = tuple(self.futures)
+            self.futures.clear()
+            workers, self.workers = self.workers, None
+        for future in futures:
+            future.cancel()
+        if workers is not None:
+            workers.shutdown(wait=False, cancel_futures=True)

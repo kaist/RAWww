@@ -7,7 +7,8 @@ from pathlib import Path
 from time import perf_counter
 
 from .cache import FolderCache
-from .imaging import PixelImage, decode_pixels, is_supported_image
+from .exif import extract_metadata_batch
+from .imaging import PixelImage, decode_pixels, decode_thumbnail_pixels, is_supported_image
 
 
 def main() -> None:
@@ -32,6 +33,7 @@ def main() -> None:
 
     cache = FolderCache(args.folder, {path.name for path in paths}, eager_variants={256})
     thumb_pixels = _decode_many(paths, 256)
+    _benchmark_thumbnail_creation_with_exif(paths, 256)
     for pixel in thumb_pixels:
         cache.store_pixels(pixel, 256)
 
@@ -64,7 +66,10 @@ def main() -> None:
     warm_cache.close(flush=False)
 
     print(f"Eager thumb cache load: {eager_seconds:.3f}s")
-    print(f"Thumb RAM hits: {len([item for item in thumb_hits if item])}/{len(paths)} in {thumb_hit_seconds:.3f}s")
+    print(
+        f"Thumb SQLite hits (no EXIF read): "
+        f"{len([item for item in thumb_hits if item])}/{len(paths)} in {thumb_hit_seconds:.3f}s"
+    )
     print(f"Full RAM-DB JPEG hits: {len([item for item in full_hits if item])}/{len(full_paths)} in {full_hit_seconds:.3f}s")
 
 
@@ -79,6 +84,22 @@ def _decode_many(paths: list[Path], size: int) -> list[PixelImage]:
     rate = len(paths) / seconds if seconds > 0 else 0
     print(f"Decode {size}px: {len(paths)} files in {seconds:.3f}s ({rate:.1f}/s)")
     return results
+
+
+def _decode_thumbnail_and_exif(path: Path, size: int) -> tuple[PixelImage, list[tuple[str, str]]]:
+    """Benchmark-only approximation of a thumbnail worker that blocks on EXIF."""
+    return decode_thumbnail_pixels(path, size), extract_metadata_batch([str(path)])
+
+
+def _benchmark_thumbnail_creation_with_exif(paths: list[Path], size: int) -> None:
+    start = perf_counter()
+    with ProcessPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
+        futures = [pool.submit(_decode_thumbnail_and_exif, path, size) for path in paths]
+        for future in as_completed(futures):
+            future.result()
+    seconds = perf_counter() - start
+    rate = len(paths) / seconds if seconds > 0 else 0
+    print(f"Decode {size}px + blocking EXIF: {len(paths)} files in {seconds:.3f}s ({rate:.1f}/s)")
 
 
 def _cache_size(cache_path: Path) -> int:

@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
 
 from .cache import FolderCache
 from .ai import AiPipeline
+from .exif import MetadataPipeline
 from .imaging import DecodedImage, PixelImage, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
 from .workspace import WorkspaceRequest, WorkspaceState
 
@@ -89,6 +90,7 @@ WORK_PUMP_INTERVAL_MS = 16
 FLUSH_INTERVAL_MS = 30_000
 FOLDER_CHANGE_DEBOUNCE_MS = 1_000
 VOLUME_REFRESH_INTERVAL_MS = 2_000
+ENABLE_EXIF_METADATA = True
 
 FOMANTIC_ICON_CODES = {
     "images": "\uf302", "user": "\uf007", "brush": "\uf1fc", "media": "\uf87c",
@@ -107,6 +109,7 @@ class DecodeBridge(QObject):
     failed = Signal(str, str)
     cacheLoaded = Signal(int, object)
     directoryScanned = Signal(object, Path, object)
+    metadataUpdated = Signal(object)
 
 
 class VideoThumbnailer(QObject):
@@ -901,7 +904,10 @@ class ViewerMetaBar(QWidget):
                 button.setIcon(_fomantic_icon("star", 17, "#d0d0d0" if value <= rating else "#777777"))
         self.set_comment(str(detail.get("comment") or ""))
         capture = detail.get("capture_settings") or {}
+        camera = detail.get("camera") or {}
         parts = []
+        if camera.get("model"):
+            parts.append(str(camera["model"]))
         if capture.get("aperture") is not None:
             parts.append(f"f/{capture['aperture']:g}")
         if capture.get("exposure_display"):
@@ -1643,6 +1649,111 @@ def _fit_rect(source: QSize, bounds: QSize) -> QRect:
     return QRect((bounds.width() - width) // 2, (bounds.height() - height) // 2, width, height)
 
 
+class WindowsTaskbarProgress:
+    """Optional Windows 7+ ITaskbarList3 progress integration."""
+
+    _TBPF_NORMAL = 0x2
+    _TBPF_NOPROGRESS = 0x0
+
+    def __init__(self) -> None:
+        self._taskbar = None
+        self._com_initialized = False
+        if sys.platform != "win32":
+            return
+        try:
+            class GUID(ctypes.Structure):
+                _fields_ = [
+                    ("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                    ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8),
+                ]
+
+            def guid(value: str) -> GUID:
+                import uuid
+                return GUID.from_buffer_copy(uuid.UUID(value).bytes_le)
+
+            ole32 = ctypes.OleDLL("ole32")
+            ole32.CoInitialize.argtypes = [ctypes.c_void_p]
+            self._com_initialized = ole32.CoInitialize(None) >= 0
+            ole32.CoCreateInstance.argtypes = [
+                ctypes.POINTER(GUID), ctypes.c_void_p, ctypes.c_ulong,
+                ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p),
+            ]
+            taskbar_base = ctypes.c_void_p()
+            result = ole32.CoCreateInstance(
+                ctypes.byref(guid("56FDF344-FD6D-11D0-958A-006097C9A090")), None, 1,
+                ctypes.byref(guid("56FDF342-FD6D-11D0-958A-006097C9A090")), ctypes.byref(taskbar_base),
+            )
+            if result >= 0:
+                base_vtable = ctypes.cast(taskbar_base, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+                query_interface = ctypes.WINFUNCTYPE(
+                    ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)
+                )(base_vtable[0])
+                taskbar = ctypes.c_void_p()
+                result = query_interface(
+                    taskbar_base, ctypes.byref(guid("EA1AFB91-9E28-4B86-90E9-9E9F8A5EEFAF")), ctypes.byref(taskbar)
+                )
+                release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(base_vtable[2])
+                release(taskbar_base)
+                if result < 0:
+                    return
+                vtable = ctypes.cast(taskbar, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+                initialize = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtable[3])
+                if initialize(taskbar) >= 0:
+                    self._taskbar = taskbar
+        except (AttributeError, OSError):
+            pass
+
+    def close(self) -> None:
+        if self._taskbar is not None:
+            vtable = ctypes.cast(self._taskbar, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+            release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])
+            release(self._taskbar)
+            self._taskbar = None
+        if self._com_initialized:
+            ctypes.OleDLL("ole32").CoUninitialize()
+            self._com_initialized = False
+
+    def set_progress(self, window_id: int, value: int, total: int) -> None:
+        if self._taskbar is None or not window_id:
+            return
+        try:
+            vtable = ctypes.cast(self._taskbar, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+            set_value = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_ulonglong
+            )(vtable[9])
+            set_state = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong
+            )(vtable[10])
+            window = ctypes.c_void_p(window_id)
+            if total > 0:
+                set_state(self._taskbar, window, self._TBPF_NORMAL)
+                set_value(self._taskbar, window, max(0, value), total)
+            else:
+                set_state(self._taskbar, window, self._TBPF_NOPROGRESS)
+        except (OSError, ValueError):
+            self._taskbar = None
+
+
+class MacDockProgress:
+    """Use the native Dock tile badge when the optional PyObjC bridge exists."""
+
+    def __init__(self) -> None:
+        self._tile = None
+        if sys.platform != "darwin":
+            return
+        try:
+            from AppKit import NSApp
+            self._tile = NSApp().dockTile()
+        except (ImportError, AttributeError):
+            pass
+
+    def set_progress(self, value: int, total: int) -> None:
+        if self._tile is None:
+            return
+        self._tile.setBadgeLabel_(f"{round(value / total * 100)}%" if total else None)
+        self._tile.display()
+
+
 class Workspace(QMainWindow):
     fullViewRequested = Signal(object)
     fullscreenRequested = Signal(object)
@@ -1653,6 +1764,8 @@ class Workspace(QMainWindow):
         self.setWindowTitle("RAWww")
         self.resize(1440, 920)
         self.closing = False
+        self._taskbar_progress = WindowsTaskbarProgress()
+        self._dock_progress = MacDockProgress()
 
         self.current_decode_executor: ProcessPoolExecutor | None = None
         self.background_decode_executor: ProcessPoolExecutor | None = None
@@ -1667,6 +1780,7 @@ class Workspace(QMainWindow):
         self.bridge.failed.connect(self._on_decode_failed)
         self.bridge.cacheLoaded.connect(self._on_cache_loaded)
         self.bridge.directoryScanned.connect(self._on_directory_scanned)
+        self.bridge.metadataUpdated.connect(self._on_metadata_updated)
         self.video_thumbnailer = VideoThumbnailer(self)
         self.video_thumbnailer.previewReady.connect(self._on_video_preview)
         self.pending: dict[tuple[Path, int], Future] = {}
@@ -1736,7 +1850,9 @@ class Workspace(QMainWindow):
         self._pending_folder_grid_context: tuple[list[str], int] | None = None
         self.folder_cache: FolderCache | None = None
         self.ai_pipeline = AiPipeline()
+        self.metadata_pipeline = MetadataPipeline()
         self.ai_progress_total = 0
+        self.preview_progress_total = 0
         self.fast_fullscreen = False
         self.normal_geometry = None
         self.normal_window_flags = self.windowFlags()
@@ -1809,6 +1925,8 @@ class Workspace(QMainWindow):
         # executors so a completed cache lookup cannot enqueue a decode into an
         # executor that has already been shut down.
         self.closing = True
+        self._set_taskbar_progress(0, 0)
+        self._taskbar_progress.close()
         self._save_folder_grid_context()
         self.workspace_state.close()
         self.flush_timer.stop()
@@ -1833,6 +1951,7 @@ class Workspace(QMainWindow):
         self.directory_scan_executor.shutdown(wait=False, cancel_futures=True)
         self.cache_load_executor.shutdown(wait=False, cancel_futures=True)
         self.cache_flush_executor.shutdown(wait=False, cancel_futures=False)
+        self.metadata_pipeline.shutdown()
         self.ai_pipeline.shutdown()
         super().closeEvent(event)
 
@@ -2051,6 +2170,10 @@ class Workspace(QMainWindow):
         self.media_filter.setItemIcon(1, _fomantic_icon("images", 12, "#a8b0bd"))
         self.media_filter.setItemIcon(2, _fomantic_icon("film", 12, "#a8b0bd"))
         self.media_filter.setFixedWidth(148)
+        self.camera_filter = QComboBox()
+        self.camera_filter.addItem("Все камеры", None)
+        self.camera_filter.setItemIcon(0, _fomantic_icon("images", 12, "#a8b0bd"))
+        self.camera_filter.setFixedWidth(170)
         self.shot_filter = QComboBox()
         for label, value in (("Все планы", None), ("Крупный", "closeup"), ("Средний", "medium"), ("Общий", "wide"), ("Без лиц", "no_face")):
             self.shot_filter.addItem(label, value)
@@ -2077,7 +2200,7 @@ class Workspace(QMainWindow):
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setFixedWidth(148)
         search_layout.addWidget(self.search_edit)
-        for control in (self.rating_filter, self.color_filter, self.media_filter, self.shot_filter, self.sort_combo):
+        for control in (self.rating_filter, self.color_filter, self.media_filter, self.camera_filter, self.shot_filter, self.sort_combo):
             control.currentIndexChanged.connect(self._apply_view)
             filter_layout.addWidget(control)
         self.search_edit.textChanged.connect(self._apply_view)
@@ -2108,19 +2231,36 @@ class Workspace(QMainWindow):
         self.ai_button = QPushButton("Обработать новые фото")
         self.ai_button.clicked.connect(self._start_ai_analysis)
         toolbar_layout.addWidget(self.ai_button)
-        self.ai_progress = QProgressBar()
-        self.ai_progress.setRange(0, 1)
-        self.ai_progress.setValue(0)
-        self.ai_progress.setFormat("AI не запускался")
-        self.ai_progress.setFixedWidth(150)
-        toolbar_layout.addWidget(self.ai_progress)
         for icon, delta in (("zoom-out", -1), ("zoom", 1)):
             button = QToolButton()
             button.setIcon(_fomantic_icon(icon, 13))
             button.setToolTip("Размер превью")
             button.clicked.connect(lambda _checked=False, d=delta: self.grid.change_card_size(d))
             toolbar_layout.addWidget(button)
-        toolbar_layout.addStretch(1)
+
+        self.status_panel = QWidget()
+        self.status_panel.setObjectName("viewerStatusPanel")
+        self.status_panel.setMinimumWidth(0)
+        self.status_panel.setMaximumWidth(300)
+        self.status_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        status_layout = QVBoxLayout(self.status_panel)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(2)
+        self.status_progress = QProgressBar()
+        self.status_progress.setObjectName("viewerStatusProgress")
+        self.status_progress.setFixedHeight(14)
+        self.status_progress.setTextVisible(True)
+        progress_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        progress_policy.setRetainSizeWhenHidden(True)
+        self.status_progress.setSizePolicy(progress_policy)
+        self.status_progress.hide()
+        status_layout.addWidget(self.status_progress)
+        self.status_label = QLabel()
+        self.status_label.setObjectName("viewerStatusText")
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        status_layout.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignBottom)
+        self.status_panel.installEventFilter(self)
+        toolbar_layout.addWidget(self.status_panel, 1)
         toolbar_layout.addWidget(filter_panel)
 
         self.ai_panel = QWidget()
@@ -2173,7 +2313,6 @@ class Workspace(QMainWindow):
         ai_layout.addStretch(1)
         self.ai_panel.hide()
 
-        self.selection_label = QLabel("Не выбрано")
         self.meta_bar = ViewerMetaBar(settings=self.settings)
         self.meta_bar.ratingRequested.connect(self._set_selected_rating)
         self.meta_bar.colorRequested.connect(self._set_selected_color)
@@ -2275,6 +2414,8 @@ class Workspace(QMainWindow):
         self._focus_directory_panel()
 
     def eventFilter(self, watched, event) -> bool:
+        if watched is getattr(self, "status_panel", None) and event.type() == QEvent.Type.Resize:
+            self._fit_status_text()
         if event.type() == QEvent.Type.KeyPress and self.stack.currentWidget() is self.grid_page:
             focus_widget = watched if isinstance(watched, QWidget) else QApplication.focusWidget()
             if self._is_grid_page_widget(focus_widget):
@@ -2534,11 +2675,10 @@ class Workspace(QMainWindow):
         self.thumb_timer.stop()
         self.ai_progress_timer.stop()
         self.ai_progress_total = 0
+        self.preview_progress_total = 0
         if hasattr(self, "ai_button"):
             self.ai_button.setEnabled(False)
-            self.ai_progress.setRange(0, 1)
-            self.ai_progress.setValue(0)
-            self.ai_progress.setFormat("Открытие папки…")
+            self._refresh_status_panel()
         self.cache_load_generation += 1
         self.directory_generation += 1
         self._flush_folder_cache(wait=False, close=True)
@@ -2648,12 +2788,14 @@ class Workspace(QMainWindow):
             # Combine: folders first, then images
             self.paths = sorted_subfolders + sorted_images
             self.view_paths = list(self.paths)
+            self.preview_progress_total = len(images)
             self.view_generation += 1
         except Exception as exc:
             self.bridge.failed.emit(str(directory), str(exc))
             self.all_paths = []
             self.view_paths = []
             self.paths = []
+            self.preview_progress_total = 0
         scannable_paths = [path for path in self.paths if path.is_file()]
         if scannable_paths:
             self.folder_cache = FolderCache(
@@ -2679,6 +2821,7 @@ class Workspace(QMainWindow):
         self.thumb_priority.clear()
         self.thumb_priority_set.clear()
         self.visible_thumb_pending.clear()
+        self._refresh_status_panel()
         self.populate_timer.start()
         # Do not decode the first files before the in-memory cache has been
         # deserialized.  Otherwise the sequential queue races cached previews.
@@ -2705,6 +2848,7 @@ class Workspace(QMainWindow):
             self.items_by_path[path] = item
         self.populate_index = end
         self._schedule_visible_thumb_priority()
+        self._refresh_status_panel()
         if self.populate_index >= len(self.paths):
             self.populate_timer.stop()
             if self.cache_ready:
@@ -2740,6 +2884,7 @@ class Workspace(QMainWindow):
             submitted += 1
         if self.thumb_index >= len(self.paths) and not self.thumb_priority:
             self.thumb_timer.stop()
+        self._refresh_status_panel()
 
     def _schedule_visible_thumb_priority(self) -> None:
         if not self.workspace_active:
@@ -2755,16 +2900,12 @@ class Workspace(QMainWindow):
         face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
         self.ai_progress_total = len(set(embedding_missing) | set(face_missing))
         if not self.ai_progress_total:
-            self.ai_progress.setRange(0, 1)
-            self.ai_progress.setValue(1)
-            self.ai_progress.setFormat("Анализ уже готов")
+            self._refresh_status_panel()
             return
         self.ai_button.setEnabled(False)
-        self.ai_progress.setRange(0, self.ai_progress_total)
-        self.ai_progress.setValue(0)
-        self.ai_progress.setFormat("Анализ: %v / %m")
         self.ai_pipeline.scan(analysis_paths, self.folder_cache, self._background_decode_executor())
         self.ai_progress_timer.start()
+        self._refresh_status_panel()
 
     def _update_ai_progress(self) -> None:
         if self.folder_cache is None or not self.cache_ready:
@@ -2774,17 +2915,12 @@ class Workspace(QMainWindow):
         embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
         face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
         remaining = len(set(embedding_missing) | set(face_missing))
-        completed = max(0, self.ai_progress_total - remaining)
-        self.ai_progress.setValue(completed)
         if self.ai_pipeline.pending_count() == 0:
             self.ai_progress_timer.stop()
             self.ai_pipeline.release_analysis_workers()
             self._reload_photo_details()
             self.ai_button.setEnabled(remaining > 0)
-            if remaining:
-                self.ai_progress.setFormat(f"Готово {completed}/{self.ai_progress_total}, ошибок: {remaining}")
-            else:
-                self.ai_progress.setFormat("Анализ завершён")
+        self._refresh_status_panel()
 
     def _folder_changed(self, path: str) -> None:
         if not self.closing and Path(path) == self.current_dir:
@@ -2803,28 +2939,153 @@ class Workspace(QMainWindow):
         face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
         waiting = len(set(embedding_missing) | set(face_missing))
         self.ai_button.setEnabled(waiting > 0 and self.ai_pipeline.pending_count() == 0)
-        self.ai_progress.setRange(0, 1)
-        self.ai_progress.setValue(0 if waiting else 1)
-        self.ai_progress.setFormat(f"Ожидают анализа: {waiting}" if waiting else "Все фото обработаны")
+        self._refresh_status_panel()
 
     def _reset_ai_status(self) -> None:
         if not hasattr(self, "ai_button"):
             return
         self.ai_button.setEnabled(False)
-        self.ai_progress.setRange(0, 1)
-        self.ai_progress.setValue(1)
-        self.ai_progress.setFormat("Нет фото для анализа")
+        self._refresh_status_panel()
+
+    def _refresh_status_panel(self) -> None:
+        """Show one active operation and keep folder/selection counts in the toolbar."""
+        if not hasattr(self, "status_label"):
+            return
+        # Directory scanning already established these collections. Avoid
+        # thousands of filesystem stat calls whenever progress is repainted.
+        total = self.preview_progress_total
+        filtered = sum(1 for path in self.view_paths if is_supported_media(path))
+        selected = len(self._selected_paths())
+        text = f"{filtered}/{total}"
+        if selected > 1:
+            text += f" (выделено: {selected})"
+        self._status_text = text
+        self._fit_status_text()
+        self.status_label.setToolTip(text)
+
+        if self.ai_pipeline.pending_count() > 0:
+            analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
+            remaining = 0
+            if self.folder_cache is not None and self.cache_ready:
+                embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
+                face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
+                remaining = len(set(embedding_missing) | set(face_missing))
+            completed = max(0, self.ai_progress_total - remaining)
+            self.status_progress.setRange(0, max(1, self.ai_progress_total))
+            self.status_progress.setValue(completed)
+            self.status_progress.setFormat(f"Анализ: {completed}/{self.ai_progress_total}")
+            self.status_progress.setToolTip(self.status_progress.format())
+            self.status_progress.show()
+            self._set_taskbar_progress(completed, self.ai_progress_total)
+            return
+
+        thumbnail_pending = any(size == THUMB_SIZE for _, size in self.pending)
+        if self.preview_progress_total and (self.thumb_timer.isActive() or thumbnail_pending):
+            loaded = sum(
+                1 for path in self.paths
+                if is_supported_media(path) and self.items_by_path.get(path) is not None
+                and isinstance(self.items_by_path[path].data(PREVIEW_ROLE), QImage)
+            )
+            self.status_progress.setRange(0, self.preview_progress_total)
+            self.status_progress.setValue(loaded)
+            self.status_progress.setFormat(f"Превью: {loaded}/{self.preview_progress_total}")
+            self.status_progress.setToolTip(self.status_progress.format())
+            self.status_progress.show()
+            self._set_taskbar_progress(loaded, self.preview_progress_total)
+            return
+
+        self.status_progress.hide()
+        self._set_taskbar_progress(0, 0)
+
+    def _fit_status_text(self) -> None:
+        if not hasattr(self, "status_label"):
+            return
+        text = getattr(self, "_status_text", "")
+        self.status_label.setText(self.status_label.fontMetrics().elidedText(
+            text, Qt.TextElideMode.ElideRight, max(0, self.status_label.width())
+        ))
+
+    def _set_taskbar_progress(self, value: int, total: int) -> None:
+        self._taskbar_progress.set_progress(int(self.window().winId()), value, total)
+        self._dock_progress.set_progress(value, total)
 
     def _reload_photo_details(self) -> None:
         if self.folder_cache is None or not self.cache_ready:
             return
-        self.photo_details = self.folder_cache.load_photo_details()
+        self.photo_details = self.folder_cache.load_photo_details(
+            include_metadata=ENABLE_EXIF_METADATA
+        )
         self.image_embeddings = self.folder_cache.load_image_embeddings()
+        self._refresh_camera_filter()
         for path, item in self.items_by_path.items():
             item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
         self.grid.viewport().update()
         self._update_analysis_controls()
         self._apply_view()
+
+    def _on_metadata_updated(self, results: object) -> None:
+        """Apply thumbnail-worker EXIF without reloading the whole folder cache."""
+        if self.closing or not self.cache_ready or not isinstance(results, list):
+            return
+        changed_current = False
+        changed_camera_keys = set()
+        for name, payload in results:
+            try:
+                metadata = json.loads(payload)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(metadata, dict):
+                continue
+            path = Path(name)
+            detail = self.photo_details.setdefault(path.name, {})
+            detail.update(metadata)
+            camera_key = self._camera_filter_key(detail)
+            if camera_key is not None:
+                changed_camera_keys.add(camera_key)
+            item = self.items_by_path.get(path)
+            if item is not None:
+                item.setData(DETAIL_ROLE, detail)
+            changed_current |= path == self.current_path
+        self._refresh_camera_filter()
+        if self.camera_filter.currentData() in changed_camera_keys:
+            self._apply_view()
+        if changed_current and self.current_path is not None:
+            detail = self.photo_details.get(self.current_path.name, {})
+            self.full_view.set_metadata(detail)
+            if self.stack.currentWidget() is self.grid_page and hasattr(self, "meta_bar"):
+                self.meta_bar.set_metadata(detail)
+
+    @staticmethod
+    def _camera_filter_key(detail: dict) -> str | None:
+        camera = detail.get("camera") or {}
+        model = str(camera.get("model") or "").strip()
+        if not model:
+            return None
+        serial = str(camera.get("serial_number") or "").strip()
+        return f"serial:{serial}" if serial else f"model:{model}"
+
+    def _refresh_camera_filter(self) -> None:
+        if not hasattr(self, "camera_filter"):
+            return
+        selected = self.camera_filter.currentData()
+        cameras: dict[str, dict[str, object]] = {}
+        for detail in self.photo_details.values():
+            key = self._camera_filter_key(detail)
+            if key is None:
+                continue
+            camera = detail.get("camera") or {}
+            entry = cameras.setdefault(key, {"model": str(camera.get("model") or ""), "count": 0})
+            entry["count"] = int(entry["count"]) + 1
+        self.camera_filter.blockSignals(True)
+        self.camera_filter.clear()
+        self.camera_filter.addItem("Все камеры", None)
+        self.camera_filter.setItemIcon(0, _fomantic_icon("images", 12, "#a8b0bd"))
+        for key, entry in sorted(cameras.items(), key=lambda item: (str(item[1]["model"]).casefold(), item[0])):
+            self.camera_filter.addItem(f"{entry['model']} ({entry['count']})", key)
+        index = self.camera_filter.findData(selected)
+        self.camera_filter.setCurrentIndex(index if index >= 0 else 0)
+        self.camera_filter.blockSignals(False)
+        self.camera_filter.setVisible(len(cameras) > 1)
 
     def _update_analysis_controls(self) -> None:
         if not hasattr(self, "faces_panel_button"):
@@ -2841,6 +3102,7 @@ class Workspace(QMainWindow):
             rating = self.rating_filter.currentData()
             color = self.color_filter.currentData()
             media = self.media_filter.currentData()
+            camera_key = self.camera_filter.currentData()
             needle = self.search_edit.text().strip().casefold()
             matching_paths: list[Path] = []
             for path in self.all_paths:
@@ -2851,6 +3113,8 @@ class Workspace(QMainWindow):
                 if media == "image" and is_supported_video(path):
                     continue
                 detail = self.photo_details.get(path.name, {})
+                if camera_key is not None and self._camera_filter_key(detail) != camera_key:
+                    continue
                 if rating is not None and detail.get("rating") != rating:
                     continue
                 if self.color_filter.currentIndex() > 0 and detail.get("color_label", "") != color:
@@ -2979,21 +3243,24 @@ class Workspace(QMainWindow):
             self.bridge.failed.emit(str(self.current_dir), str(exc))
         self.cache_ready = True
         if self.folder_cache is not None:
-            self.photo_details = self.folder_cache.load_photo_details()
+            self.photo_details = self.folder_cache.load_photo_details(
+                include_metadata=ENABLE_EXIF_METADATA
+            )
             self.image_embeddings = self.folder_cache.load_image_embeddings()
             for path, item in self.items_by_path.items():
                 item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
+        self._refresh_camera_filter()
         # Series membership depends on embeddings, which are only available
         # after the folder cache has loaded. Rebuild the grid now so a restored
         # checked state reflects the actual collapsed-series view.
         self._apply_view()
         self._update_analysis_controls()
         self._refresh_ai_status()
-        if self.folder_cache is not None:
-            self.ai_pipeline.scan_exif(
+        if ENABLE_EXIF_METADATA and self.folder_cache is not None:
+            self.metadata_pipeline.scan(
                 [path for path in self.view_paths if is_supported_image(path)],
                 self.folder_cache,
-                self._background_decode_executor(),
+                self.bridge.metadataUpdated.emit,
             )
         self.thumb_index = 0
         self._schedule_visible_thumb_priority()
@@ -3005,6 +3272,7 @@ class Workspace(QMainWindow):
         rating = self.rating_filter.currentData()
         color = self.color_filter.currentData()
         media = self.media_filter.currentData()
+        camera_key = self.camera_filter.currentData()
         shot = self.shot_filter.currentData()
         needle = self.search_edit.text().strip().casefold()
 
@@ -3018,6 +3286,8 @@ class Workspace(QMainWindow):
             if media == "image" and is_supported_video(path):
                 return False
             detail = self.photo_details.get(path.name, {})
+            if camera_key is not None and self._camera_filter_key(detail) != camera_key:
+                return False
             if rating is not None and detail.get("rating") != rating:
                 return False
             if self.color_filter.currentIndex() > 0 and detail.get("color_label", "") != color:
@@ -3053,6 +3323,7 @@ class Workspace(QMainWindow):
         self.thumb_priority.clear()
         self.thumb_priority_set.clear()
         self._update_analysis_controls()
+        self._refresh_status_panel()
         self.populate_timer.start()
 
     def _collapse_series_paths(self, paths: list[Path]) -> list[Path]:
@@ -3120,7 +3391,7 @@ class Workspace(QMainWindow):
 
     def _selection_changed(self) -> None:
         selected = self._selected_paths()
-        self.selection_label.setText(f"Выбрано: {len(selected)}" if selected else f"Фото: {len(self.paths)}")
+        self._refresh_status_panel()
         if len(selected) == 1:
             self.comment_edit.setText(str(self.photo_details.get(selected[0].name, {}).get("comment", "")))
         elif not selected:
@@ -3662,6 +3933,11 @@ class Workspace(QMainWindow):
                 self.full_view.set_image(decoded, fallback=max_size == THUMB_SIZE)
         if max_size > THUMB_SIZE and decoded.path == self.current_path:
             self.thumb_timer.start()
+        # Full-size frames and their preloaded neighbours do not change
+        # thumbnail progress. Updating it here used to scan the whole folder
+        # and call the OS taskbar API after every full-view decode.
+        if max_size == THUMB_SIZE and self.stack.currentWidget() is not self.full_view:
+            self._refresh_status_panel()
 
     def _on_video_preview(self, path: Path, preview: QImage) -> None:
         if self.closing or not self.workspace_active or preview.isNull():
@@ -3680,6 +3956,8 @@ class Workspace(QMainWindow):
             self.grid.update(self.grid.visualItemRect(item))
         self.full_view.update_preview(path, preview)
         self.full_view.set_video_preview(path, preview)
+        if self.stack.currentWidget() is not self.full_view:
+            self._refresh_status_panel()
 
     def _on_decode_failed(self, path: str, message: str) -> None:
         self.visible_thumb_pending.discard((Path(path), THUMB_SIZE))
@@ -3688,6 +3966,8 @@ class Workspace(QMainWindow):
             item.setText(f"{Path(path).name}\n{message}")
         if Path(path) == self.current_path:
             self.thumb_timer.start()
+        if self.stack.currentWidget() is not self.full_view:
+            self._refresh_status_panel()
 
     def _open_selected(self) -> None:
         item = self.grid.currentItem()
@@ -3764,6 +4044,7 @@ class Workspace(QMainWindow):
         self.full_view.stop_video()
         self.stack.setCurrentWidget(self.grid_page)
         self._restore_grid_context()
+        self._refresh_status_panel()
         self.gridRequested.emit()
 
     def _remember_thumbnail_size(self, size: int) -> None:
@@ -4575,6 +4856,29 @@ def apply_theme(app: QApplication) -> None:
             background: #303030;
             color: #ededed;
             padding-left: 9px;
+        }
+        QWidget#viewerStatusPanel, QLabel#viewerStatusText {
+            background: transparent;
+            border: 0;
+        }
+        QLabel#viewerStatusText {
+            color: #c4c4c4;
+            font-size: 11px;
+            padding: 0;
+        }
+        QProgressBar#viewerStatusProgress {
+            min-height: 14px;
+            max-height: 14px;
+            border: 1px solid #595959;
+            border-radius: 6px;
+            background: #111111;
+            color: #f0f0f0;
+            font-size: 9px;
+            padding: 0;
+        }
+        QProgressBar#viewerStatusProgress::chunk {
+            border-radius: 5px;
+            background: #707070;
         }
         QWidget#viewerFiltersPanel {
             min-height: 32px;

@@ -163,8 +163,14 @@ class FolderCache:
                 self._db.commit()
 
     def missing_ai_paths(self, paths: list[Path], table: str) -> list[Path]:
-        if table not in {"image_embeddings", "face_analysis", "photo_metadata"}:
+        if table not in {"image_embeddings", "face_analysis"}:
             raise ValueError(f"Unknown AI cache table: {table}")
+        return self._missing_paths(paths, table)
+
+    def missing_metadata_paths(self, paths: list[Path]) -> list[Path]:
+        return self._missing_paths(paths, "photo_metadata")
+
+    def _missing_paths(self, paths: list[Path], table: str) -> list[Path]:
         missing = []
         with self._lock:
             db = self._db_or_raise()
@@ -197,18 +203,19 @@ class FolderCache:
     def store_photo_metadata(self, results: list[tuple[str, str]]) -> None:
         self._store_ai_results("photo_metadata", "metadata_json", results)
 
-    def load_photo_details(self) -> dict[str, dict]:
+    def load_photo_details(self, *, include_metadata: bool = True) -> dict[str, dict]:
         """Return cached EXIF/AI metadata and the user's local selection state."""
         import json
 
         details: dict[str, dict] = {}
         with self._lock:
             db = self._db_or_raise()
-            for name, payload in db.execute("SELECT name, metadata_json FROM photo_metadata"):
-                try:
-                    details[name] = json.loads(payload)
-                except (TypeError, ValueError):
-                    details[name] = {}
+            if include_metadata:
+                for name, payload in db.execute("SELECT name, metadata_json FROM photo_metadata"):
+                    try:
+                        details[name] = json.loads(payload)
+                    except (TypeError, ValueError):
+                        details[name] = {}
             for name, payload in db.execute("SELECT name, faces_json FROM face_analysis"):
                 try:
                     faces = json.loads(payload)

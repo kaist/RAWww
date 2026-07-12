@@ -32,7 +32,6 @@ INSIGHTFACE_ROOT = MODEL_ROOT / "insightface"
 INSIGHTFACE_NAME = "buffalo_s_shotsync"
 EMBEDDING_BATCH_SIZE = 16
 FACE_BATCH_SIZE = 4
-EXIF_BATCH_SIZE = 32
 FACE_LONG_SIDE = 640
 ANALYSIS_SOURCE_BATCH_SIZE = 8
 
@@ -199,24 +198,17 @@ class AiPipeline:
         self._futures_lock = threading.Lock()
         self._shutting_down = False
 
-    def scan_exif(self, paths: list[Path], cache: FolderCache, preview_workers: ProcessPoolExecutor) -> None:
-        if os.environ.get("RAWWW_DISABLE_AI") == "1":
-            return
-        from .exif import extract_metadata_batch
-
-        exif_paths = cache.missing_ai_paths(paths, "photo_metadata")
-        self._submit_batches(preview_workers, extract_metadata_batch, exif_paths,
-                             EXIF_BATCH_SIZE, cache.store_photo_metadata)
-
     def scan(self, paths: list[Path], cache: FolderCache, preview_workers: ProcessPoolExecutor) -> None:
         if os.environ.get("RAWWW_DISABLE_AI") == "1":
             return
-        self._ensure_analysis_workers()
         embedding_paths = cache.missing_ai_paths(paths, "image_embeddings")
         face_paths = cache.missing_ai_paths(paths, "face_analysis")
         embedding_names = {str(path) for path in embedding_paths}
         face_names = {str(path) for path in face_paths}
         analysis_paths = list(dict.fromkeys([*embedding_paths, *face_paths]))
+        if not analysis_paths:
+            return
+        self._ensure_analysis_workers()
         for start in range(0, len(analysis_paths), ANALYSIS_SOURCE_BATCH_SIZE):
             future = preview_workers.submit(
                 prepare_analysis_batch,
@@ -246,17 +238,20 @@ class AiPipeline:
             self.futures.add(future)
 
     def _analysis_sources_finished(self, future, embedding_names, face_names, cache) -> None:
-        with self._futures_lock:
-            self.futures.discard(future)
-            if self._shutting_down:
-                return
-        if future.cancelled():
-            return
         try:
+            with self._futures_lock:
+                if self._shutting_down:
+                    return
+            if future.cancelled():
+                return
             sources = future.result()
+            self._dispatch_analysis_sources(sources, embedding_names, face_names, cache)
         except Exception:
-            return
-        self._dispatch_analysis_sources(sources, embedding_names, face_names, cache)
+            pass
+        finally:
+            # Keep this future visible until its dependent batches are queued.
+            with self._futures_lock:
+                self.futures.discard(future)
 
     def _dispatch_analysis_sources(self, sources, embedding_names, face_names, cache) -> None:
         embedding_sources = [source for source in sources if source[0] in embedding_names]
