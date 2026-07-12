@@ -119,11 +119,14 @@ class VideoThumbnailer(QObject):
         self._queue: deque[Path] = deque()
         self._queued: set[Path] = set()
         self._current: Path | None = None
+        self._current_source: QUrl | None = None
+        self._ready_for_frame = False
         self._active = True
         self._player = QMediaPlayer(self)
         self._sink = QVideoSink(self)
         self._player.setVideoOutput(self._sink)
         self._sink.videoFrameChanged.connect(self._frame_ready)
+        self._player.mediaStatusChanged.connect(self._media_status_changed)
         self._player.errorOccurred.connect(lambda *_args: self._finish_current())
 
     def request(self, path: Path) -> None:
@@ -143,23 +146,46 @@ class VideoThumbnailer(QObject):
             self._queued.clear()
             self._player.stop()
             self._current = None
+            self._current_source = None
+            self._ready_for_frame = False
 
     def _start_next(self) -> None:
         if not self._active:
             self._current = None
+            self._current_source = None
+            self._ready_for_frame = False
             return
         if not self._queue:
             self._current = None
+            self._current_source = None
+            self._ready_for_frame = False
             return
         self._current = self._queue.popleft()
         self._queued.discard(self._current)
-        self._player.setSource(QUrl.fromLocalFile(str(self._current)))
+        # A frame must not be accepted until the media for this exact source
+        # has finished loading. Otherwise buffered frames from the previous
+        # clip can arrive first and be stored under the new path, mixing up
+        # thumbnails.
+        self._ready_for_frame = False
+        self._current_source = QUrl.fromLocalFile(str(self._current))
+        self._player.setSource(self._current_source)
         # Playing briefly is the portable way to make all Qt backends deliver
         # a frame; the first frame is enough for a grid thumbnail.
         self._player.play()
 
+    def _media_status_changed(self, status) -> None:
+        if status in (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        ):
+            # Only from now on do frames belong to the current source.
+            self._ready_for_frame = self._current is not None
+
     def _frame_ready(self, frame) -> None:
-        if self._current is None or not frame.isValid():
+        if self._current is None or not self._ready_for_frame or not frame.isValid():
+            return
+        # Reject frames that do not belong to the source we are decoding now.
+        if self._player.source() != self._current_source:
             return
         image = frame.toImage()
         if image.isNull():
@@ -167,6 +193,8 @@ class VideoThumbnailer(QObject):
         path = self._current
         self._player.stop()
         self._current = None
+        self._current_source = None
+        self._ready_for_frame = False
         self.previewReady.emit(path, image)
         QTimer.singleShot(0, self._start_next)
 
@@ -175,6 +203,8 @@ class VideoThumbnailer(QObject):
             return
         self._player.stop()
         self._current = None
+        self._current_source = None
+        self._ready_for_frame = False
         QTimer.singleShot(0, self._start_next)
 
 
@@ -1066,6 +1096,17 @@ class FullView(QFrame):
         self.strip_toggle.setIcon(_fomantic_icon("chevron-up" if visible else "chevron-down", 12))
         self.strip_toggle.setToolTip("Развернуть ленту превью" if visible else "Свернуть ленту превью")
         QSettings("RAWww", "RAWww").setValue("viewer_strip_collapsed", visible)
+        # Collapsing/expanding the strip resizes the media area, but that does
+        # not trigger FullView.resizeEvent, so the floating video controls must
+        # be repositioned explicitly once the layout has settled.
+        QTimer.singleShot(0, self._position_video_controls)
+
+    def stop_video(self) -> None:
+        """Fully stop playback so nothing keeps running after leaving full view."""
+        if not self._is_video:
+            return
+        self.video_player.stop()
+        self.video_play_button.setIcon(_fomantic_icon("play", 12))
 
     def set_quick_mark(self, kind: str, value: object) -> None:
         self.meta_bar.set_quick_mark(kind, value)
@@ -3704,6 +3745,8 @@ class Workspace(QMainWindow):
             self._preload_neighbors(path)
 
     def show_grid(self) -> None:
+        # Leaving full view must not keep a video playing in the background.
+        self.full_view.stop_video()
         self.stack.setCurrentWidget(self.grid_page)
         self._restore_grid_context()
         self.gridRequested.emit()
