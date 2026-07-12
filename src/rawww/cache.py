@@ -51,6 +51,29 @@ CREATE TABLE IF NOT EXISTS photo_selection (
     comment TEXT NOT NULL DEFAULT '',
     updated_ns INTEGER NOT NULL
 );
+-- ShotSync "selection" session state (feature 2). A single row marks this
+-- folder as a synced copy of a server shooting.
+CREATE TABLE IF NOT EXISTS shotsync_session (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    shooting_id INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT ''
+);
+-- Maps a local file name to its server photo id so marks can be routed back.
+CREATE TABLE IF NOT EXISTS shotsync_photos (
+    name TEXT PRIMARY KEY,
+    photo_id INTEGER NOT NULL,
+    shooting_id INTEGER NOT NULL
+);
+-- Durable offline queue of marks awaiting delivery to the server. Coalesced
+-- per (photo_id, kind) so the latest value wins; drained once the socket is up.
+CREATE TABLE IF NOT EXISTS shotsync_pending (
+    photo_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,                 -- 'rating' | 'meta'
+    shooting_id INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    updated_ns INTEGER NOT NULL,
+    PRIMARY KEY (photo_id, kind)
+);
 """
 
 
@@ -242,6 +265,88 @@ class FolderCache:
                 (name, rating, color_label, comment, time.time_ns()),
             )
             db.commit()
+
+    # ----- ShotSync selection session (feature 2) ------------------------
+    def set_shotsync_session(self, shooting_id: int, title: str) -> None:
+        """Mark this folder as a synced copy of a server shooting."""
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute(
+                """INSERT OR REPLACE INTO shotsync_session (id, shooting_id, title)
+                   VALUES (1, ?, ?)""",
+                (int(shooting_id), title or ""),
+            )
+            db.commit()
+
+    def shotsync_session(self) -> tuple[int, str] | None:
+        """Return ``(shooting_id, title)`` if this is a ShotSync folder."""
+        with self._lock:
+            row = self._db_or_raise().execute(
+                "SELECT shooting_id, title FROM shotsync_session WHERE id = 1"
+            ).fetchone()
+        return (int(row[0]), row[1] or "") if row else None
+
+    def set_shotsync_photos(self, mapping: list[tuple[str, int, int]]) -> None:
+        """Store ``(name, photo_id, shooting_id)`` rows in bulk."""
+        if not mapping:
+            return
+        with self._lock:
+            db = self._db_or_raise()
+            db.executemany(
+                """INSERT OR REPLACE INTO shotsync_photos (name, photo_id, shooting_id)
+                   VALUES (?, ?, ?)""",
+                [(name, int(pid), int(sid)) for name, pid, sid in mapping],
+            )
+            db.commit()
+
+    def shotsync_photo_id(self, name: str) -> int | None:
+        with self._lock:
+            row = self._db_or_raise().execute(
+                "SELECT photo_id FROM shotsync_photos WHERE name = ?", (name,)
+            ).fetchone()
+        return int(row[0]) if row else None
+
+    def enqueue_shotsync_mark(
+        self, *, photo_id: int, shooting_id: int, kind: str, payload_json: str
+    ) -> None:
+        """Persist a mark to send. Coalesced per (photo_id, kind)."""
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute(
+                """INSERT OR REPLACE INTO shotsync_pending
+                   (photo_id, kind, shooting_id, payload_json, updated_ns)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (int(photo_id), kind, int(shooting_id), payload_json, time.time_ns()),
+            )
+            db.commit()
+
+    def pending_shotsync_marks(self) -> list[dict]:
+        """Return queued marks (oldest first) awaiting delivery."""
+        with self._lock:
+            rows = self._db_or_raise().execute(
+                """SELECT photo_id, kind, shooting_id, payload_json
+                   FROM shotsync_pending ORDER BY updated_ns ASC"""
+            ).fetchall()
+        return [
+            {"photo_id": int(r[0]), "kind": r[1], "shooting_id": int(r[2]), "payload_json": r[3]}
+            for r in rows
+        ]
+
+    def clear_shotsync_mark(self, photo_id: int, kind: str) -> None:
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute(
+                "DELETE FROM shotsync_pending WHERE photo_id = ? AND kind = ?",
+                (int(photo_id), kind),
+            )
+            db.commit()
+
+    def pending_shotsync_count(self) -> int:
+        with self._lock:
+            row = self._db_or_raise().execute(
+                "SELECT COUNT(*) FROM shotsync_pending"
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def _store_ai_results(self, table: str, value_column: str, results: list[tuple[str, object]]) -> None:
         with self._lock:

@@ -49,13 +49,16 @@ from PySide6.QtWidgets import (
     QWidget,
     QWidgetAction,
     QInputDialog,
+    QFileDialog,
     QMenu,
     QMessageBox,
 )
 
 from .cache import FolderCache
 from .shotsync_client import ShotSyncClient
+from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
+from .shotsync_selection import SelectionMarkSyncer
 from .ai import AiPipeline
 from .exif import MetadataPipeline
 from .imaging import DecodedImage, PixelImage, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
@@ -1759,10 +1762,24 @@ class MacDockProgress:
         self._tile.display()
 
 
+def _safe_folder_name(title: str) -> str:
+    """Turn a shooting title into a filesystem-safe folder name."""
+    cleaned = "".join(c if c not in '<>:"/\\|?*' else "_" for c in str(title or "").strip())
+    cleaned = cleaned.rstrip(". ").strip()
+    return cleaned or "shotsync"
+
+
+def _shotsync_photo_filename(photo: dict) -> str:
+    """Basename of a ShotSync photo payload, without any path components."""
+    raw = str(photo.get("name") or "").replace("\\", "/")
+    return Path(raw).name.strip()
+
+
 class Workspace(QMainWindow):
     fullViewRequested = Signal(object)
     fullscreenRequested = Signal(object)
     gridRequested = Signal()
+    openFolderRequested = Signal(object)   # Path: open (or focus) a folder tab
 
     def __init__(self, initial_directory: Path | None = None) -> None:
         super().__init__()
@@ -1833,6 +1850,27 @@ class Workspace(QMainWindow):
         self.shotsync_client.shootingsLoaded.connect(self._shotsync_shootings_loaded)
         self.shotsync_client.shootingsFailed.connect(self._shotsync_shootings_failed)
         self.shotsync_client.avatarLoaded.connect(self._shotsync_avatar_loaded)
+
+        # A single socket is shared by every tab (see shotsync_hub). The hub
+        # keeps a live connection whenever a key is stored and pushes photo
+        # arrivals / mark changes back to whichever tab shows the folder.
+        self.shotsync = shotsync_hub(SHOTSYNC_BASE_URL)
+        self.shotsync.set_api_key(self.shotsync_client.api_key)
+        self.shotsync.photoDownloaded.connect(self._on_shotsync_photo_downloaded)
+        self.shotsync.markUpdated.connect(self._on_shotsync_mark_updated)
+        self.shotsync.receivingChanged.connect(self._refresh_shotsync_receiving)
+        self.shotsync.downloader.finished.connect(self._on_shotsync_selection_ready)
+        self.shotsync.downloader.failed.connect(self._on_shotsync_selection_failed)
+        self.shotsync.downloader.progress.connect(self._on_shotsync_selection_progress)
+        self.shotsync.uploader.progress.connect(self._on_shotsync_upload_progress)
+        self.shotsync.uploader.finished.connect(self._on_shotsync_upload_finished)
+        self.shotsync.uploader.failed.connect(self._on_shotsync_upload_failed)
+        self.shotsync.marks_fetcher.finished.connect(self._on_shotsync_marks_fetched)
+        self.shotsync.marks_fetcher.failed.connect(self._on_shotsync_marks_failed)
+
+        # Mark-syncer for the currently open folder, if it is a ShotSync
+        # selection copy. Recreated whenever the folder changes.
+        self._shotsync_syncer = None
 
         quick_kind = self.settings.value("quick_mark_kind", "rating", str)
         quick_value = (
@@ -1958,6 +1996,7 @@ class Workspace(QMainWindow):
         self.folder_change_timer.stop()
         self.volume_refresh_timer.stop()
         self._flush_folder_cache(wait=False, close=True)
+        self._detach_shotsync_syncer()
         self.folder_cache = None
         self.cache_ready = False
         if self.current_decode_executor is not None:
@@ -2177,6 +2216,10 @@ class Workspace(QMainWindow):
         self.shotsync_panel = ShotSyncPanel(icon_provider=_fomantic_icon)
         self.shotsync_panel.loginSubmitted.connect(self._shotsync_login)
         self.shotsync_panel.logoutRequested.connect(self._shotsync_logout)
+        self.shotsync_panel.receiveRequested.connect(self._shotsync_receive_requested)
+        self.shotsync_panel.selectRequested.connect(self._shotsync_select_requested)
+        self.shotsync_panel.sendFolderRequested.connect(self._shotsync_send_current_folder)
+        self.shotsync_panel.getMarksRequested.connect(self._shotsync_fetch_marks)
 
         self.sidebar_stack.addWidget(local_page)
         self.sidebar_stack.addWidget(self.shotsync_panel)
@@ -2773,44 +2816,239 @@ class Workspace(QMainWindow):
         self.shotsync_client.logout()
         self._shotsync_checked = False
         self.settings.remove("shotsync/api_key")
+        self.shotsync.set_api_key("")
         self.shotsync_panel.show_login()
+        self._refresh_shotsync_shortcuts()
 
     def _shotsync_login_succeeded(self, user: dict, key: str) -> None:
         self._shotsync_checked = True
         self.settings.setValue("shotsync/api_key", key)
+        self.shotsync.set_api_key(key)
         self.shotsync_panel.show_logged_in(user)
         avatar_url = user.get("avatar_url")
         if avatar_url:
             self.shotsync_client.fetch_avatar(avatar_url)
         self.shotsync_panel.set_shootings_loading()
         self.shotsync_client.fetch_shootings()
+        self._refresh_shotsync_shortcuts()
 
     def _shotsync_login_failed(self, error: str) -> None:
         self.shotsync_panel.show_login_error(error)
 
     def _shotsync_session_verified(self, user: dict) -> None:
         self._shotsync_checked = True
+        self.shotsync.set_api_key(self.shotsync_client.api_key)
         self.shotsync_panel.show_logged_in(user)
         avatar_url = user.get("avatar_url")
         if avatar_url:
             self.shotsync_client.fetch_avatar(avatar_url)
         self.shotsync_panel.set_shootings_loading()
         self.shotsync_client.fetch_shootings()
+        self._refresh_shotsync_shortcuts()
 
     def _shotsync_session_invalid(self, error: str) -> None:
         self._shotsync_checked = False
         self.settings.remove("shotsync/api_key")
+        self.shotsync.set_api_key("")
         if self.shotsync_active:
             self.shotsync_panel.show_login()
+        self._refresh_shotsync_shortcuts()
 
     def _shotsync_shootings_loaded(self, shootings: list) -> None:
         self.shotsync_panel.set_shootings(shootings)
+        self._refresh_shotsync_receiving()
 
     def _shotsync_shootings_failed(self, error: str) -> None:
         self.shotsync_panel.set_shootings_error(error)
 
     def _shotsync_avatar_loaded(self, image) -> None:
         self.shotsync_panel.set_avatar(image)
+
+    # ----- live receive (feature 1) -------------------------------------
+    def _refresh_shotsync_receiving(self) -> None:
+        """Reflect which shootings are currently being received in the panel."""
+        self.shotsync_panel.set_receiving_ids(self.shotsync.receiving_ids())
+
+    def _shotsync_receive_requested(self, shooting: dict) -> None:
+        """Toggle live receiving for a shooting, choosing a target folder."""
+        shooting_id = int(shooting.get("id") or 0)
+        if not shooting_id:
+            return
+        if self.shotsync.is_receiving(shooting_id):
+            self.shotsync.stop_receiving(shooting_id)
+            return
+        title = shooting.get("title") or "Съёмка ShotSync"
+        base = QFileDialog.getExistingDirectory(
+            self, f"Куда сохранять фото «{title}»", str(self.current_dir)
+        )
+        if not base:
+            return
+        folder = Path(base) / _safe_folder_name(title)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "ShotSync", f"Не удалось создать папку:\n{exc}")
+            return
+        self.shotsync.start_receiving(shooting_id, folder, title)
+        self.openFolderRequested.emit(folder)
+
+    def _on_shotsync_photo_downloaded(self, shooting_id: int, folder: str, filename: str) -> None:
+        """A new original landed on disk; refresh the tab showing that folder."""
+        if Path(folder) == self.current_dir:
+            self.load_directory(self.current_dir)
+
+    def _on_shotsync_mark_updated(self, shooting_id: int, folder: str, photo: dict) -> None:
+        """Mirror an owner mark that arrived over the socket into this folder."""
+        if Path(folder) != self.current_dir:
+            return
+        name = _shotsync_photo_filename(photo)
+        if not name:
+            return
+        self._apply_external_selection(
+            name,
+            rating=photo.get("rating"),
+            color_label=photo.get("color_label") or "",
+            comment=photo.get("comment") or "",
+        )
+
+    def _apply_external_selection(
+        self, name: str, *, rating: int | None, color_label: str, comment: str
+    ) -> None:
+        """Apply rating/color/comment to a single file by name and repaint it."""
+        detail = self.photo_details.setdefault(name, {})
+        detail.update(rating=rating, color_label=color_label, comment=comment)
+        for path, item in self.items_by_path.items():
+            if path.name == name:
+                item.setData(DETAIL_ROLE, dict(detail))
+                break
+        if self.folder_cache is not None and self.cache_ready:
+            self.folder_cache.store_photo_selection(
+                name, rating=rating, color_label=color_label, comment=comment
+            )
+        self.grid.viewport().update()
+        if self.current_path is not None and self.current_path.name == name:
+            if self.stack.currentWidget() is self.full_view:
+                self.full_view.set_metadata(dict(detail), (self.current_path,))
+
+    # ----- selection: take a shooting locally (feature 2) ----------------
+    def _shotsync_select_requested(self, shooting: dict) -> None:
+        """Download a shooting's previews into a local folder for selection."""
+        shooting_id = int(shooting.get("id") or 0)
+        if not shooting_id:
+            return
+        if self.shotsync.downloader.is_running(shooting_id):
+            self.statusBar().showMessage("ShotSync: загрузка уже идёт…", 4000)
+            return
+        title = shooting.get("title") or "Съёмка ShotSync"
+        self.statusBar().showMessage(f"ShotSync: загрузка «{title}»…")
+        self.shotsync.downloader.start(shooting_id, title)
+
+    def _on_shotsync_selection_progress(self, shooting_id: int, done: int, total: int) -> None:
+        if total:
+            self.statusBar().showMessage(f"ShotSync: загружено {done}/{total}…", 4000)
+
+    def _on_shotsync_selection_ready(self, shooting_id: int, folder: str) -> None:
+        self.statusBar().showMessage("ShotSync: съёмка готова к отбору.", 4000)
+        self.openFolderRequested.emit(Path(folder))
+
+    def _on_shotsync_selection_failed(self, shooting_id: int, message: str) -> None:
+        QMessageBox.warning(self, "ShotSync", f"Не удалось загрузить съёмку:\n{message}")
+
+    def _attach_shotsync_syncer(self) -> None:
+        """If the open folder is a ShotSync selection, start syncing its marks."""
+        self._detach_shotsync_syncer()
+        self._refresh_shotsync_shortcuts()
+        if self.folder_cache is None or not self.cache_ready:
+            return
+        session = self.folder_cache.shotsync_session()
+        if not session:
+            return
+        shooting_id, _title = session
+        self._shotsync_syncer = SelectionMarkSyncer(
+            self.shotsync, self.folder_cache, shooting_id, self
+        )
+        self._shotsync_syncer.pendingChanged.connect(self._on_shotsync_pending_changed)
+
+    def _detach_shotsync_syncer(self) -> None:
+        if getattr(self, "_shotsync_syncer", None) is not None:
+            self._shotsync_syncer.detach()
+            self._shotsync_syncer.deleteLater()
+            self._shotsync_syncer = None
+
+    def _on_shotsync_pending_changed(self, count: int) -> None:
+        if count:
+            self.statusBar().showMessage(f"ShotSync: меток в очереди — {count}", 3000)
+
+    # ----- send folder to server + get marks (feature 3) -----------------
+    def _shotsync_send_current_folder(self) -> None:
+        """Upload the open folder to ShotSync as a new shooting."""
+        if self.current_dir is None:
+            return
+        if not self.shotsync_client.is_authenticated:
+            QMessageBox.information(
+                self, "ShotSync", "Сначала войдите в ShotSync на боковой панели."
+            )
+            return
+        if self.shotsync.uploader.busy:
+            self.statusBar().showMessage("ShotSync: отправка уже идёт…", 4000)
+            return
+        default = self.current_dir.name or "Новая съёмка"
+        title, ok = QInputDialog.getText(
+            self, "Отправить в ShotSync", "Название съёмки:", text=default
+        )
+        if not ok:
+            return
+        title = title.strip() or default
+        self.statusBar().showMessage(f"ShotSync: отправка «{title}»…")
+        self.shotsync.uploader.start(self.current_dir, title)
+
+    def _on_shotsync_upload_progress(self, done: int, total: int) -> None:
+        self.statusBar().showMessage(f"ShotSync: отправлено {done}/{total}…", 4000)
+
+    def _on_shotsync_upload_finished(self, shooting_id: int, folder: str) -> None:
+        self.statusBar().showMessage("ShotSync: съёмка отправлена.", 5000)
+        # The folder is now a ShotSync session; re-attach so marks sync live.
+        if Path(folder) == self.current_dir:
+            self._attach_shotsync_syncer()
+            self._refresh_shotsync_shortcuts()
+
+    def _on_shotsync_upload_failed(self, message: str) -> None:
+        self.statusBar().clearMessage()
+        QMessageBox.warning(self, "ShotSync", f"Не удалось отправить съёмку:\n{message}")
+
+    def _shotsync_fetch_marks(self) -> None:
+        """Pull marks for the current ShotSync folder (the "Получить" action)."""
+        if self.folder_cache is None or not self.cache_ready:
+            return
+        session = self.folder_cache.shotsync_session()
+        if not session:
+            QMessageBox.information(
+                self, "ShotSync", "Эта папка не связана со съёмкой ShotSync."
+            )
+            return
+        shooting_id, _title = session
+        self.statusBar().showMessage("ShotSync: получение меток…")
+        self.shotsync.marks_fetcher.fetch(shooting_id, self.folder_cache)
+
+    def _on_shotsync_marks_fetched(self, applied: int) -> None:
+        self.statusBar().showMessage(f"ShotSync: получено меток — {applied}.", 4000)
+        # Repaint the grid/details from the freshly written cache.
+        if self.current_dir is not None:
+            self.load_directory(self.current_dir)
+
+    def _on_shotsync_marks_failed(self, message: str) -> None:
+        self.statusBar().clearMessage()
+        QMessageBox.warning(self, "ShotSync", f"Не удалось получить метки:\n{message}")
+
+    def _refresh_shotsync_shortcuts(self) -> None:
+        """Enable/disable the ShotSync folder actions for the current folder."""
+        is_session = False
+        if self.folder_cache is not None and self.cache_ready:
+            is_session = self.folder_cache.shotsync_session() is not None
+        can_send = (
+            self.current_dir is not None and self.shotsync_client.is_authenticated
+        )
+        self.shotsync_panel.set_folder_actions(can_send=can_send, is_session=is_session)
 
     def load_directory(self, directory: Path) -> None:
         if self._folder_context_active:
@@ -2838,6 +3076,7 @@ class Workspace(QMainWindow):
         self.cache_load_generation += 1
         self.directory_generation += 1
         self._flush_folder_cache(wait=False, close=True)
+        self._detach_shotsync_syncer()
         self.folder_cache = None
         self.cache_ready = False
         self.current_dir = directory
@@ -3421,6 +3660,7 @@ class Workspace(QMainWindow):
         self.thumb_index = 0
         self._schedule_visible_thumb_priority()
         self.thumb_timer.start()
+        self._attach_shotsync_syncer()
 
     def _apply_view(self, *_args) -> None:
         if not hasattr(self, "rating_filter"):
@@ -3585,6 +3825,10 @@ class Workspace(QMainWindow):
                     color_label=detail.get("color_label", ""),
                     comment=detail.get("comment", ""),
                 )
+            # If this folder is a ShotSync selection, ship the mark back to the
+            # server (durably queued; retried automatically while offline).
+            if self._shotsync_syncer is not None:
+                self._shotsync_syncer.queue_mark(path.name, detail=dict(detail), changes=changes)
         self.grid.viewport().update()
         if self.stack.currentWidget() is self.grid_page:
             self.meta_bar.set_metadata(
@@ -4658,9 +4902,21 @@ class MainWindow(QMainWindow):
         workspace.fullViewRequested.connect(self._show_full_view)
         workspace.fullscreenRequested.connect(self._toggle_workspace_fullscreen)
         workspace.gridRequested.connect(self._leave_full_view)
+        workspace.openFolderRequested.connect(self._open_folder_tab)
         self.tabs.setCurrentIndex(index)
         self._select_workspace(self.tabs.currentIndex())
         self._update_tab_geometry()
+
+    def _open_folder_tab(self, folder: Path) -> None:
+        """Focus an existing tab for ``folder`` or open a new one."""
+        folder = Path(folder)
+        for index in range(self.workspace_stack.count()):
+            workspace = self.workspace_stack.widget(index)
+            if isinstance(workspace, Workspace) and workspace.current_dir == folder:
+                self.tabs.setCurrentIndex(index)
+                self._select_workspace(index)
+                return
+        self._add_workspace(folder)
 
     def _create_actions(self) -> None:
         next_tab = QAction("Next workspace", self)

@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -64,11 +65,17 @@ class ShotSyncPanel(QWidget):
     logoutRequested = Signal()
     refreshRequested = Signal()
     shootingActivated = Signal(dict)    # emitted on double-click (future use)
+    receiveRequested = Signal(dict)     # toggle live "receive photos" for a shooting
+    selectRequested = Signal(dict)      # download a shooting locally for selection
+    sendFolderRequested = Signal()      # upload the open folder as a new shooting
+    getMarksRequested = Signal()        # pull marks for the open ShotSync folder
 
     def __init__(self, icon_provider: IconProvider | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._icon_provider = icon_provider
         self._avatar_size = 40
+        self._shootings: list[dict] = []
+        self._receiving_ids: set[int] = set()
         self.setObjectName("shotsyncPanel")
 
         outer = QVBoxLayout(self)
@@ -196,9 +203,34 @@ class ShotSyncPanel(QWidget):
         self.shooting_list.setObjectName("shotsyncShootingList")
         self.shooting_list.setUniformItemSizes(False)
         self.shooting_list.itemDoubleClicked.connect(self._emit_activated)
+        self.shooting_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.shooting_list.customContextMenuRequested.connect(self._show_shooting_menu)
         layout.addWidget(self.shooting_list, 1)
 
+        folder_section = QLabel("ТЕКУЩАЯ ПАПКА")
+        folder_section.setObjectName("shotsyncSection")
+        layout.addWidget(folder_section)
+
+        self.send_folder_button = QPushButton("Отправить в ShotSync")
+        self.send_folder_button.setObjectName("shotsyncSendButton")
+        self.send_folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send_folder_button.clicked.connect(self.sendFolderRequested)
+        layout.addWidget(self.send_folder_button)
+
+        self.get_marks_button = QPushButton("Получить метки")
+        self.get_marks_button.setObjectName("shotsyncGetMarksButton")
+        self.get_marks_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.get_marks_button.clicked.connect(self.getMarksRequested)
+        self.get_marks_button.setEnabled(False)
+        layout.addWidget(self.get_marks_button)
+
         return page
+
+    def set_folder_actions(self, *, can_send: bool, is_session: bool) -> None:
+        """Enable/disable the current-folder actions based on context."""
+        if hasattr(self, "send_folder_button"):
+            self.send_folder_button.setEnabled(can_send)
+            self.get_marks_button.setEnabled(is_session)
 
     # ----- interaction ---------------------------------------------------
     def _submit(self) -> None:
@@ -282,23 +314,52 @@ class ShotSyncPanel(QWidget):
         self.shooting_status.show()
 
     def set_shootings(self, shootings: list) -> None:
+        self._shootings = [s for s in shootings if isinstance(s, dict)]
+        self._render_shootings()
+
+    def set_receiving_ids(self, ids) -> None:
+        """Update which shootings are being received and repaint the list."""
+        self._receiving_ids = {int(i) for i in ids}
+        self._render_shootings()
+
+    def _render_shootings(self) -> None:
         self.shooting_list.clear()
-        if not shootings:
+        if not self._shootings:
             self.shooting_status.setText("Пока нет ни одной съёмки.")
             self.shooting_status.show()
             return
         self.shooting_status.hide()
-        for shooting in shootings:
-            if not isinstance(shooting, dict):
-                continue
+        for shooting in self._shootings:
             title = shooting.get("title") or "Без названия"
             photo_count = shooting.get("photo_count") or 0
             status = _status_label(shooting.get("status"))
-            details = " · ".join(part for part in (status, f"{photo_count} фото") if part)
+            receiving = int(shooting.get("id") or 0) in self._receiving_ids
+            parts = [status, f"{photo_count} фото"]
+            if receiving:
+                parts.append("● приём")
+            details = " · ".join(part for part in parts if part)
             item = QListWidgetItem(f"{title}\n{details}")
             item.setData(Qt.ItemDataRole.UserRole, shooting)
-            item.setToolTip(title)
+            item.setToolTip("Приём включён" if receiving else title)
             self.shooting_list.addItem(item)
+
+    def _show_shooting_menu(self, pos) -> None:
+        item = self.shooting_list.itemAt(pos)
+        if item is None:
+            return
+        shooting = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(shooting, dict):
+            return
+        receiving = int(shooting.get("id") or 0) in self._receiving_ids
+        menu = QMenu(self)
+        receive_label = "Остановить приём фото" if receiving else "Получать новые фото…"
+        receive_action = menu.addAction(receive_label)
+        select_action = menu.addAction("Взять на отбор…")
+        chosen = menu.exec(self.shooting_list.mapToGlobal(pos))
+        if chosen is receive_action:
+            self.receiveRequested.emit(shooting)
+        elif chosen is select_action:
+            self.selectRequested.emit(shooting)
 
 
 def _humanize_login_error(raw: str) -> str:
