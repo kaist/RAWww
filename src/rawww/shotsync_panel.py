@@ -67,6 +67,8 @@ class ShotSyncPanel(QWidget):
     shootingActivated = Signal(dict)    # emitted on double-click (future use)
     receiveRequested = Signal(dict)     # toggle live "receive photos" for a shooting
     selectRequested = Signal(dict)      # download a shooting locally for selection
+    sendFolderRequested = Signal()      # upload the open folder as a new shooting
+    getMarksRequested = Signal()        # pull marks for the open ShotSync folder
 
     def __init__(self, icon_provider: IconProvider | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -205,7 +207,30 @@ class ShotSyncPanel(QWidget):
         self.shooting_list.customContextMenuRequested.connect(self._show_shooting_menu)
         layout.addWidget(self.shooting_list, 1)
 
+        folder_section = QLabel("ТЕКУЩАЯ ПАПКА")
+        folder_section.setObjectName("shotsyncSection")
+        layout.addWidget(folder_section)
+
+        self.send_folder_button = QPushButton("Отправить в ShotSync")
+        self.send_folder_button.setObjectName("shotsyncSendButton")
+        self.send_folder_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send_folder_button.clicked.connect(self.sendFolderRequested)
+        layout.addWidget(self.send_folder_button)
+
+        self.get_marks_button = QPushButton("Получить метки")
+        self.get_marks_button.setObjectName("shotsyncGetMarksButton")
+        self.get_marks_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.get_marks_button.clicked.connect(self.getMarksRequested)
+        self.get_marks_button.setEnabled(False)
+        layout.addWidget(self.get_marks_button)
+
         return page
+
+    def set_folder_actions(self, *, can_send: bool, is_session: bool) -> None:
+        """Enable/disable the current-folder actions based on context."""
+        if hasattr(self, "send_folder_button"):
+            self.send_folder_button.setEnabled(can_send)
+            self.get_marks_button.setEnabled(is_session)
 
     # ----- interaction ---------------------------------------------------
     def _submit(self) -> None:

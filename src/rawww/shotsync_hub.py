@@ -19,6 +19,7 @@ from PySide6.QtCore import QObject, QSettings, Signal
 from .shotsync_receiver import ShotSyncReceiver
 from .shotsync_selection import SelectionDownloader
 from .shotsync_socket import ShotSyncSocket
+from .shotsync_upload import FolderUploader, MarksFetcher
 
 _RECEIVERS_SETTING = "shotsync/receivers"
 
@@ -38,6 +39,8 @@ class ShotSyncHub(QObject):
         self.socket = ShotSyncSocket(base_url, self)
         self.receiver = ShotSyncReceiver(base_url, self)
         self.downloader = SelectionDownloader(base_url, self)
+        self.uploader = FolderUploader(base_url, self)
+        self.marks_fetcher = MarksFetcher(base_url, self)
 
         self.socket.photoAdded.connect(self.receiver.on_photo_added)
         self.socket.photoUpdated.connect(self.receiver.on_photo_updated)
@@ -51,6 +54,8 @@ class ShotSyncHub(QObject):
         self.socket.set_api_key(key)
         self.receiver.set_api_key(key)
         self.downloader.set_api_key(key)
+        self.uploader.set_api_key(key)
+        self.marks_fetcher.set_api_key(key)
         if key:
             self.socket.start()
             self._restore_targets()

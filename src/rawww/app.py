@@ -1862,6 +1862,11 @@ class Workspace(QMainWindow):
         self.shotsync.downloader.finished.connect(self._on_shotsync_selection_ready)
         self.shotsync.downloader.failed.connect(self._on_shotsync_selection_failed)
         self.shotsync.downloader.progress.connect(self._on_shotsync_selection_progress)
+        self.shotsync.uploader.progress.connect(self._on_shotsync_upload_progress)
+        self.shotsync.uploader.finished.connect(self._on_shotsync_upload_finished)
+        self.shotsync.uploader.failed.connect(self._on_shotsync_upload_failed)
+        self.shotsync.marks_fetcher.finished.connect(self._on_shotsync_marks_fetched)
+        self.shotsync.marks_fetcher.failed.connect(self._on_shotsync_marks_failed)
 
         # Mark-syncer for the currently open folder, if it is a ShotSync
         # selection copy. Recreated whenever the folder changes.
@@ -2213,6 +2218,8 @@ class Workspace(QMainWindow):
         self.shotsync_panel.logoutRequested.connect(self._shotsync_logout)
         self.shotsync_panel.receiveRequested.connect(self._shotsync_receive_requested)
         self.shotsync_panel.selectRequested.connect(self._shotsync_select_requested)
+        self.shotsync_panel.sendFolderRequested.connect(self._shotsync_send_current_folder)
+        self.shotsync_panel.getMarksRequested.connect(self._shotsync_fetch_marks)
 
         self.sidebar_stack.addWidget(local_page)
         self.sidebar_stack.addWidget(self.shotsync_panel)
@@ -2811,6 +2818,7 @@ class Workspace(QMainWindow):
         self.settings.remove("shotsync/api_key")
         self.shotsync.set_api_key("")
         self.shotsync_panel.show_login()
+        self._refresh_shotsync_shortcuts()
 
     def _shotsync_login_succeeded(self, user: dict, key: str) -> None:
         self._shotsync_checked = True
@@ -2822,6 +2830,7 @@ class Workspace(QMainWindow):
             self.shotsync_client.fetch_avatar(avatar_url)
         self.shotsync_panel.set_shootings_loading()
         self.shotsync_client.fetch_shootings()
+        self._refresh_shotsync_shortcuts()
 
     def _shotsync_login_failed(self, error: str) -> None:
         self.shotsync_panel.show_login_error(error)
@@ -2835,6 +2844,7 @@ class Workspace(QMainWindow):
             self.shotsync_client.fetch_avatar(avatar_url)
         self.shotsync_panel.set_shootings_loading()
         self.shotsync_client.fetch_shootings()
+        self._refresh_shotsync_shortcuts()
 
     def _shotsync_session_invalid(self, error: str) -> None:
         self._shotsync_checked = False
@@ -2842,6 +2852,7 @@ class Workspace(QMainWindow):
         self.shotsync.set_api_key("")
         if self.shotsync_active:
             self.shotsync_panel.show_login()
+        self._refresh_shotsync_shortcuts()
 
     def _shotsync_shootings_loaded(self, shootings: list) -> None:
         self.shotsync_panel.set_shootings(shootings)
@@ -2946,6 +2957,7 @@ class Workspace(QMainWindow):
     def _attach_shotsync_syncer(self) -> None:
         """If the open folder is a ShotSync selection, start syncing its marks."""
         self._detach_shotsync_syncer()
+        self._refresh_shotsync_shortcuts()
         if self.folder_cache is None or not self.cache_ready:
             return
         session = self.folder_cache.shotsync_session()
@@ -2966,6 +2978,77 @@ class Workspace(QMainWindow):
     def _on_shotsync_pending_changed(self, count: int) -> None:
         if count:
             self.statusBar().showMessage(f"ShotSync: меток в очереди — {count}", 3000)
+
+    # ----- send folder to server + get marks (feature 3) -----------------
+    def _shotsync_send_current_folder(self) -> None:
+        """Upload the open folder to ShotSync as a new shooting."""
+        if self.current_dir is None:
+            return
+        if not self.shotsync_client.is_authenticated:
+            QMessageBox.information(
+                self, "ShotSync", "Сначала войдите в ShotSync на боковой панели."
+            )
+            return
+        if self.shotsync.uploader.busy:
+            self.statusBar().showMessage("ShotSync: отправка уже идёт…", 4000)
+            return
+        default = self.current_dir.name or "Новая съёмка"
+        title, ok = QInputDialog.getText(
+            self, "Отправить в ShotSync", "Название съёмки:", text=default
+        )
+        if not ok:
+            return
+        title = title.strip() or default
+        self.statusBar().showMessage(f"ShotSync: отправка «{title}»…")
+        self.shotsync.uploader.start(self.current_dir, title)
+
+    def _on_shotsync_upload_progress(self, done: int, total: int) -> None:
+        self.statusBar().showMessage(f"ShotSync: отправлено {done}/{total}…", 4000)
+
+    def _on_shotsync_upload_finished(self, shooting_id: int, folder: str) -> None:
+        self.statusBar().showMessage("ShotSync: съёмка отправлена.", 5000)
+        # The folder is now a ShotSync session; re-attach so marks sync live.
+        if Path(folder) == self.current_dir:
+            self._attach_shotsync_syncer()
+            self._refresh_shotsync_shortcuts()
+
+    def _on_shotsync_upload_failed(self, message: str) -> None:
+        self.statusBar().clearMessage()
+        QMessageBox.warning(self, "ShotSync", f"Не удалось отправить съёмку:\n{message}")
+
+    def _shotsync_fetch_marks(self) -> None:
+        """Pull marks for the current ShotSync folder (the "Получить" action)."""
+        if self.folder_cache is None or not self.cache_ready:
+            return
+        session = self.folder_cache.shotsync_session()
+        if not session:
+            QMessageBox.information(
+                self, "ShotSync", "Эта папка не связана со съёмкой ShotSync."
+            )
+            return
+        shooting_id, _title = session
+        self.statusBar().showMessage("ShotSync: получение меток…")
+        self.shotsync.marks_fetcher.fetch(shooting_id, self.folder_cache)
+
+    def _on_shotsync_marks_fetched(self, applied: int) -> None:
+        self.statusBar().showMessage(f"ShotSync: получено меток — {applied}.", 4000)
+        # Repaint the grid/details from the freshly written cache.
+        if self.current_dir is not None:
+            self.load_directory(self.current_dir)
+
+    def _on_shotsync_marks_failed(self, message: str) -> None:
+        self.statusBar().clearMessage()
+        QMessageBox.warning(self, "ShotSync", f"Не удалось получить метки:\n{message}")
+
+    def _refresh_shotsync_shortcuts(self) -> None:
+        """Enable/disable the ShotSync folder actions for the current folder."""
+        is_session = False
+        if self.folder_cache is not None and self.cache_ready:
+            is_session = self.folder_cache.shotsync_session() is not None
+        can_send = (
+            self.current_dir is not None and self.shotsync_client.is_authenticated
+        )
+        self.shotsync_panel.set_folder_actions(can_send=can_send, is_session=is_session)
 
     def load_directory(self, directory: Path) -> None:
         if self._folder_context_active:

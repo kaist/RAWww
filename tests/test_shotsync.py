@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -20,6 +21,7 @@ from rawww.shotsync_hub import ShotSyncHub  # noqa: E402
 from rawww.shotsync_receiver import ShotSyncReceiver, safe_filename  # noqa: E402
 from rawww.shotsync_selection import SelectionMarkSyncer  # noqa: E402
 from rawww.shotsync_socket import ShotSyncSocket  # noqa: E402
+from rawww.shotsync_upload import MarksFetcher, encode_preview  # noqa: E402
 
 # The panel (QtWidgets) and the folder cache (QtGui/QImage) both need a
 # display/GL stack (libGL). Keep everything that touches them optional so the
@@ -356,6 +358,73 @@ class SelectionMarkSyncerTests(unittest.TestCase):
         self.syncer.queue_mark("missing.jpg", detail={"rating": 2}, changes={"rating": 2})
         self.assertEqual(self.hub.sent, [])
         self.assertEqual(self.cache.pending_shotsync_count(), 0)
+
+
+class EncodePreviewTests(unittest.TestCase):
+    """Client-side 1920px JPEG preview generation (feature 3)."""
+
+    def test_downscales_large_image_to_jpeg(self) -> None:
+        from PIL import Image
+
+        with TemporaryDirectory() as tmp:
+            src = Path(tmp) / "big.png"
+            Image.new("RGB", (4000, 2000), (120, 60, 30)).save(src)
+            data = encode_preview(src, max_size=1920)
+            self.assertTrue(data)
+            with Image.open(BytesIO(data)) as out:
+                self.assertEqual(out.format, "JPEG")
+                self.assertEqual(max(out.size), 1920)  # long edge clamped
+
+    def test_small_image_is_not_upscaled(self) -> None:
+        from PIL import Image
+
+        with TemporaryDirectory() as tmp:
+            src = Path(tmp) / "small.jpg"
+            Image.new("RGB", (800, 600), (10, 20, 30)).save(src)
+            data = encode_preview(src, max_size=1920)
+            with Image.open(BytesIO(data)) as out:
+                self.assertEqual(out.size, (800, 600))
+
+
+class _CollectingCache:
+    """Records store_photo_selection calls for the MarksFetcher test."""
+
+    def __init__(self) -> None:
+        self.stored: list[tuple] = []
+
+    def store_photo_selection(self, name, *, rating, color_label, comment) -> None:
+        self.stored.append((name, rating, color_label, comment))
+
+
+class MarksFetcherTests(unittest.TestCase):
+    """The "Получить" flow writes returned marks into the folder cache."""
+
+    def setUp(self) -> None:
+        _app()
+        self.fetcher = MarksFetcher(BASE_URL)
+        self.fetcher.set_api_key("k")
+
+    def test_apply_marks_writes_each_into_cache(self) -> None:
+        cache = _CollectingCache()
+        payload = {
+            "ok": True,
+            "marks": [
+                {"name": "a.jpg", "rating": 5, "color_label": "red", "comment": "hero"},
+                {"name": "b.jpg", "rating": None, "color_label": "", "comment": ""},
+                {"name": "", "rating": 3},  # skipped: no name
+            ],
+        }
+        applied = self.fetcher._apply_marks(payload, cache)
+        self.assertEqual(applied, 2)
+        self.assertEqual(cache.stored[0], ("a.jpg", 5, "red", "hero"))
+        self.assertEqual(cache.stored[1], ("b.jpg", None, "", ""))
+
+    def test_requires_api_key(self) -> None:
+        self.fetcher.set_api_key("")
+        errors: list[str] = []
+        self.fetcher.failed.connect(errors.append)
+        self.fetcher.fetch(7, _CollectingCache())
+        self.assertEqual(len(errors), 1)
 
 
 if __name__ == "__main__":
