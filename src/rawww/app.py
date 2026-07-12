@@ -1911,6 +1911,8 @@ class Workspace(QMainWindow):
         self.metadata_pipeline = MetadataPipeline()
         self.ai_progress_total = 0
         self.preview_progress_total = 0
+        # ShotSync upload progress, shown in the shared top status bar.
+        self._upload_progress: tuple[int, int] | None = None
         self.fast_fullscreen = False
         self.normal_geometry = None
         self.normal_window_flags = self.windowFlags()
@@ -2999,13 +3001,18 @@ class Workspace(QMainWindow):
         if not ok:
             return
         title = title.strip() or default
-        self.statusBar().showMessage(f"ShotSync: отправка «{title}»…")
+        self.statusBar().showMessage(f"ShotSync: отправка «{title}»…", 4000)
+        self._upload_progress = (0, 0)
+        self._refresh_status_panel()
         self.shotsync.uploader.start(self.current_dir, title)
 
     def _on_shotsync_upload_progress(self, done: int, total: int) -> None:
-        self.statusBar().showMessage(f"ShotSync: отправлено {done}/{total}…", 4000)
+        self._upload_progress = (done, total)
+        self._refresh_status_panel()
 
     def _on_shotsync_upload_finished(self, shooting_id: int, folder: str) -> None:
+        self._upload_progress = None
+        self._refresh_status_panel()
         self.statusBar().showMessage("ShotSync: съёмка отправлена.", 5000)
         # The folder is now a ShotSync session; re-attach so marks sync live.
         if Path(folder) == self.current_dir:
@@ -3013,6 +3020,8 @@ class Workspace(QMainWindow):
             self._refresh_shotsync_shortcuts()
 
     def _on_shotsync_upload_failed(self, message: str) -> None:
+        self._upload_progress = None
+        self._refresh_status_panel()
         self.statusBar().clearMessage()
         QMessageBox.warning(self, "ShotSync", f"Не удалось отправить съёмку:\n{message}")
 
@@ -3357,6 +3366,16 @@ class Workspace(QMainWindow):
         self._status_text = text
         self._fit_status_text()
         self.status_label.setToolTip(text)
+
+        if self._upload_progress is not None:
+            done, total = self._upload_progress
+            self.status_progress.setRange(0, max(1, total))
+            self.status_progress.setValue(done)
+            self.status_progress.setFormat(f"Отправка: {done}/{total}")
+            self.status_progress.setToolTip(self.status_progress.format())
+            self.status_progress.show()
+            self._set_taskbar_progress(done, total)
+            return
 
         if self.ai_pipeline.pending_count() > 0:
             analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
@@ -4044,7 +4063,7 @@ class Workspace(QMainWindow):
             action = menu.addAction("★" * rating)
             action.triggered.connect(lambda _checked=False, value=rating: self._apply_mark_to_face(face_id, "rating", value))
         menu.addSeparator()
-        for label, value in (("Красная", "red"), ("Жёлтая", "yellow"), ("Зелёная", "green"), ("Синяя", "blue"), ("Фиолетовая", "purple")):
+        for label, value in (("Красная", "red"), ("Жёлтая", "yellow"), ("Зелёная", "green"), ("Синяя", "blue"), ("Фиол��товая", "purple")):
             action = menu.addAction(label)
             action.setIcon(_color_swatch_icon(value))
             action.triggered.connect(lambda _checked=False, value=value: self._apply_mark_to_face(face_id, "color_label", value))
