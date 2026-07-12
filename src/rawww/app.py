@@ -54,6 +54,8 @@ from PySide6.QtWidgets import (
 )
 
 from .cache import FolderCache
+from .shotsync_client import ShotSyncClient
+from .shotsync_panel import ShotSyncPanel
 from .ai import AiPipeline
 from .exif import MetadataPipeline
 from .imaging import DecodedImage, PixelImage, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
@@ -90,6 +92,8 @@ WORK_PUMP_INTERVAL_MS = 16
 FLUSH_INTERVAL_MS = 30_000
 FOLDER_CHANGE_DEBOUNCE_MS = 1_000
 VOLUME_REFRESH_INTERVAL_MS = 2_000
+SHOTSYNC_BASE_URL = "https://shotsync.ru"
+SHOTSYNC_VOLUME_KEY = "__shotsync__"
 ENABLE_EXIF_METADATA = True
 
 FOMANTIC_ICON_CODES = {
@@ -100,6 +104,7 @@ FOMANTIC_ICON_CODES = {
     "filter": "\uf0b0", "lightbulb": "\uf0eb", "volume": "\uf028", "close": "\uf00d",
     "plus": "\uf067", "trash": "\uf1f8",
     "expand": "\uf065", "zoom": "\uf00e", "zoom-out": "\uf010", "play": "\uf04b", "pause": "\uf04c", "film": "\uf008",
+    "cloud": "\uf0c2", "sign-out": "\uf08b", "lock": "\uf023", "sync": "\uf021",
 }
 FOMANTIC_ICON_FAMILY = ""
 
@@ -724,7 +729,7 @@ class ViewerMetaBar(QWidget):
         self.quick_mark_button.setIcon(_fomantic_icon("bookmark", 13))
         self.quick_mark_button.setText("быстр. метка")
         self.quick_mark_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.quick_mark_button.setToolTip("Настроить быструю метку; M — применить")
+        self.quick_mark_button.setToolTip("На��троить быструю метку; M — применить")
         self.quick_mark_button.setFixedSize(96, 24)
         self.quick_mark_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.quick_mark_button.clicked.connect(self._show_quick_mark_menu)
@@ -1814,6 +1819,21 @@ class Workspace(QMainWindow):
         self.photo_details: dict[str, dict] = {}
         self.image_embeddings: dict[str, bytes] = {}
         self.settings = QSettings("RAWww", "RAWww")
+
+        # ShotSync cloud integration. The key is remembered between launches
+        # and validated lazily the first time the ShotSync disk is opened.
+        self.shotsync_active = False
+        self._shotsync_checked = False
+        self.shotsync_client = ShotSyncClient(SHOTSYNC_BASE_URL, self)
+        self.shotsync_client.set_api_key(self.settings.value("shotsync/api_key", "", str))
+        self.shotsync_client.loginSucceeded.connect(self._shotsync_login_succeeded)
+        self.shotsync_client.loginFailed.connect(self._shotsync_login_failed)
+        self.shotsync_client.sessionVerified.connect(self._shotsync_session_verified)
+        self.shotsync_client.sessionInvalid.connect(self._shotsync_session_invalid)
+        self.shotsync_client.shootingsLoaded.connect(self._shotsync_shootings_loaded)
+        self.shotsync_client.shootingsFailed.connect(self._shotsync_shootings_failed)
+        self.shotsync_client.avatarLoaded.connect(self._shotsync_avatar_loaded)
+
         quick_kind = self.settings.value("quick_mark_kind", "rating", str)
         quick_value = (
             self.settings.value("quick_mark_value", 5, int)
@@ -2095,6 +2115,24 @@ class Workspace(QMainWindow):
         self.drive_button_layout.setSpacing(4)
         self.drive_button_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         sidebar_layout.addLayout(self.drive_button_layout)
+
+        # Persistent "disk" that opens the ShotSync cloud instead of a local
+        # volume. It shares the exclusive drive-button group so selecting it
+        # visually deselects the local volumes and vice versa.
+        self.shotsync_button = QToolButton()
+        self.shotsync_button.setObjectName("driveButton")
+        self.shotsync_button.setCheckable(True)
+        self.shotsync_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.shotsync_button.setIconSize(QSize(20, 20))
+        self.shotsync_button.setProperty("volumeKey", SHOTSYNC_VOLUME_KEY)
+        self.shotsync_button.setText("ShotSync")
+        self.shotsync_button.setToolTip("Съёмки ShotSync (shotsync.ru)")
+        self.shotsync_button.setIcon(self._shotsync_button_icon())
+        self.shotsync_button.clicked.connect(lambda: self._activate_shotsync())
+        self.drive_buttons.addButton(self.shotsync_button)
+        self.drive_button_layout.addWidget(self.shotsync_button)
+        self._register_grid_page_focus_widget(self.shotsync_button)
+
         self._refresh_volume_buttons()
 
         # Создаем тулбар с кнопками навигации над деревом папок
@@ -2125,8 +2163,27 @@ class Workspace(QMainWindow):
         # Выравниваем кнопки по левому краю
         folder_toolbar_layout.addStretch()
         
-        sidebar_layout.addWidget(folder_toolbar)
-        sidebar_layout.addWidget(self.dir_tree, 1)
+        # The sidebar body swaps between the local folder browser and the
+        # ShotSync cloud panel depending on which "disk" is selected.
+        self.sidebar_stack = QStackedWidget()
+
+        local_page = QWidget()
+        local_layout = QVBoxLayout(local_page)
+        local_layout.setContentsMargins(0, 0, 0, 0)
+        local_layout.setSpacing(8)
+        local_layout.addWidget(folder_toolbar)
+        local_layout.addWidget(self.dir_tree, 1)
+
+        self.shotsync_panel = ShotSyncPanel(icon_provider=_fomantic_icon)
+        self.shotsync_panel.loginSubmitted.connect(self._shotsync_login)
+        self.shotsync_panel.logoutRequested.connect(self._shotsync_logout)
+
+        self.sidebar_stack.addWidget(local_page)
+        self.sidebar_stack.addWidget(self.shotsync_panel)
+        self.sidebar_stack.setCurrentWidget(local_page)
+        self._sidebar_local_page = local_page
+
+        sidebar_layout.addWidget(self.sidebar_stack, 1)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -2596,6 +2653,9 @@ class Workspace(QMainWindow):
         }
 
         for key, button in existing.items():
+            if key == SHOTSYNC_VOLUME_KEY:
+                # The ShotSync "disk" is persistent and never tied to a volume.
+                continue
             if key not in volume_keys:
                 self.drive_buttons.removeButton(button)
                 self.drive_button_layout.removeWidget(button)
@@ -2631,7 +2691,14 @@ class Workspace(QMainWindow):
 
         current_root = _volume_root_for_path(self.current_dir, volumes)
         for button in self.drive_buttons.buttons():
-            button.setChecked(button.property("volumeKey") == _drive_key(current_root) if current_root else False)
+            key = button.property("volumeKey")
+            if key == SHOTSYNC_VOLUME_KEY:
+                button.setChecked(self.shotsync_active)
+                continue
+            if self.shotsync_active:
+                button.setChecked(False)
+            else:
+                button.setChecked(key == _drive_key(current_root) if current_root else False)
 
         # If removable media containing the open folder was unplugged, return
         # to a valid local location instead of retaining a dead tree root.
@@ -2641,6 +2708,7 @@ class Workspace(QMainWindow):
             self.load_directory(fallback)
 
     def _drive_selected(self, drive_path: Path) -> None:
+        self._deactivate_shotsync()
         if drive_path.is_dir():
             self._set_tree_root_for_path(drive_path)
             self.load_directory(drive_path)
@@ -2651,10 +2719,90 @@ class Workspace(QMainWindow):
         if model_index.isValid():
             self.dir_tree.setRootIndex(model_index)
             root = _volume_root_for_path(Path(path_text), _mounted_volume_paths())
-            if root is not None and hasattr(self, "drive_buttons"):
+            if root is not None and hasattr(self, "drive_buttons") and not self.shotsync_active:
                 root_key = _drive_key(root)
                 for button in self.drive_buttons.buttons():
                     button.setChecked(button.property("volumeKey") == root_key)
+
+    # ----- ShotSync cloud disk ------------------------------------------
+    def _shotsync_button_icon(self) -> QIcon:
+        """Prefer the Fomantic cloud glyph, fall back to a drawn badge."""
+        icon = _fomantic_icon("cloud", 18, "#8fb8ff")
+        return icon if not icon.isNull() else _chrome_icon("app")
+
+    def _activate_shotsync(self) -> None:
+        """Switch the sidebar to the ShotSync cloud panel."""
+        self.shotsync_active = True
+        self.shotsync_button.setChecked(True)
+        for button in self.drive_buttons.buttons():
+            if button is not self.shotsync_button:
+                button.setChecked(False)
+        self.sidebar_stack.setCurrentWidget(self.shotsync_panel)
+
+        if self.shotsync_client.has_key():
+            # Validate the remembered key once per session, then reuse it.
+            if not self._shotsync_checked:
+                self.shotsync_panel.show_checking()
+                self.shotsync_client.verify_session()
+            else:
+                self.shotsync_panel.set_shootings_loading()
+                self.shotsync_client.fetch_shootings()
+        else:
+            self.shotsync_panel.show_login()
+
+    def _deactivate_shotsync(self) -> None:
+        if not self.shotsync_active:
+            return
+        self.shotsync_active = False
+        self.shotsync_button.setChecked(False)
+        if hasattr(self, "sidebar_stack"):
+            self.sidebar_stack.setCurrentWidget(self._sidebar_local_page)
+
+    def _shotsync_login(self, login: str, password: str) -> None:
+        self.shotsync_client.login(login, password)
+
+    def _shotsync_logout(self) -> None:
+        self.shotsync_client.logout()
+        self._shotsync_checked = False
+        self.settings.remove("shotsync/api_key")
+        self.shotsync_panel.show_login()
+
+    def _shotsync_login_succeeded(self, user: dict, key: str) -> None:
+        self._shotsync_checked = True
+        self.settings.setValue("shotsync/api_key", key)
+        self.shotsync_panel.show_logged_in(user)
+        avatar_url = user.get("avatar_url")
+        if avatar_url:
+            self.shotsync_client.fetch_avatar(avatar_url)
+        self.shotsync_panel.set_shootings_loading()
+        self.shotsync_client.fetch_shootings()
+
+    def _shotsync_login_failed(self, error: str) -> None:
+        self.shotsync_panel.show_login_error(error)
+
+    def _shotsync_session_verified(self, user: dict) -> None:
+        self._shotsync_checked = True
+        self.shotsync_panel.show_logged_in(user)
+        avatar_url = user.get("avatar_url")
+        if avatar_url:
+            self.shotsync_client.fetch_avatar(avatar_url)
+        self.shotsync_panel.set_shootings_loading()
+        self.shotsync_client.fetch_shootings()
+
+    def _shotsync_session_invalid(self, error: str) -> None:
+        self._shotsync_checked = False
+        self.settings.remove("shotsync/api_key")
+        if self.shotsync_active:
+            self.shotsync_panel.show_login()
+
+    def _shotsync_shootings_loaded(self, shootings: list) -> None:
+        self.shotsync_panel.set_shootings(shootings)
+
+    def _shotsync_shootings_failed(self, error: str) -> None:
+        self.shotsync_panel.set_shootings_error(error)
+
+    def _shotsync_avatar_loaded(self, image) -> None:
+        self.shotsync_panel.set_avatar(image)
 
     def load_directory(self, directory: Path) -> None:
         if self._folder_context_active:
@@ -4794,6 +4942,79 @@ def apply_theme(app: QApplication) -> None:
         QToolButton#folderToolButton:disabled {
             background: #202020;
             border-color: #121212;
+        }
+        QWidget#shotsyncPanel {
+            background: transparent;
+        }
+        QLabel#shotsyncTitle {
+            color: #f0f0f0;
+            font-size: 15px;
+            font-weight: 700;
+        }
+        QLabel#shotsyncHint {
+            color: #8a8a8a;
+            font-size: 12px;
+        }
+        QLabel#shotsyncError {
+            color: #e2726e;
+            font-size: 12px;
+        }
+        QLabel#shotsyncSection {
+            color: #8a8a8a;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            padding: 2px 2px 0 2px;
+        }
+        QLineEdit#shotsyncField {
+            background: #202020;
+            border: 1px solid #3a3a3a;
+            border-radius: 6px;
+            padding: 7px 9px;
+            color: #ededed;
+        }
+        QLineEdit#shotsyncField:focus {
+            border-color: #5689d6;
+        }
+        QPushButton#shotsyncPrimaryButton {
+            background: #315b92;
+            border: 1px solid #79aaff;
+            border-radius: 6px;
+            padding: 8px 12px;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        QPushButton#shotsyncPrimaryButton:hover {
+            background: #396bab;
+        }
+        QPushButton#shotsyncPrimaryButton:disabled {
+            background: #2a2a2a;
+            border-color: #3a3a3a;
+            color: #8a8a8a;
+        }
+        QWidget#shotsyncProfile {
+            background: #262626;
+            border: 1px solid #333333;
+            border-radius: 8px;
+        }
+        QLabel#shotsyncProfileName {
+            color: #f0f0f0;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        QToolButton#shotsyncLogoutButton {
+            background: transparent;
+            border: none;
+            border-radius: 5px;
+            padding: 4px;
+        }
+        QToolButton#shotsyncLogoutButton:hover {
+            background: #3a3a3a;
+        }
+        QListWidget#shotsyncShootingList {
+            background: #1c1c1c;
+            border: 1px solid #2c2c2c;
+            border-radius: 8px;
         }
         QTreeView::item, QListWidget::item {
             padding: 6px;
