@@ -42,20 +42,23 @@ MAX_INFLIGHT_UPLOADS = 3
 def encode_preview(path: Path, max_size: int = PREVIEW_MAX_SIZE) -> bytes:
     """Encode ``path`` to a downscaled sRGB JPEG and return the bytes.
 
-    Runs in a worker thread. Uses Pillow directly (not the Qt decode path) so
-    it stays thread-safe and independent of the GUI cache machinery.
+    Runs in a worker thread. Reuses the app's own imaging pipeline
+    (:func:`rawww.imaging.decode_pixels`) instead of calling Pillow's
+    ``Image.open`` directly — that path handles camera RAW (CR3/NEF/ARW/…) via
+    ``rawpy``/the embedded preview, applies EXIF orientation and sRGB
+    conversion, and matches exactly what the user sees as a thumbnail. Pillow
+    alone cannot decode RAW and raised "cannot identify image file".
     """
-    from PIL import Image, ImageOps  # local import keeps module GUI-free
+    from PIL import Image  # local import keeps startup cheap
 
-    with Image.open(path) as image:
-        if getattr(image, "format", None) == "JPEG":
-            image.draft("RGB", (max_size, max_size))
-        image = ImageOps.exif_transpose(image)
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-        buffer = BytesIO()
-        image.save(buffer, format="JPEG", quality=PREVIEW_QUALITY, optimize=True)
+    from .imaging import decode_pixels
+
+    pixel = decode_pixels(path, max_size)
+    image = Image.frombytes(
+        "RGBA", (pixel.width, pixel.height), pixel.pixels, "raw", "RGBA"
+    ).convert("RGB")
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=PREVIEW_QUALITY, optimize=True)
     return buffer.getvalue()
 
 
@@ -126,9 +129,14 @@ class FolderUploader(QObject):
         if not self._api_key:
             self.failed.emit("Нет авторизации ShotSync.")
             return
-        from .imaging import is_supported_image
+        from .imaging import is_supported_image, is_supported_video
 
-        images = sorted(p for p in folder.iterdir() if p.is_file() and is_supported_image(p))
+        # Only still images are uploaded; videos are skipped entirely.
+        images = sorted(
+            p
+            for p in folder.iterdir()
+            if p.is_file() and is_supported_image(p) and not is_supported_video(p)
+        )
         if not images:
             self.failed.emit("В папке нет поддерживаемых изображений.")
             return
