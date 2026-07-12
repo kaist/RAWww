@@ -2726,9 +2726,17 @@ class Workspace(QMainWindow):
 
     # ----- ShotSync cloud disk ------------------------------------------
     def _shotsync_button_icon(self) -> QIcon:
-        """Prefer the Fomantic cloud glyph, fall back to a drawn badge."""
-        icon = _fomantic_icon("cloud", 18, "#8fb8ff")
-        return icon if not icon.isNull() else _chrome_icon("app")
+        """Load the ShotSync logo bundled with the app assets."""
+        logo_path = Path(__file__).parent / "assets" / "shotsync.png"
+        if logo_path.exists():
+            px = QPixmap(str(logo_path)).scaled(
+                20, 20,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            if not px.isNull():
+                return QIcon(px)
+        return _fomantic_icon("cloud", 18, "#8fb8ff")
 
     def _activate_shotsync(self) -> None:
         """Switch the sidebar to the ShotSync cloud panel."""
@@ -4807,7 +4815,6 @@ def apply_theme(app: QApplication) -> None:
         QMainWindow, QWidget {
             background: #1f1f1f;
             color: #d6d6d6;
-            font-family: "Lato", "Segoe UI";
             font-size: 12px;
         }
         QFrame#chromeTitleBar {
@@ -4993,9 +5000,8 @@ def apply_theme(app: QApplication) -> None:
             color: #8a8a8a;
         }
         QWidget#shotsyncProfile {
-            background: #262626;
-            border: 1px solid #333333;
-            border-radius: 8px;
+            background: transparent;
+            border: none;
         }
         QLabel#shotsyncProfileName {
             color: #f0f0f0;
