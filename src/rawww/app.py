@@ -2984,7 +2984,7 @@ class Workspace(QMainWindow):
         """Upload the open folder to ShotSync as a new shooting."""
         if self.current_dir is None:
             return
-        if not self.shotsync_client.is_authenticated:
+        if not self.shotsync_client.has_key():
             QMessageBox.information(
                 self, "ShotSync", "Сначала войдите в ShotSync на боковой панели."
             )
@@ -3046,7 +3046,7 @@ class Workspace(QMainWindow):
         if self.folder_cache is not None and self.cache_ready:
             is_session = self.folder_cache.shotsync_session() is not None
         can_send = (
-            self.current_dir is not None and self.shotsync_client.is_authenticated
+            self.current_dir is not None and self.shotsync_client.has_key()
         )
         self.shotsync_panel.set_folder_actions(can_send=can_send, is_session=is_session)
 
