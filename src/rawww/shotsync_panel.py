@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
@@ -173,11 +174,11 @@ class ShotSyncPanel(QWidget):
 
         self.logout_button = QToolButton()
         self.logout_button.setObjectName("shotsyncLogoutButton")
-        self.logout_button.setIcon(self._icon("sign-out", 15, "#d0d0d0"))
+        self.logout_button.setIcon(self._icon("sign-out", 15, "#8a8a8a"))
         self.logout_button.setToolTip("Выйти из ShotSync")
         self.logout_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.logout_button.clicked.connect(self.logoutRequested.emit)
-        header_layout.addWidget(self.logout_button, 0, Qt.AlignmentFlag.AlignTop)
+        self.logout_button.clicked.connect(self._confirm_logout)
+        header_layout.addWidget(self.logout_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
         layout.addWidget(header)
 
@@ -211,6 +212,19 @@ class ShotSyncPanel(QWidget):
         self.set_submitting(True)
         self.loginSubmitted.emit(login, password)
 
+    def _confirm_logout(self) -> None:
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Выход из ShotSync")
+        msg.setText("Вы уверены, что хотите выйти?")
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        msg.button(QMessageBox.StandardButton.Yes).setText("Выйти")
+        msg.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            self.logoutRequested.emit()
+
     def _emit_activated(self, item: QListWidgetItem) -> None:
         data = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(data, dict):
@@ -232,7 +246,7 @@ class ShotSyncPanel(QWidget):
 
     def show_login_error(self, message: str) -> None:
         self.set_submitting(False)
-        self.login_error.setText(message)
+        self.login_error.setText(_humanize_login_error(message))
         self.login_error.show()
 
     def set_submitting(self, submitting: bool) -> None:
@@ -285,6 +299,31 @@ class ShotSyncPanel(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, shooting)
             item.setToolTip(title)
             self.shooting_list.addItem(item)
+
+
+def _humanize_login_error(raw: str) -> str:
+    """Convert a raw server/network error into a human-readable Russian message."""
+    if not raw:
+        return "Не удалось войти. Попробуйте ещё раз."
+    low = raw.lower()
+    # Server-side auth errors
+    if any(k in low for k in ("invalid", "incorrect", "wrong", "неверн", "not found", "not exist",
+                               "no active", "does not exist")):
+        return "Неверный логин или пароль."
+    if any(k in low for k in ("password", "пароль")):
+        return "Неверный логин или пароль."
+    if any(k in low for k in ("login", "логин", "email", "user")):
+        return "Пользователь с таким логином не найден."
+    # Network / connection errors
+    if any(k in low for k in ("connection", "timeout", "host", "network", "refused",
+                               "unreachable", "соединен", "подключен", "сеть", "недоступ")):
+        return "Ошибка сети. Проверьте подключение к интернету."
+    if any(k in low for k in ("ssl", "tls", "certificate")):
+        return "Ошибка безопасного соединения (SSL)."
+    if any(k in low for k in ("server", "500", "503", "unavailable")):
+        return "Сервер временно недоступен. Попробуйте позже."
+    # Fall back to the raw message but trim any trailing punctuation excess
+    return raw.rstrip(".") + "."
 
 
 def _status_label(status: str | None) -> str:

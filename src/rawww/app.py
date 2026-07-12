@@ -18,6 +18,7 @@ from typing import Callable
 from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QPoint, QRect, QRectF, QIODevice, QSettings, QSize, Qt, QTimer, Signal, QObject, QStorageInfo, QItemSelectionModel, QUrl
 from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+from PySide6.QtNetwork import QNetworkReply, QNetworkRequest
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
@@ -2129,6 +2130,7 @@ class Workspace(QMainWindow):
         self.shotsync_button.setToolTip("Съёмки ShotSync (shotsync.ru)")
         self.shotsync_button.setIcon(self._shotsync_button_icon())
         self.shotsync_button.clicked.connect(lambda: self._activate_shotsync())
+        QTimer.singleShot(0, self._fetch_shotsync_logo)
         self.drive_buttons.addButton(self.shotsync_button)
         self.drive_button_layout.addWidget(self.shotsync_button)
         self._register_grid_page_focus_widget(self.shotsync_button)
@@ -2726,9 +2728,31 @@ class Workspace(QMainWindow):
 
     # ----- ShotSync cloud disk ------------------------------------------
     def _shotsync_button_icon(self) -> QIcon:
-        """Prefer the Fomantic cloud glyph, fall back to a drawn badge."""
-        icon = _fomantic_icon("cloud", 18, "#8fb8ff")
-        return icon if not icon.isNull() else _chrome_icon("app")
+        """Return a placeholder icon; the real logo is fetched asynchronously."""
+        return _fomantic_icon("cloud", 18, "#8fb8ff")
+
+    def _fetch_shotsync_logo(self) -> None:
+        """Download the ShotSync logo from the site and update the disk button."""
+        logo_url = f"{SHOTSYNC_BASE_URL}/static/app/img/favicon.png"
+        request = QNetworkRequest(QUrl(logo_url))
+        request.setAttribute(
+            QNetworkRequest.Attribute.RedirectPolicyAttribute,
+            QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy,
+        )
+        reply = self.shotsync_client._manager.get(request)
+        reply.finished.connect(lambda: self._apply_shotsync_logo(reply))
+
+    def _apply_shotsync_logo(self, reply: QNetworkReply) -> None:
+        reply.deleteLater()
+        if reply.error() != QNetworkReply.NetworkError.NoError:
+            return
+        image = QImage()
+        if image.loadFromData(bytes(reply.readAll())) and not image.isNull():
+            px = QPixmap.fromImage(
+                image.scaled(20, 20, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+            )
+            self.shotsync_button.setIcon(QIcon(px))
 
     def _activate_shotsync(self) -> None:
         """Switch the sidebar to the ShotSync cloud panel."""
@@ -4807,7 +4831,6 @@ def apply_theme(app: QApplication) -> None:
         QMainWindow, QWidget {
             background: #1f1f1f;
             color: #d6d6d6;
-            font-family: "Lato", "Segoe UI";
             font-size: 12px;
         }
         QFrame#chromeTitleBar {
@@ -4993,9 +5016,8 @@ def apply_theme(app: QApplication) -> None:
             color: #8a8a8a;
         }
         QWidget#shotsyncProfile {
-            background: #262626;
-            border: 1px solid #333333;
-            border-radius: 8px;
+            background: transparent;
+            border: none;
         }
         QLabel#shotsyncProfileName {
             color: #f0f0f0;
