@@ -11,7 +11,7 @@ as before.
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import Protocol
 
@@ -50,6 +50,7 @@ class DecodeScheduler:
         background_workers: int,
         visible_thumb_workers: int,
         visible_thumb_lookup_workers: int,
+        use_processes: bool = True,
     ) -> None:
         self._host = host
         self._thumb_size = thumb_size
@@ -57,10 +58,14 @@ class DecodeScheduler:
         self._current_workers = current_workers
         self._background_workers = background_workers
         self._visible_thumb_workers = visible_thumb_workers
+        # Android cannot spawn worker processes; decode on threads there.
+        self._decode_executor_cls: type[Executor] = (
+            ProcessPoolExecutor if use_processes else ThreadPoolExecutor
+        )
 
-        self.current_decode_executor: ProcessPoolExecutor | None = None
-        self.background_decode_executor: ProcessPoolExecutor | None = None
-        self.visible_thumb_decode_executor: ProcessPoolExecutor | None = None
+        self.current_decode_executor: Executor | None = None
+        self.background_decode_executor: Executor | None = None
+        self.visible_thumb_decode_executor: Executor | None = None
         self.background_cache_lookup_executor = ThreadPoolExecutor(max_workers=1)
         self.visible_thumb_cache_lookup_executor = ThreadPoolExecutor(max_workers=visible_thumb_lookup_workers)
 
@@ -235,19 +240,19 @@ class DecodeScheduler:
         except Exception as exc:
             self._host.bridge.failed.emit(str(path), str(exc))
 
-    def _current_decode_executor(self) -> ProcessPoolExecutor:
+    def _current_decode_executor(self) -> Executor:
         if self.current_decode_executor is None:
-            self.current_decode_executor = ProcessPoolExecutor(max_workers=self._current_workers)
+            self.current_decode_executor = self._decode_executor_cls(max_workers=self._current_workers)
         return self.current_decode_executor
 
-    def _background_decode_executor(self) -> ProcessPoolExecutor:
+    def _background_decode_executor(self) -> Executor:
         if self.background_decode_executor is None:
-            self.background_decode_executor = ProcessPoolExecutor(max_workers=self._background_workers)
+            self.background_decode_executor = self._decode_executor_cls(max_workers=self._background_workers)
         return self.background_decode_executor
 
-    def _visible_thumb_decode_executor(self) -> ProcessPoolExecutor:
+    def _visible_thumb_decode_executor(self) -> Executor:
         if self.visible_thumb_decode_executor is None:
-            self.visible_thumb_decode_executor = ProcessPoolExecutor(max_workers=self._visible_thumb_workers)
+            self.visible_thumb_decode_executor = self._decode_executor_cls(max_workers=self._visible_thumb_workers)
         return self.visible_thumb_decode_executor
 
     def abandon_preview_decode_work(self) -> None:

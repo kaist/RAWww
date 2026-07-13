@@ -272,6 +272,37 @@ class DecodeSchedulerTests(unittest.TestCase):
         self.assertIs(first, second)
         first.shutdown(wait=False)
 
+    def test_process_pools_by_default(self) -> None:
+        from concurrent.futures import ProcessPoolExecutor
+
+        scheduler, _ = _make()
+        executor = scheduler._current_decode_executor()
+        self.assertIsInstance(executor, ProcessPoolExecutor)
+        executor.shutdown(wait=False)
+
+    def test_thread_pools_when_processes_disabled(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        host = _Host(_FolderCache())
+        scheduler = DecodeScheduler(
+            host,
+            thumb_size=THUMB_SIZE,
+            original_size=ORIGINAL_SIZE,
+            current_workers=1,
+            background_workers=1,
+            visible_thumb_workers=1,
+            visible_thumb_lookup_workers=1,
+            use_processes=False,
+        )
+        for getter in (
+            scheduler._current_decode_executor,
+            scheduler._background_decode_executor,
+            scheduler._visible_thumb_decode_executor,
+        ):
+            executor = getter()
+            self.assertIsInstance(executor, ThreadPoolExecutor)
+        scheduler.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()
