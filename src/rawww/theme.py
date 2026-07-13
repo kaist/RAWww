@@ -457,10 +457,10 @@ def apply_theme(app: QApplication) -> None:
             background: transparent;
             border: 1px solid transparent;
             border-radius: 4px;
-            min-width: 26px;
-            max-width: 26px;
-            min-height: 26px;
-            max-height: 26px;
+            min-width: 18px;
+            max-width: 18px;
+            min-height: 24px;
+            max-height: 24px;
             padding: 0;
         }
         QToolButton#directoryAction:hover {
