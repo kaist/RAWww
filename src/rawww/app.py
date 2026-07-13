@@ -67,12 +67,13 @@ from PySide6.QtWidgets import (
 
 from .cache import FolderCache, cache_size, clear_cache, maintain_folder_caches, prune_folder_cache, relocate_folder_caches, remove_folder_cache
 from .decode_cache import DecodeCache
+from .decode_scheduler import DecodeScheduler
 from .shotsync_client import ShotSyncClient
 from .shotsync_login import ShotSyncLoginDialog
 from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
 from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection_root
-from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, decode_original_pixels, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
+from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, is_supported_image, is_supported_media, is_supported_video
 from .launch import target_from_argv
 from .runtime_paths import PORTABLE, data_path, work_path
 from .subprocess_utils import no_window_kwargs
@@ -3007,11 +3008,6 @@ class Workspace(QMainWindow):
         self._taskbar_progress = WindowsTaskbarProgress()
         self._dock_progress = MacDockProgress()
 
-        self.current_decode_executor: ProcessPoolExecutor | None = None
-        self.background_decode_executor: ProcessPoolExecutor | None = None
-        self.visible_thumb_decode_executor: ProcessPoolExecutor | None = None
-        self.background_cache_lookup_executor = ThreadPoolExecutor(max_workers=1)
-        self.visible_thumb_cache_lookup_executor = ThreadPoolExecutor(max_workers=VISIBLE_THUMB_LOOKUP_WORKERS)
         self.directory_scan_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_load_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_flush_executor = ThreadPoolExecutor(max_workers=1)
@@ -3026,12 +3022,10 @@ class Workspace(QMainWindow):
         self.bridge.xmpWritten.connect(self._on_xmp_written)
         self.video_thumbnailer = VideoThumbnailer(self)
         self.video_thumbnailer.previewReady.connect(self._on_video_preview)
-        self.pending: dict[tuple[Path, int], Future] = {}
         self._xmp_pending: dict[Path, tuple[dict, list[dict], dict[str, str]]] = {}
         self._xmp_running: set[Path] = set()
         self._xmp_export_after_cache_load = False
         self._ignore_folder_changes_until = 0.0
-        self.foreground_full_futures: dict[tuple[Path, int], Future] = {}
         self.last_navigation_at = 0.0
         self.pending_full_request: Path | None = None
         self.pending_grid_full_request: Path | None = None
@@ -3042,7 +3036,6 @@ class Workspace(QMainWindow):
         self.thumb_index = 0
         self.thumb_priority: deque[Path] = deque()
         self.thumb_priority_set: set[Path] = set()
-        self.visible_thumb_pending: set[tuple[Path, int]] = set()
         self.cache_ready = False
         self.cache_load_generation = 0
         self.directory_generation = 0
@@ -3052,6 +3045,15 @@ class Workspace(QMainWindow):
             thumbnail_bytes_limit=THUMBNAIL_RAM_CACHE_LIMIT_BYTES,
             original_size=ORIGINAL_SIZE,
             thumb_size=THUMB_SIZE,
+        )
+        self.scheduler = DecodeScheduler(
+            self,
+            thumb_size=THUMB_SIZE,
+            original_size=ORIGINAL_SIZE,
+            current_workers=CURRENT_DECODE_WORKERS,
+            background_workers=BACKGROUND_DECODE_WORKERS,
+            visible_thumb_workers=VISIBLE_THUMB_DECODE_WORKERS,
+            visible_thumb_lookup_workers=VISIBLE_THUMB_LOOKUP_WORKERS,
         )
         self.items_by_path: dict[Path, QListWidgetItem] = {}
         self.all_paths: list[Path] = []
@@ -3270,14 +3272,7 @@ class Workspace(QMainWindow):
         self._detach_shotsync_syncer()
         self.folder_cache = None
         self.cache_ready = False
-        if self.current_decode_executor is not None:
-            self.current_decode_executor.shutdown(wait=False, cancel_futures=True)
-        if self.background_decode_executor is not None:
-            self.background_decode_executor.shutdown(wait=False, cancel_futures=True)
-        if self.visible_thumb_decode_executor is not None:
-            self.visible_thumb_decode_executor.shutdown(wait=False, cancel_futures=True)
-        self.background_cache_lookup_executor.shutdown(wait=False, cancel_futures=True)
-        self.visible_thumb_cache_lookup_executor.shutdown(wait=False, cancel_futures=True)
+        self.scheduler.shutdown()
         self.directory_scan_executor.shutdown(wait=False, cancel_futures=True)
         self.cache_load_executor.shutdown(wait=False, cancel_futures=True)
         self.cache_flush_executor.shutdown(wait=False, cancel_futures=False)
@@ -3305,6 +3300,18 @@ class Workspace(QMainWindow):
             self._metadata_pipeline = MetadataPipeline()
         return self._metadata_pipeline
 
+    @property
+    def pending(self) -> dict[tuple[Path, int], Future]:
+        return self.scheduler.pending
+
+    @property
+    def foreground_full_futures(self) -> dict[tuple[Path, int], Future]:
+        return self.scheduler.foreground_full_futures
+
+    @property
+    def visible_thumb_pending(self) -> set[tuple[Path, int]]:
+        return self.scheduler.visible_thumb_pending
+
     def _start_cache_maintenance(self) -> None:
         """Queue startup cache cleanup after interactive startup has settled."""
         if self.closing or type(self)._cache_maintenance_started:
@@ -3326,11 +3333,7 @@ class Workspace(QMainWindow):
             self.full_request_timer.stop()
             self.pending_full_request = None
             self.pending_grid_full_request = None
-            for future in self.pending.values():
-                future.cancel()
-            self.pending.clear()
-            self.foreground_full_futures.clear()
-            self.visible_thumb_pending.clear()
+            self.scheduler.cancel_pending()
             self.full_view.video_player.pause()
             return
         if self.populate_index < len(self.paths):
@@ -5754,11 +5757,7 @@ class Workspace(QMainWindow):
             self.folder_watcher.removePaths(watched)
         if directory.is_dir():
             self.folder_watcher.addPath(str(directory))
-        for future in self.pending.values():
-            future.cancel()
-        self.pending.clear()
-        self.foreground_full_futures.clear()
-        self.visible_thumb_pending.clear()
+        self.scheduler.cancel_pending()
         self.full_request_timer.stop()
         self.grid_full_request_timer.stop()
         self.pending_full_request = None
@@ -7479,164 +7478,10 @@ class Workspace(QMainWindow):
         full_priority: bool,
         visible_priority: bool = False,
     ) -> None:
-        if self.closing:
-            return
-        key = (path, max_size)
-        cached = self._cache_get(key)
-        if cached is not None:
-            self.bridge.decoded.emit((cached, max_size))
-            return
-        if key in self.pending:
-            return
-        if self.folder_cache is None:
-            return
-
-        if max_size == THUMB_SIZE:
-            cache = self.folder_cache
-            executor = self.visible_thumb_cache_lookup_executor if visible_priority else self.background_cache_lookup_executor
-            future = executor.submit(cache.load, path, max_size)
-            self.pending[key] = future
-            if visible_priority:
-                self.visible_thumb_pending.add(key)
-            future.add_done_callback(
-                lambda done, p=path, s=max_size, fp=full_priority, vp=visible_priority: self._cache_lookup_done(
-                    p, s, fp, vp, done
-                )
-            )
-            return
-        # Full-view images deliberately bypass the disk cache. They are decoded
-        # from the source on demand and live only in the bounded RAM LRU.
-        self._submit_process_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
+        self.scheduler.submit_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
 
     def _submit_video_thumbnail(self, path: Path, *, visible_priority: bool) -> None:
-        """Use RAM, then SQLite, before falling back to Qt frame decoding."""
-        key = (path, THUMB_SIZE)
-        preview = self._thumbnail_cache_get(path)
-        if preview is not None:
-            self.bridge.decoded.emit(
-                (DecodedImage(path=path, image=preview, width=preview.width(), height=preview.height()), THUMB_SIZE)
-            )
-            return
-        cached = self._cache_get(key)
-        if cached is not None:
-            self.bridge.decoded.emit((cached, THUMB_SIZE))
-            return
-        if key in self.pending or self.folder_cache is None:
-            return
-        executor = self.visible_thumb_cache_lookup_executor if visible_priority else self.background_cache_lookup_executor
-        future = executor.submit(self.folder_cache.load, path, THUMB_SIZE)
-        self.pending[key] = future
-        if visible_priority:
-            self.visible_thumb_pending.add(key)
-        future.add_done_callback(
-            lambda done, p=path, vp=visible_priority: self._video_thumbnail_cache_lookup_done(p, vp, done)
-        )
-
-    def _video_thumbnail_cache_lookup_done(self, path: Path, visible_priority: bool, future: Future) -> None:
-        key = (path, THUMB_SIZE)
-        if self.pending.get(key) is future:
-            self.pending.pop(key, None)
-        self.visible_thumb_pending.discard(key)
-        if self.closing or future.cancelled() or path.parent != self.current_dir:
-            return
-        try:
-            decoded = future.result()
-        except Exception as exc:
-            self.bridge.failed.emit(str(path), str(exc))
-            return
-        if decoded is not None:
-            self._cache_put(key, decoded)
-            self.bridge.decoded.emit((decoded, THUMB_SIZE))
-            return
-        if self.workspace_active:
-            self.video_thumbnailer.request(path)
-
-    def _submit_process_decode(
-        self,
-        path: Path,
-        max_size: int,
-        *,
-        full_priority: bool,
-        visible_priority: bool = False,
-    ) -> None:
-        if self.closing:
-            return
-        key = (path, max_size)
-        if key in self.pending:
-            return
-        is_foreground = False
-        if visible_priority:
-            executor = self._visible_thumb_decode_executor()
-        elif full_priority:
-            executor = self._current_decode_executor() if path == self.current_path else self._background_decode_executor()
-            if path == self.current_path:
-                is_foreground = True
-        else:
-            executor = self._background_decode_executor()
-        try:
-            decoder = decode_original_pixels if max_size == ORIGINAL_SIZE else (decode_pixels if full_priority else decode_thumbnail_pixels)
-            future = executor.submit(decoder, path) if max_size == ORIGINAL_SIZE else executor.submit(decoder, path, max_size)
-        except RuntimeError:
-            # Shutdown may begin between the guard above and submit because
-            # cache callbacks execute on worker threads.
-            if self.closing:
-                return
-            raise
-        self.pending[key] = future
-        if is_foreground:
-            self.foreground_full_futures[key] = future
-        future.add_done_callback(lambda done, p=path, s=max_size: self._decode_done(p, s, done))
-
-    def _cache_lookup_done(
-        self,
-        path: Path,
-        max_size: int,
-        full_priority: bool,
-        visible_priority: bool,
-        future: Future,
-    ) -> None:
-        key = (path, max_size)
-        if self.pending.get(key) is future:
-            self.pending.pop(key, None)
-        self.visible_thumb_pending.discard(key)
-        if self.closing or path.parent != self.current_dir:
-            return
-        if future.cancelled():
-            return
-        try:
-            decoded = future.result()
-        except Exception as exc:
-            self.bridge.failed.emit(str(path), str(exc))
-            return
-        if decoded is not None:
-            self._cache_put((path, max_size), decoded)
-            self.bridge.decoded.emit((decoded, max_size))
-            return
-        self._submit_process_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
-
-    def _decode_done(self, path: Path, max_size: int, future: Future) -> None:
-        key = (path, max_size)
-        if self.pending.get(key) is future:
-            self.pending.pop(key, None)
-        self.visible_thumb_pending.discard(key)
-        if self.foreground_full_futures.get(key) is future:
-            self.foreground_full_futures.pop(key, None)
-        if self.closing or path.parent != self.current_dir:
-            return
-        if future.cancelled():
-            return
-        try:
-            result = future.result()
-            if isinstance(result, PixelImage):
-                if self.folder_cache is not None and max_size == THUMB_SIZE:
-                    self.folder_cache.store_pixels(result, max_size)
-                decoded = pixel_to_decoded(result)
-            else:
-                decoded = result
-            self._cache_put((path, max_size), decoded)
-            self.bridge.decoded.emit((decoded, max_size))
-        except Exception as exc:
-            self.bridge.failed.emit(str(path), str(exc))
+        self.scheduler.submit_video_thumbnail(path, visible_priority=visible_priority)
 
     def _on_decoded(self, payload: object) -> None:
         decoded, max_size = payload
@@ -8207,39 +8052,11 @@ class Workspace(QMainWindow):
     def _cache_put(self, key: tuple[Path, int], decoded: DecodedImage) -> None:
         self.decode_cache.put(key, decoded)
 
-    def _current_decode_executor(self) -> ProcessPoolExecutor:
-        if self.current_decode_executor is None:
-            self.current_decode_executor = ProcessPoolExecutor(max_workers=CURRENT_DECODE_WORKERS)
-        return self.current_decode_executor
-
     def _background_decode_executor(self) -> ProcessPoolExecutor:
-        if self.background_decode_executor is None:
-            self.background_decode_executor = ProcessPoolExecutor(max_workers=BACKGROUND_DECODE_WORKERS)
-        return self.background_decode_executor
-
-    def _visible_thumb_decode_executor(self) -> ProcessPoolExecutor:
-        if self.visible_thumb_decode_executor is None:
-            self.visible_thumb_decode_executor = ProcessPoolExecutor(max_workers=VISIBLE_THUMB_DECODE_WORKERS)
-        return self.visible_thumb_decode_executor
+        return self.scheduler._background_decode_executor()
 
     def _abandon_preview_decode_work(self) -> None:
-        """Let a newly opened folder start decoding without an old queue ahead.
-
-        ``Future.cancel`` cannot stop a RAW decode that is already executing.
-        Retiring the executors still cancels all queued work, while fresh
-        executors let the new folder's visible cards begin immediately.
-        Running old workers are allowed to finish and their results are
-        discarded by the folder checks in the completion callbacks.
-        """
-        for attribute in (
-            "current_decode_executor",
-            "background_decode_executor",
-            "visible_thumb_decode_executor",
-        ):
-            executor = getattr(self, attribute)
-            if executor is not None:
-                executor.shutdown(wait=False, cancel_futures=True)
-                setattr(self, attribute, None)
+        self.scheduler.abandon_preview_decode_work()
 
     def _flush_folder_cache(self, *, wait: bool, close: bool = False) -> None:
         cache = self.folder_cache
