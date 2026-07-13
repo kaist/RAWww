@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image
 
 from rawww.ai import recognize_face_batch
-from rawww.face_analysis import FACE_TEMPLATE, Face, _aligned_face, _nms
+from rawww.face_analysis import FACE_TEMPLATE, Face, _aligned_face, _nms, recognize
 
 
 class FaceAnalysisTests(unittest.TestCase):
@@ -45,3 +45,30 @@ class FaceAnalysisTests(unittest.TestCase):
         record = json.loads(results[0][1])[0]
         self.assertEqual(record["embedding"], [0.123457, -0.5])
         self.assertEqual(record["confidence"], 0.9)
+
+    def test_recognition_runs_each_face_with_the_model_batch_size(self) -> None:
+        image = Image.new("RGB", (224, 224))
+        boxes = np.array([[1, 2, 11, 12], [20, 21, 30, 31]], dtype=np.float32)
+        landmarks = np.repeat(FACE_TEMPLATE[None], 2, axis=0)
+        scores = np.array([0.9, 0.8], dtype=np.float32)
+
+        class Session:
+            def __init__(self) -> None:
+                self.batches = []
+
+            def get_inputs(self):
+                return [type("Input", (), {"name": "input"})()]
+
+            def run(self, _, feeds):
+                batch = feeds["input"]
+                self.batches.append(batch.shape)
+                return [np.full((1, 512), len(self.batches), dtype=np.float32)]
+
+        session = Session()
+        with patch("rawww.face_analysis._detect", return_value=(boxes, landmarks, scores)), patch(
+            "rawww.face_analysis._recognition", return_value=session
+        ):
+            faces = recognize(image)
+
+        self.assertEqual(session.batches, [(1, 3, 112, 112), (1, 3, 112, 112)])
+        self.assertEqual([face.embedding[0] for face in faces], [1.0, 2.0])

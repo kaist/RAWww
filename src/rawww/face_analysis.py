@@ -157,5 +157,12 @@ def recognize(image: Image.Image) -> list[Face]:
         values = (np.asarray(aligned, dtype=np.float32) - 127.5) / 127.5
         crops.append(values.transpose(2, 0, 1))
     session = _recognition()
-    embeddings = session.run(None, {session.get_inputs()[0].name: np.ascontiguousarray(crops)})[0]
+    # The bundled recognition model has a fixed batch dimension of one.  Passing
+    # several aligned faces at once still produces embeddings, but ONNX Runtime
+    # warns for every output because its declared shape is ``(1, 512)``.
+    input_name = session.get_inputs()[0].name
+    embeddings = np.vstack([
+        session.run(None, {input_name: crop[None]})[0]
+        for crop in crops
+    ])
     return [Face(box, points, float(score), embedding) for box, points, score, embedding in zip(boxes, landmarks, scores, embeddings)]

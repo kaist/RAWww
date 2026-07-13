@@ -23,7 +23,7 @@ from typing import Callable
 from send2trash import send2trash
 
 from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QKeyCombination, QLibraryInfo, QPoint, QPointF, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
-from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QFont, QFontDatabase, QFontMetricsF, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygon, QShortcut, QTextCharFormat, QTextFormat, QTextObjectInterface
+from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QFont, QFontDatabase, QFontMetricsF, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygon, QShortcut, QTextCharFormat, QTextFormat, QTextObjectInterface
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -74,7 +74,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from .cache import FolderCache, maintain_folder_caches, prune_folder_cache, relocate_folder_caches, remove_folder_cache
+from .cache import FolderCache, cache_size, clear_cache, maintain_folder_caches, prune_folder_cache, relocate_folder_caches, remove_folder_cache
 from .shotsync_client import ShotSyncClient
 from .shotsync_login import ShotSyncLoginDialog
 from .shotsync_hub import shotsync_hub
@@ -82,7 +82,7 @@ from .shotsync_panel import ShotSyncPanel
 from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection_root
 from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, decode_original_pixels, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
 from .launch import target_from_argv
-from .runtime_paths import data_path
+from .runtime_paths import PORTABLE, data_path, work_path
 from .workspace import WorkspaceRequest, WorkspaceState
 from .xmp import build_xmp, write_sidecar
 from .updater import fetch_release_info, is_newer
@@ -126,6 +126,15 @@ SHOTSYNC_VOLUME_KEY = "__shotsync__"
 ENABLE_EXIF_METADATA = True
 APP_NAME = "Контролька"
 APP_VERSION = __version__
+SETTINGS_NAME = "ctrlka"
+
+
+def _application_settings() -> QSettings:
+    if PORTABLE:
+        settings_path = work_path() / "settings"
+        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(settings_path))
+        return QSettings(SETTINGS_NAME, SETTINGS_NAME, QSettings.Format.IniFormat)
+    return QSettings(SETTINGS_NAME, SETTINGS_NAME)
 
 FOMANTIC_ICON_CODES = {
     "images": "\uf302", "grid": "\uf00a", "user": "\uf007", "brush": "\uf1fc", "media": "\uf87c",
@@ -138,7 +147,7 @@ FOMANTIC_ICON_CODES = {
     "cloud": "\uf0c2", "sign-out": "\uf2f5", "lock": "\uf023", "sync": "\uf021",
     "download": "\uf56d", "eye": "\uf06e", "stop": "\uf04d",
     "link": "\uf0c1",
-    "cog": "\uf013", "magic": "\uf0d0", "wrench": "\uf0ad",
+    "cog": "\uf013", "help": "\uf128", "magic": "\uf0d0", "wrench": "\uf0ad",
     "edit": "\uf044", "calendar": "\uf133", "clock": "\uf017", "camera": "\uf030",
     "file": "\uf15b", "arrow-right": "\uf061",
 }
@@ -611,6 +620,47 @@ class AudioToggleButton(QToolButton):
         icon = self.icon()
         if not icon.isNull():
             icon.paint(painter, self.rect().adjusted(10, 10, -10, -10), Qt.AlignmentFlag.AlignCenter)
+
+
+class MarkIndicatorButton(QToolButton):
+    """Antialiased circular quick-mark control for Full View."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._color = QColor("#4d535b")
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_mark_color(self, color: str) -> None:
+        self._color = QColor(color)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        shadow = QRectF(self.rect()).adjusted(2.5, 3.5, -1.5, -0.5)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 80))
+        painter.drawEllipse(shadow)
+        rect = QRectF(self.rect()).adjusted(1.5, 1.0, -1.5, -2.0)
+        fill = self._color.lighter(112) if self.underMouse() else self._color
+        gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+        gradient.setColorAt(0, fill.lighter(116))
+        gradient.setColorAt(0.48, fill)
+        gradient.setColorAt(1, fill.darker(118))
+        painter.setBrush(gradient)
+        painter.setPen(QPen(QColor(255, 255, 255, 82), 1.0))
+        painter.drawEllipse(rect)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(0, 0, 0, 65), 1.0))
+        painter.drawEllipse(rect.adjusted(2.0, 2.0, -2.0, -2.0))
+        if self.text():
+            font = QFont(self.font())
+            font.setPointSize(13)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
 
 
 class PhotoCardDelegate(QStyledItemDelegate):
@@ -1691,7 +1741,7 @@ class ViewerMetaBar(QWidget):
     def __init__(self, *, settings: QSettings | None = None) -> None:
         super().__init__()
         self.setObjectName("viewerMeta")
-        self.settings = settings or QSettings(APP_NAME, APP_NAME)
+        self.settings = settings or _application_settings()
         self._quick_mark = ("rating", 5)
         layout = QHBoxLayout(self)
         # The bar is 30px tall including its top/bottom borders. Leave an
@@ -1918,6 +1968,7 @@ class FullView(QFrame):
     stripViewportChanged = Signal()
     videoPlaybackChanged = Signal(bool)
     originalRequested = Signal(object)
+    markIndicatorRequested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -2013,6 +2064,12 @@ class FullView(QFrame):
         self.counter_label.setObjectName("fullViewCounter")
         self.counter_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.counter_label.hide()
+        self.mark_indicator = MarkIndicatorButton(self.media_panel)
+        self.mark_indicator.setObjectName("fullViewMarkIndicator")
+        self.mark_indicator.setFixedSize(44, 44)
+        self.mark_indicator.clicked.connect(self.markIndicatorRequested)
+        self.mark_indicator.hide()
+        self._mark_detail: dict = {}
         # The floating video controls are positioned manually on top of their
         # host. Reposition them whenever the host resizes (e.g. when the bottom
         # strip is collapsed/expanded) so they always stay pinned to the bottom.
@@ -2105,7 +2162,7 @@ class FullView(QFrame):
         strip_layout.setSpacing(0)
         strip_layout.addWidget(strip_header)
         strip_layout.addWidget(self.photo_strip)
-        if QSettings(APP_NAME, APP_NAME).value("viewer_strip_collapsed", False, bool):
+        if _application_settings().value("viewer_strip_collapsed", False, bool):
             self.photo_strip.hide()
             self.strip_toggle.setIcon(_fomantic_icon("chevron-up", 12))
 
@@ -2127,7 +2184,7 @@ class FullView(QFrame):
         self.photo_strip.setVisible(not visible)
         self.strip_toggle.setIcon(_fomantic_icon("chevron-up" if visible else "chevron-down", 12))
         self.strip_toggle.setToolTip("Развернуть ленту превью" if visible else "Свернуть ленту превью")
-        QSettings(APP_NAME, APP_NAME).setValue("viewer_strip_collapsed", visible)
+        _application_settings().setValue("viewer_strip_collapsed", visible)
         # The host's resize (handled in eventFilter) keeps the controls pinned,
         # but reposition once more after the layout settles as a safety net.
         QTimer.singleShot(0, self._position_video_controls)
@@ -2263,6 +2320,8 @@ class FullView(QFrame):
 
     def set_metadata(self, detail: dict, paths: tuple[Path, ...] = ()) -> None:
         self.meta_bar.set_metadata(detail)
+        self._mark_detail = detail
+        self._update_mark_indicator()
         self._set_audio_detail(detail)
         for path in paths or ((self._path,) if self._path is not None else ()):
             self.photo_strip.update_details(path, detail)
@@ -2299,6 +2358,7 @@ class FullView(QFrame):
             self.stop_audio()
         self.video_player.stop()
         self._is_video = False
+        self._update_mark_indicator()
         self.video_controls.hide()
         self.media_stack.setCurrentWidget(self.image_view)
         self._path = decoded.path
@@ -2319,6 +2379,7 @@ class FullView(QFrame):
         self._reset_zoom()
         self._path = path
         self._is_video = True
+        self._update_mark_indicator()
         self._is_fallback = True
         self.video_player.stop()
         self.video_player.setSource(QUrl.fromLocalFile(str(path)))
@@ -2394,6 +2455,7 @@ class FullView(QFrame):
         if self._is_video or self.image_view.zoom_requested:
             return
         self.image_view.request_zoom(position, temporary=True)
+        self._update_mark_indicator()
         self.originalRequested.emit(position)
 
     def _release_mouse_zoom(self) -> None:
@@ -2407,10 +2469,41 @@ class FullView(QFrame):
             self._reset_zoom()
             return
         self.image_view.request_zoom(None, temporary=False)
+        self._update_mark_indicator()
         self.originalRequested.emit(None)
 
     def _reset_zoom(self) -> None:
         self.image_view.reset_zoom(self._preview_pixmap)
+        self._update_mark_indicator()
+
+    def refresh_mark_indicator(self) -> None:
+        """Apply a changed interface preference without reopening Full View."""
+        self._update_mark_indicator()
+
+    def _update_mark_indicator(self) -> None:
+        detail = self._mark_detail
+        rating = int(detail.get("rating") or 0)
+        color_label = str(detail.get("color_label") or "")
+        visible = (
+            not self._is_video
+            and not self.image_view.zoom_requested
+            and _application_settings().value("interface/show_full_view_mark_indicator", True, bool)
+        )
+        if not visible:
+            self.mark_indicator.hide()
+            return
+        colors = {
+            "red": "#a25555", "yellow": "#af9440", "green": "#4d9660",
+            "blue": "#537fc2", "purple": "#9760b2",
+        }
+        self.mark_indicator.setText(f"★ {rating}" if rating > 0 else "")
+        has_mark = rating > 0 or bool(color_label)
+        self.mark_indicator.setToolTip(
+            "Снять все метки" if has_mark else "Применить быструю метку (M)"
+        )
+        self.mark_indicator.set_mark_color(colors.get(color_label, "#4d535b"))
+        self.mark_indicator.show()
+        self._position_mark_indicator()
 
     def cancel_zoom(self) -> None:
         """Discard a pending/active inspection before changing photos."""
@@ -2475,6 +2568,7 @@ class FullView(QFrame):
         QTimer.singleShot(0, self._position_video_controls)
         QTimer.singleShot(0, self._position_face_filter_chip)
         QTimer.singleShot(0, self._position_counter)
+        QTimer.singleShot(0, self._position_mark_indicator)
 
     def _position_face_filter_chip(self) -> None:
         if not self.face_filter_chip.isVisible():
@@ -2484,6 +2578,18 @@ class FullView(QFrame):
             max(8, self.media_panel.width() - self.face_filter_chip.width() - 12), 12
         )
         self.face_filter_chip.raise_()
+
+    def _position_mark_indicator(self) -> None:
+        if not self.mark_indicator.isVisible():
+            return
+        position = _application_settings().value(
+            "interface/full_view_mark_indicator_position", "bottom", str
+        )
+        self.mark_indicator.move(
+            max(8, self.media_panel.width() - self.mark_indicator.width() - 12),
+            12 if position == "top" else max(8, self.media_panel.height() - self.mark_indicator.height() - 12),
+        )
+        self.mark_indicator.raise_()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()
@@ -2927,13 +3033,61 @@ def _uses_reserved_navigation_key(sequence: QKeySequence) -> bool:
     reserved = {Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape}
     return any((sequence[index].toCombined() & 0x01FFFFFF) in {int(key) for key in reserved} for index in range(sequence.count()))
 
+
+class HelpDialog(QDialog):
+    """A read-only, current shortcut reference opened from the title bar."""
+
+    def __init__(self, settings: QSettings, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("helpDialog")
+        self.setWindowTitle("Справка по горячим клавишам")
+        self.setModal(True)
+        self.resize(620, 590)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setSpacing(10)
+
+        title = QLabel("Горячие клавиши")
+        title.setObjectName("helpDialogTitle")
+        layout.addWidget(title)
+        hint = QLabel(
+            "Сочетания ниже показывают текущие настройки приложения. "
+            "Их можно переназначить в разделе «Настройки → Горячие клавиши»."
+        )
+        hint.setObjectName("helpDialogHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        table = QTableWidget(len(HOTKEY_DEFAULTS), 2)
+        table.setObjectName("helpHotkeysTable")
+        table.setHorizontalHeaderLabels(("Действие", "Сочетание"))
+        table.verticalHeader().hide()
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setColumnWidth(0, 350)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        for row, (identifier, (label, _default)) in enumerate(HOTKEY_DEFAULTS.items()):
+            table.setItem(row, 0, QTableWidgetItem(label))
+            sequence = _hotkey_sequence(settings, identifier)
+            table.setItem(row, 1, QTableWidgetItem(sequence.toString() or "Не назначено"))
+        layout.addWidget(table, 1)
+
+        close = QPushButton("Закрыть")
+        close.setObjectName("helpDialogCloseButton")
+        close.clicked.connect(self.accept)
+        layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+
 class SettingsDialog(QDialog):
     """Application settings presented in the same visual language as the shell."""
 
-    def __init__(self, settings: QSettings, client: ShotSyncClient, changed: Callable[[list[dict]], None], login_requested: Callable[[], bool], update_requested: Callable[[], None], parent=None) -> None:
+    def __init__(self, settings: QSettings, client: ShotSyncClient, changed: Callable[[list[dict]], None], login_requested: Callable[[], bool], update_requested: Callable[[], None], cache_size_provider: Callable[[], int], clear_cache_requested: Callable[[], None], parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
         self.update_requested = update_requested
+        self.cache_size_provider = cache_size_provider
+        self.clear_cache_requested = clear_cache_requested
         self.setObjectName("settingsDialog")
         self.setWindowTitle("Настройки")
         self.setModal(True)
@@ -2954,6 +3108,10 @@ class SettingsDialog(QDialog):
         self.code_replacements_editor = CodeReplacementsEditor(client, settings, changed, login_requested)
         tabs.addTab(self.code_replacements_editor, "Коды замен")
         tabs.addTab(self._interface_tab(), "Интерфейс")
+        cache_tab_index = tabs.addTab(self._cache_tab(), "Кэш")
+        tabs.currentChanged.connect(
+            lambda index: self._refresh_cache_size() if index == cache_tab_index else None
+        )
         tabs.addTab(self._about_tab(), "О приложении")
         layout.addWidget(tabs, 1)
 
@@ -3193,6 +3351,32 @@ class SettingsDialog(QDialog):
             self.settings.value("interface/show_full_view_counter", True, bool)
         )
         layout.addWidget(self.show_full_view_counter)
+        self.show_full_view_mark_indicator = SettingsCheckBox(
+            "Показывать индикатор меток в полном просмотре"
+        )
+        self.show_full_view_mark_indicator.setChecked(
+            self.settings.value("interface/show_full_view_mark_indicator", True, bool)
+        )
+        layout.addWidget(self.show_full_view_mark_indicator)
+        self.mark_indicator_position_control = QWidget()
+        position_layout = QHBoxLayout(self.mark_indicator_position_control)
+        position_layout.setContentsMargins(24, 0, 0, 0)
+        position_layout.setSpacing(8)
+        position_layout.addWidget(QLabel("Положение индикатора:"))
+        self.full_view_mark_indicator_position = QComboBox()
+        self.full_view_mark_indicator_position.addItem("Снизу справа", "bottom")
+        self.full_view_mark_indicator_position.addItem("Сверху справа", "top")
+        saved_position = self.settings.value(
+            "interface/full_view_mark_indicator_position", "bottom", str
+        )
+        self.full_view_mark_indicator_position.setCurrentIndex(
+            max(0, self.full_view_mark_indicator_position.findData(saved_position))
+        )
+        position_layout.addWidget(self.full_view_mark_indicator_position)
+        position_layout.addStretch(1)
+        self.mark_indicator_position_control.setEnabled(self.show_full_view_mark_indicator.isChecked())
+        self.show_full_view_mark_indicator.toggled.connect(self.mark_indicator_position_control.setEnabled)
+        layout.addWidget(self.mark_indicator_position_control)
         layout.addStretch(1)
         return tab
 
@@ -3221,6 +3405,51 @@ class SettingsDialog(QDialog):
         layout.addWidget(check, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addStretch(1)
         return tab
+
+    def _cache_tab(self) -> QWidget:
+        tab = QWidget()
+        tab.setObjectName("settingsTabPage")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(18, 20, 18, 18)
+        layout.setSpacing(10)
+        heading = QLabel("Кэш")
+        heading.setObjectName("settingsSectionTitle")
+        layout.addWidget(heading)
+        hint = QLabel("Кэш содержит миниатюры и результаты анализа фотографий. Очистка не удаляет исходные файлы.")
+        hint.setObjectName("settingsHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.cache_size_label = QLabel()
+        self.cache_size_label.setObjectName("settingsHint")
+        layout.addWidget(self.cache_size_label)
+        clear = QPushButton("Очистить кэш")
+        clear.setObjectName("settingsPrimaryButton")
+        clear.clicked.connect(self._clear_cache)
+        layout.addWidget(clear, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch(1)
+        self._refresh_cache_size()
+        return tab
+
+    def _refresh_cache_size(self) -> None:
+        self.cache_size_label.setText(f"Размер: {self._format_size(self.cache_size_provider())}")
+
+    def _clear_cache(self) -> None:
+        confirm = QMessageBox.question(
+            self, "Очистить кэш", "Удалить все миниатюры и результаты анализа?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            self.clear_cache_requested()
+            self._refresh_cache_size()
+
+    @staticmethod
+    def _format_size(size: int) -> str:
+        value = float(size)
+        for unit in ("Б", "КБ", "МБ", "ГБ"):
+            if value < 1024 or unit == "ГБ":
+                return f"{value:.1f} {unit}" if unit != "Б" else f"{int(value)} {unit}"
+            value /= 1024
 
     def _set_rating_color_scheme(self, color_on_plain_digits: bool) -> None:
         """Switch all number pairs together, leaving other custom keys alone."""
@@ -3267,6 +3496,14 @@ class SettingsDialog(QDialog):
         self.settings.setValue("restore_active_workspace", self.restore_active_workspace.isChecked())
         self.settings.setValue("behavior/delete_without_confirmation", self.delete_without_confirmation.isChecked())
         self.settings.setValue("interface/show_full_view_counter", self.show_full_view_counter.isChecked())
+        self.settings.setValue(
+            "interface/show_full_view_mark_indicator",
+            self.show_full_view_mark_indicator.isChecked(),
+        )
+        self.settings.setValue(
+            "interface/full_view_mark_indicator_position",
+            self.full_view_mark_indicator_position.currentData(),
+        )
         self.settings.setValue("editor/use_custom_executable", self.custom_editor.isChecked())
         self.settings.setValue("editor/executable", self.editor_executable.text().strip())
         self.settings.setValue("hotkeys/swap_rating_and_color", self.swap_rating_color.isChecked())
@@ -4385,7 +4622,7 @@ class Workspace(QMainWindow):
         self.expanded_series: set[Path] = set()
         self.photo_details: dict[str, dict] = {}
         self.image_embeddings: dict[str, bytes] = {}
-        self.settings = QSettings(APP_NAME, APP_NAME)
+        self.settings = _application_settings()
         self.destination_paths_provider: Callable[[], list[Path]] | None = None
 
         # ShotSync cloud integration. The key is remembered between launches
@@ -4509,6 +4746,7 @@ class Workspace(QMainWindow):
         self.full_view.faceFilterClearRequested.connect(self._clear_face_search)
         self.full_view.seriesToggleRequested.connect(self._toggle_grid_series)
         self.full_view.quickMarkRequested.connect(self._apply_quick_mark)
+        self.full_view.markIndicatorRequested.connect(self._toggle_full_view_mark_indicator)
         self.full_view.quickMarkConfigured.connect(self._configure_quick_mark)
         self.full_view.autoAdvanceChanged.connect(self._set_auto_advance)
         self.full_view.set_quick_mark(*self.quick_mark)
@@ -5516,16 +5754,17 @@ class Workspace(QMainWindow):
             editor.hide()
             editor.deleteLater()
 
-    def _create_new_folder(self) -> None:
-        """Создать новую папку в текущей директории с inline-редактированием."""
-        if not self.current_dir:
+    def _create_new_folder(self, parent_dir: Path | None = None) -> None:
+        """Создать новую папку в указанной или текущей директории."""
+        parent_dir = parent_dir or self.current_dir
+        if not parent_dir:
             return
 
         # Создаем временное имя для папки
         i = 1
         while True:
             temp_name = f"Новая папка {i}"
-            temp_path = self.current_dir / temp_name
+            temp_path = parent_dir / temp_name
             if not temp_path.exists():
                 break
             i += 1
@@ -5534,7 +5773,7 @@ class Workspace(QMainWindow):
             # Устанавливаем путь к новой папке в модели ПЕРЕД ее созданием
             self.dir_model._new_folder_path = temp_path
 
-            parent_index = self.dir_model.index(str(self.current_dir))
+            parent_index = self.dir_model.index(str(parent_dir))
             if not parent_index.isValid():
                 raise OSError("Текущая директория еще не готова в модели дерева.")
 
@@ -5684,7 +5923,15 @@ class Workspace(QMainWindow):
             return
         self.dir_tree.setCurrentIndex(index)
         menu = QMenu(self.dir_tree)
+        create = menu.addAction("Создать папку")
+        create.setIcon(_sidebar_tool_icon("new-folder"))
+        create.triggered.connect(
+            lambda _checked=False, target=path: QTimer.singleShot(
+                0, lambda: self._create_new_folder(target)
+            )
+        )
         rename = menu.addAction("Переименовать")
+        rename.setIcon(_fomantic_icon("edit", 13))
         rename.triggered.connect(
             lambda _checked=False, target=path: QTimer.singleShot(
                 0, lambda: self._begin_directory_inline_rename(target)
@@ -7084,7 +7331,10 @@ class Workspace(QMainWindow):
         self._refresh_shotsync_tab_indicator()
         self._refresh_shotsync_current_shooting()
         self._restore_series_mode(directory)
-        self._pending_folder_grid_context = self._load_folder_grid_context(directory)
+        # A folder change starts navigation from the beginning.  Do not carry
+        # the remembered grid cursor/scroll position into the newly opened
+        # folder.
+        self._pending_folder_grid_context = None if switching_directory else self._load_folder_grid_context(directory)
         self.settings.setValue("last_directory", str(directory))
         self.setWindowTitle(_workspace_title(directory))
         self.all_paths = []
@@ -7145,6 +7395,7 @@ class Workspace(QMainWindow):
     def _restore_folder_grid_context(self) -> None:
         context = self._pending_folder_grid_context
         if context is None:
+            self._reset_grid_cursor()
             return
         self._pending_folder_grid_context = None
         selected_names, scroll_value = context
@@ -7155,6 +7406,13 @@ class Workspace(QMainWindow):
                 item.setSelected(True)
         scroll_bar = self.grid.verticalScrollBar()
         scroll_bar.setValue(min(scroll_value, scroll_bar.maximum()))
+
+    def _reset_grid_cursor(self) -> None:
+        """Start grid navigation at the first item in the current folder."""
+        if self.grid.count() == 0:
+            return
+        self.grid.setCurrentRow(0)
+        self.grid.scrollToTop()
 
     def _restore_series_mode(self, directory: Path) -> None:
         enabled = self.settings.value(self._series_mode_setting_key(directory), True, bool)
@@ -7358,11 +7616,16 @@ class Workspace(QMainWindow):
         hint.setWordWrap(True)
         hint.setFixedWidth(270)
         layout.addWidget(hint)
-        start = QPushButton("Обработать серии и лица")
-        start.setObjectName("toolbarPopupPrimaryButton")
-        start.setEnabled(self.ai_analysis_available)
-        start.clicked.connect(lambda: (menu.close(), self._start_ai_analysis()))
-        layout.addWidget(start)
+        if self.ai_analysis_available:
+            start = QPushButton("Обработать серии и лица")
+            start.setObjectName("toolbarPopupPrimaryButton")
+            start.clicked.connect(lambda: (menu.close(), self._start_ai_analysis()))
+            layout.addWidget(start)
+        elif self.ai_pipeline.pending_count() == 0:
+            complete = QLabel("В текущей папке все фото уже обработаны.")
+            complete.setObjectName("toolbarPopupHint")
+            complete.setWordWrap(True)
+            layout.addWidget(complete)
 
         action = QWidgetAction(menu)
         action.setDefaultWidget(content)
@@ -8430,6 +8693,16 @@ class Workspace(QMainWindow):
             return
         current = self.photo_details.get(paths[0].name, {}).get(kind)
         self._update_selection(**{kind: None if current == value else value})
+
+    def _toggle_full_view_mark_indicator(self) -> None:
+        """Apply M on an unmarked photo, or clear every mark on the next click."""
+        if self.current_path is None or self.stack.currentWidget() is not self.full_view:
+            return
+        detail = self.photo_details.get(self.current_path.name, {})
+        if int(detail.get("rating") or 0) > 0 or detail.get("color_label"):
+            self._update_selection(rating=None, color_label="")
+            return
+        self._apply_quick_mark()
 
     def _load_face_sets(self) -> list[dict]:
         """Load globally saved people independently of the current folder cache."""
@@ -9540,7 +9813,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, open_target: Path | None = None) -> None:
         super().__init__()
-        self.settings = QSettings(APP_NAME, APP_NAME)
+        self.settings = _application_settings()
         self._update_check_running = False
         self._update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="update-check")
         self.setWindowTitle(APP_NAME)
@@ -9594,6 +9867,14 @@ class MainWindow(QMainWindow):
         settings_button.setToolTip("Настройки")
         settings_button.clicked.connect(self._show_settings)
         title_layout.addWidget(settings_button)
+        help_button = QToolButton()
+        help_button.setObjectName("settingsTitleAction")
+        help_button.setIcon(_fomantic_icon("help", 18, "#c9c9c9"))
+        help_button.setIconSize(QSize(24, 24))
+        help_button.setFixedSize(34, 34)
+        help_button.setToolTip("Помощь")
+        help_button.clicked.connect(self._show_help_menu)
+        title_layout.addWidget(help_button)
         for icon, tooltip, callback in (
             ("minimize", "Свернуть", self.showMinimized),
             ("maximize", "Развернуть", self._toggle_maximized),
@@ -9766,6 +10047,8 @@ class MainWindow(QMainWindow):
             workspace._set_code_replacements,
             workspace._show_shotsync_login,
             lambda: self._check_for_updates(interactive=True),
+            cache_size,
+            self._clear_all_caches,
             self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -9774,8 +10057,57 @@ class MainWindow(QMainWindow):
                 if isinstance(candidate, Workspace):
                     candidate._reload_hotkeys()
                     candidate._refresh_status_panel()
+                    candidate.full_view.refresh_mark_indicator()
         if workspace.shotsync_client.has_key():
             workspace._sync_code_replacements()
+
+    def _clear_all_caches(self) -> None:
+        """Close active cache databases before removing their files."""
+        for index in range(self.workspace_stack.count()):
+            workspace = self.workspace_stack.widget(index)
+            if not isinstance(workspace, Workspace):
+                continue
+            workspace._abandon_preview_decode_work()
+            workspace._flush_folder_cache(wait=True, close=True)
+            workspace.folder_cache = None
+            workspace.cache_ready = False
+            workspace.memory_cache.clear()
+            workspace.thumbnail_cache.clear()
+        clear_cache()
+        for index in range(self.workspace_stack.count()):
+            workspace = self.workspace_stack.widget(index)
+            if isinstance(workspace, Workspace) and workspace.current_dir.is_dir():
+                workspace.load_directory(workspace.current_dir)
+
+    def _show_help_menu(self) -> None:
+        menu = QMenu(self.sender() if isinstance(self.sender(), QWidget) else self)
+        menu.setObjectName("helpPopup")
+        content = QWidget(menu)
+        content.setObjectName("helpPopupContent")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(8)
+
+        title = QLabel("Помощь")
+        title.setObjectName("helpPopupTitle")
+        layout.addWidget(title)
+
+        online = QPushButton("Онлайн-справка")
+        online.setObjectName("helpPopupPrimaryButton")
+        online.clicked.connect(lambda: (menu.close(), webbrowser.open("https://shotsync.ru/help/s/kontrolka/")))
+        layout.addWidget(online)
+
+        hotkeys = QPushButton("Горячие клавиши")
+        hotkeys.setObjectName("helpPopupButton")
+        hotkeys.clicked.connect(lambda: (menu.close(), HelpDialog(self.settings, self).exec()))
+        layout.addWidget(hotkeys)
+
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(content)
+        menu.addAction(action)
+        button = self.sender()
+        if isinstance(button, QToolButton):
+            menu.exec(button.mapToGlobal(QPoint(0, button.height())))
 
     def _select_relative_workspace(self, step: int) -> None:
         count = self.tabs.count()
@@ -10041,6 +10373,80 @@ def apply_theme(app: QApplication) -> None:
             background: #202020;
             border: 1px solid #4a4a4a;
         }
+        QDialog#helpDialog {
+            background: #202020;
+            border: 1px solid #4a4a4a;
+        }
+        QLabel#helpDialogTitle {
+            color: #f1f1f1;
+            font-size: 20px;
+            font-weight: 700;
+        }
+        QLabel#helpDialogHint {
+            color: #aeb7c2;
+            font-size: 12px;
+            padding-bottom: 4px;
+        }
+        QTableWidget#helpHotkeysTable {
+            background: #181818;
+            alternate-background-color: #202020;
+            border: 1px solid #3d3d3d;
+            border-radius: 7px;
+            color: #e5e5e5;
+            gridline-color: #303030;
+            outline: 0;
+            font-size: 12px;
+        }
+        QTableWidget#helpHotkeysTable QHeaderView::section {
+            background: #2b2b2b;
+            border: 0;
+            border-bottom: 1px solid #454545;
+            color: #aeb7c2;
+            font-weight: 600;
+            padding: 7px 9px;
+        }
+        QTableWidget#helpHotkeysTable::item {
+            padding: 6px 9px;
+        }
+        QPushButton#helpDialogCloseButton {
+            min-width: 90px;
+            min-height: 30px;
+            border: 1px solid #4c4c4c;
+            border-radius: 5px;
+            background: #3a3a3a;
+            color: #ededed;
+        }
+        QPushButton#helpDialogCloseButton:hover { background: #4a4a4a; }
+        QMenu#helpPopup {
+            background: #292929;
+            border: 1px solid #5a5a5a;
+            border-radius: 8px;
+            padding: 0;
+        }
+        QWidget#helpPopupContent, QWidget#helpPopupContent QLabel {
+            background: transparent;
+        }
+        QLabel#helpPopupTitle {
+            color: #f2f2f2;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        QPushButton#helpPopupPrimaryButton, QPushButton#helpPopupButton {
+            min-height: 30px;
+            padding: 4px 10px;
+            border: 1px solid #4c4c4c;
+            border-radius: 5px;
+            color: #ffffff;
+            text-align: left;
+        }
+        QPushButton#helpPopupPrimaryButton {
+            background: #315b80;
+            border-color: #79aaff;
+            font-weight: 600;
+        }
+        QPushButton#helpPopupPrimaryButton:hover { background: #3d6f9d; }
+        QPushButton#helpPopupButton { background: #3a3a3a; color: #ededed; }
+        QPushButton#helpPopupButton:hover { background: #4a4a4a; }
         QDialog#quickTransferDialog {
             background: #1d2128;
             border: 1px solid #4a6380;
@@ -11191,6 +11597,16 @@ def apply_theme(app: QApplication) -> None:
             padding: 3px 7px;
             font-size: 12px;
         }
+        QToolButton#fullViewMarkIndicator {
+            border: 1px solid rgba(255, 255, 255, 0.24);
+            border-radius: 22px;
+            color: #ffffff;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        QToolButton#fullViewMarkIndicator:hover {
+            border-color: rgba(255, 255, 255, 0.6);
+        }
         QLabel#overlayLabel {
             background: #252525;
             border: 0;
@@ -11282,7 +11698,7 @@ def apply_theme(app: QApplication) -> None:
             color: #e1e1e1;
             border: 1px solid #111111;
             border-radius: 0;
-            padding: 2px 12px;
+            padding: 0 7px;
         }
         QListWidget#photoStrip {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #373737, stop:1 #2a2a2a);

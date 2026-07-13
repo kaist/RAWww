@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import sqlite3
 import threading
 import time
@@ -11,10 +12,12 @@ from pathlib import Path
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QStandardPaths
 from PySide6.QtGui import QImage
 
+from .runtime_paths import PORTABLE, work_path
+
 from .imaging import DecodedImage, PixelImage, decode_pixels, pixel_to_decoded
 
 
-CACHE_APP_DIRECTORY = "Контролька"
+CACHE_APP_DIRECTORY = "ctrlka"
 CACHE_DIRECTORY = "folder-caches"
 DISK_JPEG_QUALITY = 88
 SQLITE_PAGE_SIZE = 32 * 1024
@@ -575,6 +578,8 @@ def cache_root() -> Path:
     # GenericDataLocation deliberately does not include Qt's application name.
     # That name changes between `uv run`, an installed console script, and a
     # packaged executable, whereas the cache location must stay stable.
+    if PORTABLE:
+        return work_path() / "cache" / CACHE_DIRECTORY
     location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
     if location:
         return Path(location) / CACHE_APP_DIRECTORY / "cache" / CACHE_DIRECTORY
@@ -598,6 +603,36 @@ def remove_folder_cache(folder: Path, *, cache_root: Path | None = None) -> None
     path = cache_path(folder, cache_root)
     for suffix in ("", "-wal", "-shm"):
         Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
+def cache_size(root: Path | None = None) -> int:
+    """Return the size of all disposable cache files in bytes."""
+    root = root or cache_root()
+    if not root.is_dir():
+        return 0
+    total = 0
+    for path in root.rglob("*"):
+        if path.is_file():
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def clear_cache(root: Path | None = None) -> None:
+    """Remove every disposable folder cache while keeping the cache root."""
+    root = root or cache_root()
+    if not root.is_dir():
+        return
+    for path in root.iterdir():
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except FileNotFoundError:
+            continue
 
 
 def relocate_folder_caches(old_folder: Path, new_folder: Path, *, cache_dir: Path | None = None) -> int:

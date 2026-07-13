@@ -1,0 +1,98 @@
+name: Build desktop packages
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*", "*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows installer
+            os: windows-latest
+            artifact: ctrlka-windows
+          - name: macOS installer
+            os: macos-14
+            artifact: ctrlka-macos
+          - name: Linux AppImage
+            os: ubuntu-22.04
+            artifact: ctrlka-linux
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync
+      - name: Build PyInstaller bundle
+        run: uv run python scripts/build_pyinstaller.py
+
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          iscc installer/ctrlka.iss
+
+      - name: Build macOS DMG
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p "dist/ctrlka.app/Contents/MacOS"
+          cp -R dist/ctrlka/. "dist/ctrlka.app/Contents/MacOS/"
+          cat > "dist/ctrlka.app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleExecutable</key><string>ctrlka</string>
+          <key>CFBundleIdentifier</key><string>ru.ctrlka.app</string>
+          <key>CFBundleName</key><string>Контролька</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleVersion</key><string>0.1.0</string>
+          </dict></plist>
+          PLIST
+          chmod +x "dist/ctrlka.app/Contents/MacOS/ctrlka"
+          hdiutil create -volname Контролька -srcfolder "dist/ctrlka.app" -ov -format UDZO "dist/ctrlka-macos.dmg"
+
+      - name: Build Linux AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          cp -R dist/ctrlka/. AppDir/usr/bin/
+          cp src/rawww/assets/ctrlka-icon.png AppDir/usr/share/icons/hicolor/256x256/apps/ctrlka.png
+          cat > AppDir/usr/share/applications/ctrlka.desktop <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Контролька
+          Exec=ctrlka
+          Icon=ctrlka
+          Categories=Graphics;Photography;
+          DESKTOP
+          cat > AppDir/AppRun <<'APPRUN'
+          #!/bin/sh
+          exec "$(dirname "$0")/usr/bin/ctrlka" "$@"
+          APPRUN
+          chmod +x AppDir/AppRun
+          curl -L --fail -o appimagetool.AppImage https://github.com/AppImage/appimagetool/releases/latest/download/appimagetool-x86_64.AppImage
+          chmod +x appimagetool.AppImage
+          ARCH=x86_64 ./appimagetool.AppImage AppDir dist/ctrlka-linux.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/installer/*
+            dist/*.dmg
+            dist/*.AppImage
+          if-no-files-found: error
