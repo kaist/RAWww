@@ -31,10 +31,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install "PySide6==${PYSIDE_VERSION}" jinja2 pkginfo tqdm buildozer cython
           sudo apt-get update
+          # Full dependency set for the python-for-android native build so we
+          # stop hitting missing-package failures one at a time:
+          #  * autotools stack (+ libltdl-dev, gettext/autopoint, texinfo) for
+          #    libffi/openssl autoreconf steps;
+          #  * host -dev libs used by the CPython recipe (bzip2/lzma/sqlite/
+          #    readline/gdbm/uuid) plus ffi/ssl/ncurses/zlib;
+          #  * git/patch/patchelf/cmake/ccache used across recipes and packaging.
           sudo apt-get install -y --no-install-recommends \
-            autoconf automake libtool libtool-bin pkg-config \
+            autoconf automake libtool libtool-bin libltdl-dev pkg-config \
+            gettext autopoint texinfo \
+            build-essential ccache cmake git patch patchelf \
             zlib1g-dev libncurses-dev libffi-dev libssl-dev \
-            build-essential ccache unzip zip
+            libbz2-dev liblzma-dev libsqlite3-dev libreadline-dev \
+            libgdbm-dev uuid-dev \
+            unzip zip
 
       - name: Download Android Qt wheels
         run: |
