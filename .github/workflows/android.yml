@@ -45,6 +45,16 @@ jobs:
           curl -fSL -o "wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
             "${base}/shiboken6/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
 
+      - name: Download Android NDK
+        run: |
+          # Qt 6.11 targets NDK r26b. The config phase of pyside6-android-deploy
+          # needs the NDK before buildozer's own download runs, so fetch it here
+          # and pass it explicitly via --ndk-path.
+          curl -fSL -o ndk.zip \
+            "https://dl.google.com/android/repository/android-ndk-r26b-linux.zip"
+          unzip -q ndk.zip
+          echo "NDK_PATH=$PWD/android-ndk-r26b" >> "$GITHUB_ENV"
+
       - name: Assemble mobile project
         run: |
           mkdir -p build
@@ -68,6 +78,7 @@ jobs:
           pyside6-android-deploy -f -v \
             --wheel-pyside  "../wheels/pyside6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
             --wheel-shiboken "../wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
+            --ndk-path "${NDK_PATH}" \
             -c pysidedeploy.spec
 
       - name: Upload APK
