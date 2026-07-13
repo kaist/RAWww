@@ -981,6 +981,24 @@ def apply_theme(app: QApplication) -> None:
             padding-left: 5px;
             padding-right: 3px;
         }
+        QWidget#viewerFiltersPanel QComboBox QAbstractItemView {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #515151, stop:1 #404040);
+            border-color: #1b1b1b;
+            color: #ececec;
+            selection-background-color: #606060;
+            selection-color: #ffffff;
+            font-size: 10px;
+            outline: 0;
+        }
+        QWidget#viewerFiltersPanel QComboBox QAbstractItemView::item {
+            min-height: 21px;
+            padding-left: 5px;
+            padding-right: 5px;
+        }
+        QWidget#viewerFiltersPanel QComboBox QAbstractItemView::item:hover {
+            background: #565656;
+        }
         QWidget#viewerFiltersPanel QLineEdit {
             background: #303030;
             padding-left: 7px;
