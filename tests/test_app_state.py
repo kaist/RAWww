@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
 
-from rawww.app import FullView, Workspace
+from rawww.app import FullView, MainWindow, Workspace
 
 
 class _Settings:
@@ -57,9 +57,20 @@ class AppStateTests(unittest.TestCase):
         self.assertFalse(workspace.isWindow())
         self.assertFalse(workspace.full_view.isWindow())
         self.assertFalse(workspace.full_view.video_controls.isWindow())
+        self.assertIsNone(workspace.shotsync_login_dialog)
         workspace.close()
         workspace.deleteLater()
         parent.deleteLater()
+
+    def test_startup_has_no_hidden_app_owned_top_level_windows(self) -> None:
+        window = MainWindow()
+        top_level_names = {widget.objectName() for widget in QApplication.topLevelWidgets()}
+
+        self.assertNotIn("overlayLabel", top_level_names)
+        self.assertNotIn("shotsyncLoginDialog", top_level_names)
+        self.assertNotIn("codeSuggestionPopup", top_level_names)
+        window.close()
+        window.deleteLater()
 
     def test_deleted_viewer_toast_is_not_reused(self) -> None:
         host = _ToastHost()

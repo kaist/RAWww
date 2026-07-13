@@ -1133,13 +1133,7 @@ class RichCodeCommentEdit(QTextEdit):
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self._completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
         self._completer.activated.connect(self._insert_code)
-        self._suggestion_popup = QListWidget(self)
-        self._suggestion_popup.setWindowFlags(Qt.WindowType.ToolTip)
-        self._suggestion_popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._suggestion_popup.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._suggestion_popup.setObjectName("codeSuggestionPopup")
-        self._suggestion_popup.itemClicked.connect(lambda item: self._insert_code(item.text()))
-        self._suggestion_popup.hide()
+        self._suggestion_popup: QListWidget | None = None
         self._token_renderer = CodeTokenObject(self)
         self.document().documentLayout().registerHandler(_CODE_TOKEN_OBJECT, self._token_renderer)
         self.setAcceptRichText(False)
@@ -1247,25 +1241,45 @@ class RichCodeCommentEdit(QTextEdit):
     def _offer_codes(self) -> None:
         before = self.text()[:self._raw_cursor()]
         start, opener = max((before.rfind(mark), mark) for mark in ("{", "\\", "=", "@"))
-        if start < 0: self._suggestion_popup.hide(); return
+        if start < 0:
+            self._hide_suggestions()
+            return
         fragment = before[start + 1:]
         if (opener == "@" and fragment and not fragment.replace("_", "a").isalnum()) or (opener != "@" and ("}" if opener == "{" else opener) in fragment):
-            self._suggestion_popup.hide(); return
+            self._hide_suggestions()
+            return
         if opener == "@" and fragment in self._lookup:
-            self._suggestion_popup.hide(); return
+            self._hide_suggestions()
+            return
         self._start, self._opener = start, opener
         self._labels = {f"{code} — {value}": code for code, value in self._lookup.items()}
         labels = [label for label in self._labels if fragment.casefold() in label.casefold()]
-        self._suggestion_popup.clear()
-        self._suggestion_popup.addItems(labels)
         if not labels:
-            self._suggestion_popup.hide()
+            self._hide_suggestions()
             return
-        self._suggestion_popup.setCurrentRow(0)
-        self._suggestion_popup.setFixedWidth(max(240, self.width()))
-        self._suggestion_popup.setFixedHeight(min(180, self._suggestion_popup.sizeHintForRow(0) * len(labels) + 4))
-        self._suggestion_popup.move(self.mapToGlobal(self.cursorRect().bottomLeft()))
-        self._suggestion_popup.show()
+        popup = self._ensure_suggestion_popup()
+        popup.clear()
+        popup.addItems(labels)
+        popup.setCurrentRow(0)
+        popup.setFixedWidth(max(240, self.width()))
+        popup.setFixedHeight(min(180, popup.sizeHintForRow(0) * len(labels) + 4))
+        popup.move(self.mapToGlobal(self.cursorRect().bottomLeft()))
+        popup.show()
+
+    def _ensure_suggestion_popup(self) -> QListWidget:
+        if self._suggestion_popup is None:
+            popup = QListWidget(self)
+            popup.setWindowFlags(Qt.WindowType.ToolTip)
+            popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            popup.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            popup.setObjectName("codeSuggestionPopup")
+            popup.itemClicked.connect(lambda item: self._insert_code(item.text()))
+            self._suggestion_popup = popup
+        return self._suggestion_popup
+
+    def _hide_suggestions(self) -> None:
+        if self._suggestion_popup is not None:
+            self._suggestion_popup.hide()
 
     def _insert_code(self, label: str) -> None:
         code = self._labels.get(label)
@@ -1274,26 +1288,27 @@ class RichCodeCommentEdit(QTextEdit):
         close = "}" if self._opener == "{" else ("" if self._opener == "@" else self._opener)
         insertion = f"{self._opener}{code}{close}"
         self._render(raw[:self._start] + insertion + raw[end:], self._start + len(insertion))
-        self._suggestion_popup.hide()
+        self._hide_suggestions()
         self._completer.popup().hide()
         self.setFocus(Qt.FocusReason.OtherFocusReason)
         # QCompleter releases its popup focus after the activation callback.
         QTimer.singleShot(0, lambda: self.setFocus(Qt.FocusReason.OtherFocusReason))
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        if self._suggestion_popup.isVisible():
+        popup = self._suggestion_popup
+        if popup is not None and popup.isVisible():
             if event.key() == Qt.Key.Key_Down:
-                self._suggestion_popup.setCurrentRow(min(self._suggestion_popup.count() - 1, self._suggestion_popup.currentRow() + 1)); event.accept(); return
+                popup.setCurrentRow(min(popup.count() - 1, popup.currentRow() + 1)); event.accept(); return
             if event.key() == Qt.Key.Key_Up:
-                self._suggestion_popup.setCurrentRow(max(0, self._suggestion_popup.currentRow() - 1)); event.accept(); return
+                popup.setCurrentRow(max(0, popup.currentRow() - 1)); event.accept(); return
             if event.key() == Qt.Key.Key_Tab:
-                item = self._suggestion_popup.currentItem()
+                item = popup.currentItem()
                 if item: self._insert_code(item.text())
                 event.accept(); return
             if event.key() == Qt.Key.Key_Escape:
-                self._suggestion_popup.hide(); event.accept(); return
+                popup.hide(); event.accept(); return
             if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
-                self._suggestion_popup.hide()
+                popup.hide()
         if event.key() == Qt.Key.Key_Escape:
             dialog = self.window()
             if isinstance(dialog, QDialog):
@@ -1330,7 +1345,7 @@ class RichCodeCommentEdit(QTextEdit):
     def focusOutEvent(self, event) -> None:  # noqa: N802
         super().focusOutEvent(event)
         self._completer.popup().hide()
-        self._suggestion_popup.hide()
+        self._hide_suggestions()
         self.editingFinished.emit()
 
 
@@ -1622,7 +1637,7 @@ class FullView(QFrame):
         self.video_controls_layout.setSpacing(7)
         self.video_controls.hide()
 
-        self.info_label = QLabel()
+        self.info_label = QLabel(self)
         self.info_label.setObjectName("overlayLabel")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
@@ -3176,8 +3191,7 @@ class Workspace(QMainWindow):
         self._deleting_shotsync_folders: dict[int, Path] = {}
         self.shotsync_client = ShotSyncClient(SHOTSYNC_BASE_URL, self)
         self.code_replacement_sets: list[dict] = self._local_code_replacement_sets()
-        self.shotsync_login_dialog = ShotSyncLoginDialog(self)
-        self.shotsync_login_dialog.loginSubmitted.connect(self._shotsync_login)
+        self.shotsync_login_dialog: ShotSyncLoginDialog | None = None
         self.shotsync_client.set_api_key(self.settings.value("shotsync/api_key", "", str))
         self.shotsync_client.loginSucceeded.connect(self._shotsync_login_succeeded)
         self.shotsync_client.loginFailed.connect(self._shotsync_login_failed)
@@ -5012,8 +5026,16 @@ class Workspace(QMainWindow):
         """Open the shared sign-in form and return whether it completed."""
         if self.shotsync_client.has_key():
             return True
-        self.shotsync_login_dialog.reset()
-        return self.shotsync_login_dialog.exec() == QDialog.DialogCode.Accepted
+        dialog = self._ensure_shotsync_login_dialog()
+        dialog.reset()
+        return dialog.exec() == QDialog.DialogCode.Accepted
+
+    def _ensure_shotsync_login_dialog(self) -> ShotSyncLoginDialog:
+        if self.shotsync_login_dialog is None:
+            dialog = ShotSyncLoginDialog(self)
+            dialog.loginSubmitted.connect(self._shotsync_login)
+            self.shotsync_login_dialog = dialog
+        return self.shotsync_login_dialog
 
     def _shotsync_logout(self) -> None:
         self.shotsync_client.logout()
@@ -5028,7 +5050,8 @@ class Workspace(QMainWindow):
         self._shotsync_checked = True
         self.settings.setValue("shotsync/api_key", key)
         self.shotsync.set_api_key(key)
-        self.shotsync_login_dialog.login_succeeded()
+        if self.shotsync_login_dialog is not None:
+            self.shotsync_login_dialog.login_succeeded()
         self.shotsync_panel.show_logged_in(user)
         avatar_url = user.get("avatar_url")
         if avatar_url:
@@ -5039,7 +5062,8 @@ class Workspace(QMainWindow):
         self._refresh_shotsync_shortcuts()
 
     def _shotsync_login_failed(self, error: str) -> None:
-        self.shotsync_login_dialog.show_error(error)
+        if self.shotsync_login_dialog is not None:
+            self.shotsync_login_dialog.show_error(error)
         if self.shotsync_active:
             self.shotsync_panel.show_login_error(error)
 
