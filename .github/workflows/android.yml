@@ -32,7 +32,8 @@ jobs:
           pip install "PySide6==${PYSIDE_VERSION}" jinja2 pkginfo tqdm buildozer cython
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            autoconf automake libtool libtool-bin pkg-config \
+            autoconf automake libtool libtool-bin libltdl-dev pkg-config \
+            gettext autopoint texinfo \
             zlib1g-dev libncurses-dev libffi-dev libssl-dev \
             build-essential ccache unzip zip
 
