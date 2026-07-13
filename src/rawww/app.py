@@ -146,8 +146,11 @@ SETTINGS_NAME = "ctrlka"
 def _application_settings() -> QSettings:
     if PORTABLE:
         settings_path = work_path() / "settings"
-        QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(settings_path))
-        return QSettings(SETTINGS_NAME, SETTINGS_NAME, QSettings.Format.IniFormat)
+        settings_path.mkdir(parents=True, exist_ok=True)
+        return QSettings(
+            str(settings_path / f"{SETTINGS_NAME}.ini"),
+            QSettings.Format.IniFormat,
+        )
     return QSettings(SETTINGS_NAME, SETTINGS_NAME)
 
 
