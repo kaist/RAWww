@@ -3241,6 +3241,7 @@ class Workspace(QMainWindow):
         self._metadata_pipeline = None
         self.ai_progress_total = 0
         self.preview_progress_total = 0
+        self._auto_ai_generation = -1
         # ShotSync upload progress, shown in the shared top status bar.
         self._upload_progress: tuple[int, int] | None = None
         self._receive_progress: tuple[int, int, int] | None = None
@@ -6139,6 +6140,40 @@ class Workspace(QMainWindow):
         self.ai_progress_timer.start()
         self._refresh_status_panel()
 
+    def _maybe_auto_start_ai_after_previews(self) -> bool:
+        """Auto-run AI once a view's previews are ready, when the option is on.
+
+        Fires at most once per view generation, so re-scanning the folder after
+        photos are added triggers it again while it never re-runs mid-analysis.
+        Returns True when analysis was started.
+        """
+        if self.closing or self._auto_ai_generation == self.view_generation:
+            return False
+        if not self.settings.value("ai/auto_after_previews", False, bool):
+            return False
+        if (
+            not self.workspace_active
+            or not self.cache_ready
+            or self.folder_cache is None
+            or self.preview_progress_total <= 0
+            or self.thumb_timer.isActive()
+            or any(size == THUMB_SIZE for _, size in self.pending)
+        ):
+            return False
+        if self._ai_pipeline is not None and self._ai_pipeline.pending_count() != 0:
+            return False
+        # Previews for this view are complete; only attempt the auto-run once.
+        self._auto_ai_generation = self.view_generation
+        analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
+        if not analysis_paths:
+            return False
+        embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
+        face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
+        if not (set(embedding_missing) | set(face_missing)):
+            return False
+        self._start_ai_analysis()
+        return self.ai_pipeline.pending_count() > 0
+
     def _show_ai_menu(self) -> None:
         """Show the entry point for the AI analysis already available in the workspace."""
         menu = QMenu(self.ai_button)
@@ -6717,6 +6752,8 @@ class Workspace(QMainWindow):
             self._set_taskbar_progress(loaded, self.preview_progress_total)
             return
 
+        if self._maybe_auto_start_ai_after_previews():
+            return
         self.status_progress.hide()
         self._set_taskbar_progress(0, 0)
 
