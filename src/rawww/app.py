@@ -95,6 +95,7 @@ from .dialogs import (
     HelpDialog,
     QuickTransferDialog,
     SettingsDialog,
+    ShrinkJpegDialog,
 )
 from .workspace import WorkspaceRequest, WorkspaceState
 from .xmp import build_xmp, write_sidecar
@@ -191,7 +192,14 @@ def _resize_export_worker(job: tuple[str, str, int, bool, int, bool, float, int,
             transform = transforms.get(int(raw_orientation or 1))
             if transform is not None:
                 image = image.transpose(transform)
-        exif = image.getexif().tobytes() if keep_exif else b""
+        # exif_transpose already re-serialised info["exif"] without the
+        # orientation tag, so it keeps sub-IFDs (GPS, maker notes) that a bare
+        # getexif().tobytes() would drop. The ICC profile always travels along.
+        if keep_exif:
+            exif = image.info.get("exif") or image.getexif().tobytes()
+        else:
+            exif = b""
+        icc_profile = image.info.get("icc_profile")
         image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
         if sharpen:
             image = ImageEnhance.Sharpness(image).enhance(sharpen_amount / 100)
@@ -201,12 +209,51 @@ def _resize_export_worker(job: tuple[str, str, int, bool, int, bool, float, int,
         options = {"format": "JPEG", "quality": 95, "subsampling": 0}
         if exif:
             options["exif"] = exif
+        if icc_profile:
+            options["icc_profile"] = icc_profile
         image.save(temporary, **options)
         os.replace(temporary, output)
         return source_text, output_text, None
     except Exception as exc:
         temporary.unlink(missing_ok=True)
         return source_text, output_text, str(exc)
+
+
+def _recompress_jpeg_worker(job: tuple[str, int, bool]) -> tuple[str, int, int, str | None]:
+    """Re-encode a JPEG in place at a lower quality, keeping ICC and (optionally) EXIF."""
+    source_text, quality, keep_exif = job
+    source = Path(source_text)
+    temporary = source.with_name(f".{source.stem}.{uuid4().hex}.tmp")
+    try:
+        from PIL import Image
+
+        original_size = source.stat().st_size
+        with Image.open(source) as opened:
+            opened.load()
+            # Orientation is left untouched: the pixels are not transposed, so
+            # the original EXIF (incl. its orientation tag), ICC and sub-IFDs
+            # stay valid as-is.
+            exif = opened.info.get("exif") if keep_exif else None
+            icc_profile = opened.info.get("icc_profile")
+            image = opened if opened.mode in ("RGB", "L", "CMYK") else opened.convert("RGB")
+            options = {"format": "JPEG", "quality": int(quality), "subsampling": "keep"}
+            if exif:
+                options["exif"] = exif
+            if icc_profile:
+                options["icc_profile"] = icc_profile
+            try:
+                image.save(temporary, **options)
+            except (ValueError, OSError):
+                # "keep" subsampling only works when the source is a JPEG whose
+                # chroma layout Pillow can reuse; fall back to the encoder default.
+                options.pop("subsampling", None)
+                image.save(temporary, **options)
+        new_size = temporary.stat().st_size
+        os.replace(temporary, source)
+        return source_text, original_size, new_size, None
+    except Exception as exc:
+        temporary.unlink(missing_ok=True)
+        return source_text, 0, 0, str(exc)
 
 
 class DecodeBridge(QObject):
@@ -6253,6 +6300,7 @@ class Workspace(QMainWindow):
         for label, icon, callback in (
             ("Групповое переименование", "edit", self._show_batch_rename_dialog),
             ("Групповой резайс", "expand", self._show_batch_resize_dialog),
+            ("Уменьшить JPG", "download", self._show_shrink_jpeg_dialog),
         ):
             button = QPushButton(label)
             button.setObjectName("toolbarPopupUtilityButton")
@@ -6320,6 +6368,56 @@ class Workspace(QMainWindow):
         if any(Path(folder) == self.current_dir for folder in self._shotsync_folder_map().values()):
             return True
         return any(self.shotsync.folder_for(shooting_id) == self.current_dir for shooting_id in self.shotsync.receiving_ids())
+
+    def _folder_jpeg_paths(self) -> list[Path]:
+        """Every JPEG living directly in the current folder, sorted by name."""
+        suffixes = {".jpg", ".jpeg"}
+        return sorted(
+            (
+                path
+                for path in self.current_dir.iterdir()
+                if path.is_file() and path.suffix.lower() in suffixes
+            ),
+            key=lambda item: item.name.casefold(),
+        )
+
+    def _show_shrink_jpeg_dialog(self) -> None:
+        try:
+            paths = self._folder_jpeg_paths()
+        except OSError as exc:
+            QMessageBox.information(self, "Уменьшить JPG", f"Не удалось прочитать папку: {exc}")
+            return
+        if not paths:
+            QMessageBox.information(self, "Уменьшить JPG", "В текущей папке нет JPG-файлов.")
+            return
+        dialog = ShrinkJpegDialog(self.current_dir, len(paths), self.settings, self)
+        dialog.startRequested.connect(lambda options, view=dialog, items=paths: self._start_shrink_jpeg(view, items, options))
+        dialog.exec()
+
+    def _start_shrink_jpeg(self, dialog: ShrinkJpegDialog, paths: list[Path], options: dict) -> None:
+        dialog.set_running(len(paths))
+        jobs = [(str(path), int(options["quality"]), bool(options["keep_exif"])) for path in paths]
+        errors: list[str] = []
+        saved_bytes = 0
+        workers = min(8, max(1, os.cpu_count() or 1), len(jobs))
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_recompress_jpeg_worker, job) for job in jobs]
+            for completed, future in enumerate(as_completed(futures), 1):
+                source, original_size, new_size, error = future.result()
+                if error:
+                    errors.append(f"{Path(source).name}: {error}")
+                else:
+                    saved_bytes += max(0, original_size - new_size)
+                dialog.update_progress(completed, len(jobs))
+        self.folder_change_timer.stop()
+        self.load_directory(self.current_dir)
+        saved_mb = saved_bytes / (1024 * 1024)
+        summary = f"Готово. Сэкономлено {saved_mb:.1f} МБ."
+        if errors:
+            summary = f"Готово с ошибками ({len(errors)}). Сэкономлено {saved_mb:.1f} МБ. {errors[0]}"
+        dialog.status.setText(summary)
+        dialog.cancel_button.setEnabled(True)
+        dialog.cancel_button.setText("Закрыть")
 
     def _show_batch_resize_dialog(self) -> None:
         paths = [path for path in self.view_paths if path.is_file() and is_supported_image(path)]

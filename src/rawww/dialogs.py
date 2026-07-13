@@ -1088,3 +1088,100 @@ class BatchResizeDialog(QDialog):
         self.progress.setValue(value)
         self.progress.setFormat(f"Экспорт: {value}/{total}")
         QApplication.processEvents()
+
+
+class ShrinkJpegDialog(QDialog):
+    """Re-compress every JPEG in the current folder in place at a chosen quality."""
+
+    startRequested = Signal(object)
+
+    def __init__(self, source_dir: Path, count: int, settings: QSettings, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.setObjectName("shrinkJpegDialog")
+        self.setWindowTitle("Уменьшить JPG")
+        self.setModal(True)
+        self.resize(520, 300)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("Уменьшить JPG")
+        title.setObjectName("batchRenameTitle")
+        layout.addWidget(title)
+        hint = QLabel(
+            f"Пересохранит все JPG-файлы в папке «{source_dir.name}» ({count} шт.) "
+            "с выбранным качеством, поверх исходников без подтверждения."
+        )
+        hint.setObjectName("batchRenameHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        quality_row = QHBoxLayout()
+        quality_label = QLabel("Качество")
+        quality_label.setObjectName("batchResizeFieldLabel")
+        quality_row.addWidget(quality_label)
+        self.quality = QSpinBox()
+        self.quality.setObjectName("batchResizeSpin")
+        self.quality.setRange(1, 100)
+        self.quality.setValue(self.settings.value("shrink_jpeg/quality", 85, int))
+        self.quality.setSuffix(" %")
+        quality_row.addWidget(self.quality)
+        quality_row.addStretch(1)
+        layout.addLayout(quality_row)
+
+        options = QFrame()
+        options.setObjectName("batchResizeOptions")
+        options_layout = QVBoxLayout(options)
+        options_layout.setContentsMargins(2, 3, 2, 3)
+        self.keep_exif = SettingsCheckBox("Сохранить EXIF")
+        self.keep_exif.setObjectName("batchResizeOption")
+        self.keep_exif.setChecked(self.settings.value("shrink_jpeg/keep_exif", True, bool))
+        options_layout.addWidget(self.keep_exif)
+        layout.addWidget(options)
+        layout.addStretch(1)
+
+        self.status = QLabel()
+        self.status.setObjectName("batchResizeStatus")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.progress = QProgressBar()
+        self.progress.setObjectName("batchResizeProgress")
+        self.progress.setFixedHeight(0)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.cancel_button = QPushButton("Отмена")
+        self.cancel_button.setObjectName("batchResizeSecondaryButton")
+        self.cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(self.cancel_button)
+        self.start_button = QPushButton("Старт")
+        self.start_button.setObjectName("batchResizePrimaryButton")
+        self.start_button.setIcon(_fomantic_icon("play", 13, "#ffffff"))
+        self.start_button.clicked.connect(self._start)
+        buttons.addWidget(self.start_button)
+        layout.addLayout(buttons)
+
+    def _start(self) -> None:
+        self.settings.setValue("shrink_jpeg/quality", self.quality.value())
+        self.settings.setValue("shrink_jpeg/keep_exif", self.keep_exif.isChecked())
+        self.startRequested.emit({
+            "quality": self.quality.value(),
+            "keep_exif": self.keep_exif.isChecked(),
+        })
+
+    def set_running(self, total: int) -> None:
+        for widget in (self.quality, self.keep_exif, self.start_button, self.cancel_button):
+            widget.setEnabled(False)
+        self.progress.setRange(0, total)
+        self.progress.setValue(0)
+        self.progress.setFixedHeight(20)
+        self.progress.show()
+
+    def update_progress(self, value: int, total: int) -> None:
+        self.progress.setRange(0, total)
+        self.progress.setValue(value)
+        self.progress.setFormat(f"Сжатие: {value}/{total}")
+        QApplication.processEvents()
