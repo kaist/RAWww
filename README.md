@@ -47,7 +47,7 @@ same command-line contract used by file-manager integrations.
 - Back to grid: `Esc`, `Enter`, or `G`.
 - Toggle fullscreen: `F11`.
 - Navigate in full view: arrow keys or space.
-- Collapse the full-view lower panel with `Ctrl+Down`: the first press hides the thumbnail strip, the second hides the metadata/marks bar too. `Ctrl+Up` reverses it step by step. The state is remembered between sessions and both shortcuts can be reassigned in **Settings → Hotkeys**.
+- Collapse the full-view lower panel with `Shift+Down`: the first press hides the thumbnail strip, the second hides the metadata/marks bar too. `Shift+Up` reverses it step by step. The state is remembered between sessions and both shortcuts can be reassigned in **Settings → Hotkeys**.
 - Video files (`.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`) show a captured frame and video badge in the grid. In full view, use Play/Pause and the seek bar; playback uses Qt Multimedia and the system media codecs.
 - Camera WAV notes matching a photo's filename are available for playback when a folder opens. The microphone badge opens the audio player in full view, and hovering the microphone badge in the grid plays the matching WAV without a transcript popup.
 

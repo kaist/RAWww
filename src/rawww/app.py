@@ -2144,7 +2144,12 @@ class FullView(QFrame):
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.Resize and obj is self.video_controls.parentWidget():
+            # Collapsing the strip/metadata panel resizes the media panel without
+            # resizing the frame, so re-pin every floating overlay to its edge.
             self._position_video_controls()
+            self._position_counter()
+            self._position_face_filter_chip()
+            self._position_mark_indicator()
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -3935,17 +3940,21 @@ class Workspace(QMainWindow):
     def _create_actions(self) -> None:
         self._hotkey_actions: dict[str, QAction] = {}
 
-        def add_hotkey(identifier: str, callback: Callable) -> None:
-            action = QAction(HOTKEY_DEFAULTS[identifier][0], self)
+        def add_hotkey(identifier: str, callback: Callable, target: QWidget | None = None, context: Qt.ShortcutContext | None = None) -> None:
+            host = target if target is not None else self
+            action = QAction(HOTKEY_DEFAULTS[identifier][0], host)
             action.triggered.connect(callback)
-            self.addAction(action)
+            if context is not None:
+                action.setShortcutContext(context)
+            host.addAction(action)
             self._hotkey_actions[identifier] = action
 
         add_hotkey("full_view", self._open_selected)
         add_hotkey("open_in_editor", self._open_in_editor)
         add_hotkey("grid", self.show_grid)
-        add_hotkey("strip_collapse", lambda: self._cycle_full_view_strip(1))
-        add_hotkey("strip_expand", lambda: self._cycle_full_view_strip(-1))
+        # Scoped to the full view so Shift+Arrow keeps extending the grid selection.
+        add_hotkey("strip_collapse", lambda: self.full_view.cycle_strip(1), target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        add_hotkey("strip_expand", lambda: self.full_view.cycle_strip(-1), target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
         # Navigation keys are intentionally not exposed in the preferences.
         escape = QAction("Back", self)
@@ -3971,11 +3980,6 @@ class Workspace(QMainWindow):
     def _reload_hotkeys(self) -> None:
         for identifier, action in self._hotkey_actions.items():
             action.setShortcut(_hotkey_sequence(self.settings, identifier))
-
-    def _cycle_full_view_strip(self, step: int) -> None:
-        """Collapse/expand the full-view lower panel; a no-op outside full view."""
-        if self.stack.currentWidget() is self.full_view:
-            self.full_view.cycle_strip(step)
 
     def _quick_transfer_destinations(self) -> list[Path]:
         """Last used destination first, then open tabs and the remaining history."""
