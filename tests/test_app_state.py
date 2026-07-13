@@ -14,6 +14,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
 
 from rawww.app import FullView, MainWindow, Workspace, _application_settings
+from rawww.theme import apply_theme
 
 
 class _Settings:
@@ -123,6 +124,34 @@ class AppStateTests(unittest.TestCase):
             window.deleteLater()
         finally:
             self.app.removeEventFilter(recorder)
+
+    def test_filter_dropdowns_show_short_lists_without_scrollbars(self) -> None:
+        apply_theme(self.app)
+        window = MainWindow()
+        window.show()
+        self.app.processEvents()
+        workspace = window.workspace_stack.currentWidget()
+        self.assertIsInstance(workspace, Workspace)
+
+        for combo in (
+            workspace.rating_filter,
+            workspace.color_filter,
+            workspace.media_filter,
+            workspace.file_type_filter,
+            workspace.shot_filter,
+            workspace.sort_combo,
+        ):
+            combo.showPopup()
+            self.app.processEvents()
+            self.assertEqual(
+                combo.view().verticalScrollBar().maximum(),
+                0,
+                combo.currentText(),
+            )
+            combo.hidePopup()
+
+        window.close()
+        window.deleteLater()
 
     def test_deleted_viewer_toast_is_not_reused(self) -> None:
         host = _ToastHost()

@@ -2798,6 +2798,18 @@ class FavoritesSplitter(QSplitter):
         return FavoritesSplitterHandle(self.orientation(), self)
 
 
+class FilterComboBox(QComboBox):
+    def showPopup(self) -> None:  # noqa: N802
+        view = self.view()
+        visible_items = min(self.count(), self.maxVisibleItems())
+        content_height = sum(
+            max(0, view.sizeHintForRow(index))
+            for index in range(visible_items)
+        )
+        view.setMinimumHeight(content_height + 2 * view.frameWidth())
+        super().showPopup()
+
+
 class CenteredSearchEdit(QLineEdit):
     """Search field whose leading and clear actions stay vertically centered."""
 
@@ -3745,28 +3757,28 @@ class Workspace(QMainWindow):
         filter_layout.addWidget(filter_icon)
 
         
-        self.rating_filter = QComboBox()
+        self.rating_filter = FilterComboBox()
         self.rating_filter.addItem("Все рейтинги", None)
         self.rating_filter.setItemIcon(0, _fomantic_icon("star", 10, "#a8b0bd"))
         for rating in range(5, 0, -1):
             self.rating_filter.addItem("★" * rating, rating)
             self.rating_filter.setItemIcon(self.rating_filter.count() - 1, _fomantic_icon("star", 10, "#a8b0bd"))
         self.rating_filter.setFixedWidth(118)
-        self.color_filter = QComboBox()
+        self.color_filter = FilterComboBox()
         for label, value in (("Все цвета", None), ("Без цвета", ""), ("Красный", "red"), ("Жёлтый", "yellow"), ("Зелёный", "green"), ("Синий", "blue"), ("Фиолетовый", "purple")):
             self.color_filter.addItem(label, value)
             if value is not None:
                 self.color_filter.setItemIcon(self.color_filter.count() - 1, _color_swatch_icon(value or None))
         self.color_filter.setItemIcon(0, _fomantic_icon("brush", 10, "#a8b0bd"))
         self.color_filter.setFixedWidth(118)
-        self.media_filter = QComboBox()
+        self.media_filter = FilterComboBox()
         for label, value in (("Фото и видео", None), ("Фото", "image"), ("Видео", "video")):
             self.media_filter.addItem(label, value)
         self.media_filter.setItemIcon(0, _fomantic_icon("media", 10, "#a8b0bd"))
         self.media_filter.setItemIcon(1, _fomantic_icon("images", 10, "#a8b0bd"))
         self.media_filter.setItemIcon(2, _fomantic_icon("film", 10, "#a8b0bd"))
         self.media_filter.setFixedWidth(118)
-        self.file_type_filter = QComboBox()
+        self.file_type_filter = FilterComboBox()
         # The combined option is the neutral/default state: it must not hide
         # videos or other supported image formats. The dedicated JPG/RAW
         # options below are the actual file-type filters.
@@ -3776,15 +3788,15 @@ class Workspace(QMainWindow):
         self.file_type_filter.setItemIcon(1, _fomantic_icon("file", 10, "#a8b0bd"))
         self.file_type_filter.setItemIcon(2, _fomantic_icon("camera", 10, "#a8b0bd"))
         self.file_type_filter.setFixedWidth(106)
-        self.camera_filter = QComboBox()
+        self.camera_filter = FilterComboBox()
         self.camera_filter.addItem("Все камеры", None)
         self.camera_filter.setItemIcon(0, _fomantic_icon("images", 10, "#a8b0bd"))
         self.camera_filter.setFixedWidth(132)
-        self.shot_filter = QComboBox()
+        self.shot_filter = FilterComboBox()
         for label, value in (("Все планы", None), ("Крупный", "closeup"), ("Средний", "medium"), ("Общий", "wide"), ("Без лиц", "no_face")):
             self.shot_filter.addItem(label, value)
         self.shot_filter.hide()
-        self.sort_combo = QComboBox()
+        self.sort_combo = FilterComboBox()
         for label, value in (("По имени ↑", "name"), ("По имени ↓", "name_desc"), ("По времени ↑", "time"), ("По времени ↓", "time_desc"), ("По рейтингу", "rating")):
             self.sort_combo.addItem(label, value)
         self.sort_combo.setItemIcon(0, _fomantic_icon("sort", 10, "#a8b0bd"))
