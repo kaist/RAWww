@@ -27,12 +27,24 @@ from __future__ import annotations
 import os
 import runpy
 import sys
+from configparser import ConfigParser
 from pathlib import Path
 
 import PySide6.scripts as _scripts
 
 SCRIPTS_DIR = str(Path(_scripts.__file__).resolve().parent)
 sys.path.insert(0, SCRIPTS_DIR)
+
+# Launcher label, application id and screen orientation applied to the
+# buildozer.spec that pyside6-android-deploy generates. The deploy tool only
+# exposes an ASCII ``title`` (reused verbatim as the p4a package/dist name), so
+# the Cyrillic label and the ru.shotsync.ctrlka id are injected here instead.
+_BUILDOZER_OVERRIDES = {
+    "title": "Контролька",
+    "package.name": "ctrlka",
+    "package.domain": "ru.shotsync",
+    "orientation": "landscape",
+}
 
 # CPython version matching the cp311 PySide6/shiboken6 android wheels.
 PIN_VERSION = os.environ.get("RAWWW_ANDROID_PYTHON", "3.11.9")
@@ -79,8 +91,38 @@ def _install_pin() -> None:
     AndroidConfig.find_recipe_dir = patched
 
 
+def _install_branding() -> None:
+    """Apply the Cyrillic label, application id and orientation to buildozer.spec.
+
+    pyside6-android-deploy writes buildozer.spec from the ASCII ``title`` (and
+    derives ``package.name``/``package.domain`` from it) before invoking
+    buildozer. We hook the build step so the generated spec is rewritten just
+    before buildozer runs, regardless of whether it was freshly generated or
+    reused from a previous run.
+    """
+    from deploy_lib.android import buildozer as _buildozer
+
+    original = _buildozer.Buildozer.create_executable
+
+    def patched(mode):
+        spec = Path.cwd() / "buildozer.spec"
+        if spec.exists():
+            config = ConfigParser(interpolation=None, strict=False, comment_prefixes="#")
+            config.read(spec, encoding="utf-8")
+            if not config.has_section("app"):
+                config.add_section("app")
+            for key, value in _BUILDOZER_OVERRIDES.items():
+                config.set("app", key, value)
+            with spec.open("w", encoding="utf-8") as handle:
+                config.write(handle)
+        return original(mode)
+
+    _buildozer.Buildozer.create_executable = staticmethod(patched)
+
+
 def main() -> None:
     _install_pin()
+    _install_branding()
     script = os.path.join(SCRIPTS_DIR, "android_deploy.py")
     sys.argv = [script] + sys.argv[1:]
     runpy.run_path(script, run_name="__main__")

@@ -1,7 +1,11 @@
 [app]
 
 # Title of your application
-title = RAWww
+# Used by pyside6-android-deploy as the p4a dist/package base name, so it must
+# stay ASCII. The Cyrillic launcher label ("Контролька") and the ru.shotsync.ctrlka
+# application id are applied to the generated buildozer.spec by
+# android_deploy_pinned.py.
+title = ctrlka
 
 # Project root directory. Default: The parent directory of input_file
 project_dir = .
@@ -15,8 +19,8 @@ exec_directory =
 # Path to the project file relative to project_dir
 project_file =
 
-# Application icon
-icon =
+# Application icon (relative to the staged build dir, i.e. build/rawww/...)
+icon = rawww/assets/ctrlka-icon.png
 
 [python]
 
@@ -55,7 +59,10 @@ wheel_pyside =
 wheel_shiboken =
 
 # Plugins to be copied to libs folder of the packaged application. Comma separated
-plugins =
+# Setting this overrides pyside6-android-deploy's auto-detection, so the platform
+# plugin must be listed explicitly. The TLS backend is required for HTTPS/WSS
+# (shotsync.ru login) but is loaded at runtime, so auto-detection misses it.
+plugins = platforms_qtforandroid,tls_qopensslbackend,tls_qcertonlybackend
 
 [nuitka]
 
