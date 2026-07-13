@@ -19,7 +19,6 @@ dependencies = [
 
 [project.scripts]
 rawww = "rawww:main"
-rawww-mobile = "rawww:mobile_main"
 rawww-ai-benchmark = "rawww.ai_benchmark:main"
 
 [build-system]

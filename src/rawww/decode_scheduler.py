@@ -58,7 +58,6 @@ class DecodeScheduler:
         self._current_workers = current_workers
         self._background_workers = background_workers
         self._visible_thumb_workers = visible_thumb_workers
-        # Android cannot spawn worker processes; decode on threads there.
         self._decode_executor_cls: type[Executor] = (
             ProcessPoolExecutor if use_processes else ThreadPoolExecutor
         )

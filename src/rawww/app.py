@@ -68,7 +68,6 @@ from PySide6.QtWidgets import (
 from .cache import FolderCache, cache_size, clear_cache, maintain_folder_caches, prune_folder_cache, relocate_folder_caches, remove_folder_cache
 from .decode_cache import DecodeCache
 from .decode_scheduler import DecodeScheduler
-from .platform_profile import DECODE_USE_PROCESSES
 from .shotsync_client import ShotSyncClient
 from .shotsync_login import ShotSyncLoginDialog
 from .shotsync_hub import shotsync_hub
@@ -3172,7 +3171,6 @@ class Workspace(QMainWindow):
             background_workers=BACKGROUND_DECODE_WORKERS,
             visible_thumb_workers=VISIBLE_THUMB_DECODE_WORKERS,
             visible_thumb_lookup_workers=VISIBLE_THUMB_LOOKUP_WORKERS,
-            use_processes=DECODE_USE_PROCESSES,
         )
         self.items_by_path: dict[Path, QListWidgetItem] = {}
         self.all_paths: list[Path] = []
