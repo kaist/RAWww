@@ -115,7 +115,13 @@ jobs:
       - name: Build APK
         working-directory: build
         run: |
-          pyside6-android-deploy -f -v \
+          # Use our wrapper instead of `pyside6-android-deploy` directly: it
+          # pins p4a's python3/hostpython3 recipes to 3.11 so the on-device
+          # CPython matches the cp311 PySide6/shiboken6 wheels. Without this the
+          # APK builds but crashes at launch (UnsatisfiedLinkError:
+          # libpython3.11.so not found), because p4a's develop branch now builds
+          # CPython 3.14.
+          python ../android/android_deploy_pinned.py -f -v \
             --wheel-pyside  "../wheels/pyside6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
             --wheel-shiboken "../wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
             --ndk-path "${NDK_PATH}" \
