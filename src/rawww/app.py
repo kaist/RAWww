@@ -14,7 +14,7 @@ from uuid import uuid4
 import plistlib
 import subprocess
 import webbrowser
-from collections import OrderedDict, deque
+from collections import deque
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import monotonic, sleep
@@ -66,6 +66,7 @@ from PySide6.QtWidgets import (
 )
 
 from .cache import FolderCache, cache_size, clear_cache, maintain_folder_caches, prune_folder_cache, relocate_folder_caches, remove_folder_cache
+from .decode_cache import DecodeCache
 from .shotsync_client import ShotSyncClient
 from .shotsync_login import ShotSyncLoginDialog
 from .shotsync_hub import shotsync_hub
@@ -3045,9 +3046,13 @@ class Workspace(QMainWindow):
         self.cache_ready = False
         self.cache_load_generation = 0
         self.directory_generation = 0
-        self.memory_cache: OrderedDict[tuple[Path, int], DecodedImage] = OrderedDict()
-        self.thumbnail_cache: OrderedDict[Path, QImage] = OrderedDict()
-        self.thumbnail_cache_bytes = 0
+        self.decode_cache = DecodeCache(
+            ram_limit=RAM_CACHE_LIMIT,
+            full_limit=FULL_RAM_CACHE_LIMIT,
+            thumbnail_bytes_limit=THUMBNAIL_RAM_CACHE_LIMIT_BYTES,
+            original_size=ORIGINAL_SIZE,
+            thumb_size=THUMB_SIZE,
+        )
         self.items_by_path: dict[Path, QListWidgetItem] = {}
         self.all_paths: list[Path] = []
         # ``view_paths`` is the complete filtered order. ``paths`` is only
@@ -5761,9 +5766,7 @@ class Workspace(QMainWindow):
         if switching_directory:
             self._abandon_preview_decode_work()
         self.video_thumbnailer.cancel()
-        self.memory_cache.clear()
-        self.thumbnail_cache.clear()
-        self.thumbnail_cache_bytes = 0
+        self.decode_cache.clear()
         self.populate_timer.stop()
         self.thumb_timer.stop()
         self.ai_progress_timer.stop()
@@ -7214,7 +7217,7 @@ class Workspace(QMainWindow):
         """Prefer the largest decoded frame; the on-screen image can be 640px fallback."""
         if self.current_path is not None:
             candidates = [
-                (variant, decoded) for (path, variant), decoded in self.memory_cache.items()
+                (variant, decoded) for (path, variant), decoded in self.decode_cache.memory.items()
                 if path == self.current_path and variant > THUMB_SIZE
             ]
             if candidates:
@@ -8193,45 +8196,16 @@ class Workspace(QMainWindow):
         self._submit_decode(path, full_size, full_priority=True)
 
     def _cache_get(self, key: tuple[Path, int]) -> DecodedImage | None:
-        decoded = self.memory_cache.get(key)
-        if decoded is None:
-            return None
-        self.memory_cache.move_to_end(key)
-        return decoded
+        return self.decode_cache.get(key)
 
     def _thumbnail_cache_get(self, path: Path) -> QImage | None:
-        image = self.thumbnail_cache.get(path)
-        if image is not None:
-            self.thumbnail_cache.move_to_end(path)
-        return image
+        return self.decode_cache.thumbnail_get(path)
 
     def _thumbnail_cache_put(self, path: Path, image: QImage) -> None:
-        previous = self.thumbnail_cache.pop(path, None)
-        if previous is not None:
-            self.thumbnail_cache_bytes -= previous.sizeInBytes()
-        self.thumbnail_cache[path] = image
-        self.thumbnail_cache_bytes += image.sizeInBytes()
-        while self.thumbnail_cache and self.thumbnail_cache_bytes > THUMBNAIL_RAM_CACHE_LIMIT_BYTES:
-            _path, expired = self.thumbnail_cache.popitem(last=False)
-            self.thumbnail_cache_bytes -= expired.sizeInBytes()
+        self.decode_cache.thumbnail_put(path, image)
 
     def _cache_put(self, key: tuple[Path, int], decoded: DecodedImage) -> None:
-        self.memory_cache[key] = decoded
-        self.memory_cache.move_to_end(key)
-        self._trim_memory_cache()
-
-    def _trim_memory_cache(self) -> None:
-        # Original frames are much larger than display previews. Keeping the
-        # active one is enough for a repeated Z press without risking a large
-        # accumulation while browsing.
-        original_keys = [key for key in self.memory_cache if key[1] == ORIGINAL_SIZE]
-        while len(original_keys) > 1:
-            self.memory_cache.pop(original_keys.pop(0), None)
-        full_keys = [key for key in self.memory_cache if key[1] > THUMB_SIZE]
-        while len(full_keys) > FULL_RAM_CACHE_LIMIT:
-            self.memory_cache.pop(full_keys.pop(0), None)
-        while len(self.memory_cache) > RAM_CACHE_LIMIT:
-            self.memory_cache.popitem(last=False)
+        self.decode_cache.put(key, decoded)
 
     def _current_decode_executor(self) -> ProcessPoolExecutor:
         if self.current_decode_executor is None:
