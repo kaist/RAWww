@@ -977,6 +977,7 @@ def apply_theme(app: QApplication) -> None:
         }
         QFrame#faceSetRow { background: transparent; border: none; }
         QWidget#viewerFiltersPanel QComboBox {
+            combobox-popup: 0;
             padding-left: 5px;
             padding-right: 3px;
         }
