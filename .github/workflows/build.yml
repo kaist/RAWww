@@ -37,6 +37,28 @@ jobs:
         if: runner.os == 'Windows'
         run: uv run python scripts/build_pyinstaller.py --portable
 
+      - name: Smoke-test portable Windows application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/ctrlka/portable.flag")) {
+            throw "Portable marker is missing"
+          }
+          $process = Start-Process -FilePath "dist/ctrlka/ctrlka.exe" -PassThru
+          try {
+            Start-Sleep -Seconds 10
+            $process.Refresh()
+            if ($process.HasExited) {
+              throw "Portable application exited during startup with code $($process.ExitCode)"
+            }
+          }
+          finally {
+            $process.Refresh()
+            if (!$process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
+
       - name: Create Windows portable archive
         if: runner.os == 'Windows'
         shell: pwsh

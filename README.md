@@ -91,17 +91,21 @@ platform-specific builds are managed in the ShotSync admin panel.
 
 ## Windows build
 
-Create a diagnostic `onedir` build and print its largest bundled files:
+Create a portable `onedir` build and print its largest bundled files:
 
 ```powershell
-uv run python scripts/build_pyinstaller.py
+git pull
+uv sync --locked
+uv run python scripts/build_pyinstaller.py --portable
+.\dist\ctrlka\ctrlka.exe
+Compress-Archive -Path dist\ctrlka -DestinationPath dist\ctrlka-windows-portable.zip -Force
 ```
 
 For an experimental smaller build, additionally compress native binaries with
 UPX:
 
 ```powershell
-uv run python scripts/build_pyinstaller.py --upx
+uv run python scripts/build_pyinstaller.py --portable --upx
 ```
 
 The executable is created at `dist/ctrlka/ctrlka.exe`. Keep the complete
@@ -112,10 +116,10 @@ Russian Qt base translation after every build; `onedir`
 is also the format used to inspect and safely reduce bundled data before making
 an optional `onefile` release.
 
-GitHub Actions builds the Windows `onedir` package as
-`ctrlka-windows-portable.zip` and the Russian Inno Setup installer on every
-push or when started manually. Both files are published as the
-`rawww-windows` workflow artifact.
+The manually started **Build desktop packages** GitHub Actions workflow builds
+the Windows `onedir` package as `ctrlka-windows-portable.zip`, launches it for
+a startup smoke test, and builds the Russian Inno Setup installer. Both files
+are published in the `ctrlka-windows` workflow artifact.
 
 The portable build keeps its settings, cache, and working data in the `work`
 folder beside `ctrlka.exe`; the installer build uses the normal Windows data
