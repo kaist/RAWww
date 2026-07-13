@@ -1,0 +1,81 @@
+name: Android APK (manual)
+
+# Manual only — same policy as the desktop build workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      pyside_version:
+        description: "PySide6/shiboken6 version (must have Android aarch64 wheels)"
+        default: "6.11.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      PYSIDE_VERSION: ${{ github.event.inputs.pyside_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # pyside6-android-deploy rejects 3.12+
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install host build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install "PySide6==${PYSIDE_VERSION}" jinja2 pkginfo tqdm buildozer cython
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool libtool-bin pkg-config \
+            zlib1g-dev libncurses-dev libffi-dev libssl-dev \
+            build-essential ccache unzip zip
+
+      - name: Download Android Qt wheels
+        run: |
+          mkdir -p wheels
+          base="https://download.qt.io/official_releases/QtForPython"
+          curl -fSL -o "wheels/pyside6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
+            "${base}/pyside6/pyside6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
+          curl -fSL -o "wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
+            "${base}/shiboken6/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl"
+
+      - name: Assemble mobile project
+        run: |
+          mkdir -p build
+          cp android/main.py android/pysidedeploy.spec build/
+          cp -r src/rawww build/rawww
+          rm -rf build/rawww/__pycache__
+          # Drop desktop-only modules so the Android module/requirement scan
+          # never pulls QtMultimedia, onnxruntime or benchmark scripts.
+          rm -f build/rawww/app.py \
+                build/rawww/ai.py \
+                build/rawww/ai_benchmark.py \
+                build/rawww/benchmark.py \
+                build/rawww/compare_decoders.py \
+                build/rawww/cache_info.py \
+                build/rawww/profile_pipeline.py \
+                build/rawww/xmp.py
+
+      - name: Build APK
+        working-directory: build
+        run: |
+          pyside6-android-deploy -f -v \
+            --wheel-pyside  "../wheels/pyside6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
+            --wheel-shiboken "../wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
+            -c pysidedeploy.spec
+
+      - name: Upload APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rawww-android
+          path: |
+            build/*.apk
+            build/*.aab
+          if-no-files-found: warn
