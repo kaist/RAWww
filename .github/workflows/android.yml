@@ -55,6 +55,20 @@ jobs:
           unzip -q ndk.zip
           echo "NDK_PATH=$PWD/android-ndk-r26b" >> "$GITHUB_ENV"
 
+      - name: Set up Android SDK (with licenses accepted)
+        uses: android-actions/setup-android@v3
+
+      - name: Provision SDK packages
+        run: |
+          # buildozer otherwise downloads its own SDK and stalls on the
+          # interactive license prompt, which skips Build-Tools and then fails
+          # with "Aidl not found". Provision a licensed SDK up front and hand it
+          # to buildozer via --sdk-path. build-tools 33.0.2 still ships aidl.
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;33.0.2" > /dev/null
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          echo "SDK_PATH=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+
       - name: Assemble mobile project
         run: |
           mkdir -p build
@@ -79,6 +93,7 @@ jobs:
             --wheel-pyside  "../wheels/pyside6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
             --wheel-shiboken "../wheels/shiboken6-${PYSIDE_VERSION}-${PYSIDE_VERSION}-cp311-cp311-android_aarch64.whl" \
             --ndk-path "${NDK_PATH}" \
+            --sdk-path "${SDK_PATH}" \
             -c pysidedeploy.spec
 
       - name: Upload APK
