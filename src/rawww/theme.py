@@ -37,7 +37,8 @@ FOMANTIC_ICON_CODES = {
     "link": "\uf0c1",
     "cog": "\uf013", "help": "\uf128", "magic": "\uf0d0", "wrench": "\uf0ad",
     "edit": "\uf044", "calendar": "\uf133", "clock": "\uf017", "camera": "\uf030",
-    "file": "\uf15b", "arrow-right": "\uf061", "level-up": "\uf3bf", "folder-plus": "\uf65e",
+    "file": "\uf15b", "arrow-right": "\uf061", "arrow-up": "\uf062", "level-up": "\uf3bf",
+    "folder-plus": "\uf65e",
 }
 
 FOMANTIC_ICON_FAMILY = ""
@@ -455,11 +456,11 @@ def apply_theme(app: QApplication) -> None:
         QToolButton#directoryAction {
             background: transparent;
             border: 1px solid transparent;
-            border-radius: 3px;
-            min-width: 22px;
-            max-width: 22px;
-            min-height: 20px;
-            max-height: 20px;
+            border-radius: 4px;
+            min-width: 24px;
+            max-width: 24px;
+            min-height: 22px;
+            max-height: 22px;
             padding: 0;
         }
         QToolButton#directoryAction:hover {
