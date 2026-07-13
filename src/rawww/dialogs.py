@@ -130,6 +130,18 @@ class SettingsDialog(QDialog):
             self.settings.value("behavior/delete_without_confirmation", False, bool)
         )
         layout.addWidget(self.delete_without_confirmation)
+        self.auto_ai_after_previews = SettingsCheckBox("Всегда запускать AI после превью")
+        self.auto_ai_after_previews.setChecked(
+            self.settings.value("ai/auto_after_previews", False, bool)
+        )
+        auto_ai_hint = QLabel(
+            "Как только миниатюры в папке готовы, автоматически запускается анализ "
+            "серий и лиц. Срабатывает и при добавлении новых фотографий."
+        )
+        auto_ai_hint.setObjectName("settingsHint")
+        auto_ai_hint.setWordWrap(True)
+        layout.addWidget(self.auto_ai_after_previews)
+        layout.addWidget(auto_ai_hint)
 
         cache_card = QFrame()
         cache_card.setObjectName("externalEditorCard")
@@ -470,6 +482,7 @@ class SettingsDialog(QDialog):
                 assigned[text] = identifier
         self.settings.setValue("restore_workspaces", self.restore_workspaces.isChecked())
         self.settings.setValue("behavior/delete_without_confirmation", self.delete_without_confirmation.isChecked())
+        self.settings.setValue("ai/auto_after_previews", self.auto_ai_after_previews.isChecked())
         self.settings.setValue("interface/show_full_view_counter", self.show_full_view_counter.isChecked())
         self.settings.setValue(
             "interface/show_full_view_mark_indicator",
