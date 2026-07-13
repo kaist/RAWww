@@ -247,6 +247,21 @@ class DecodeSchedulerTests(unittest.TestCase):
         self.assertEqual(scheduler.foreground_full_futures, {})
         self.assertEqual(scheduler.visible_thumb_pending, set())
 
+    def test_cancel_pending_tolerates_cancel_callbacks_mutating_pending(self) -> None:
+        scheduler, _ = _make()
+        first_key = (Path("/photos/a.jpg"), THUMB_SIZE)
+        second_key = (Path("/photos/b.jpg"), THUMB_SIZE)
+        first = Future()
+        second = Future()
+        scheduler.pending = {first_key: first, second_key: second}
+        first.add_done_callback(lambda _done: scheduler.pending.pop(second_key, None))
+
+        scheduler.cancel_pending()
+
+        self.assertTrue(first.cancelled())
+        self.assertTrue(second.cancelled())
+        self.assertEqual(scheduler.pending, {})
+
     def test_abandon_retires_decode_pools(self) -> None:
         scheduler, _ = _make()
         current = _PendingExecutor()

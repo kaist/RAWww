@@ -276,11 +276,11 @@ class DecodeScheduler:
 
     def cancel_pending(self) -> None:
         """Cancel queued work and drop all in-flight bookkeeping."""
-        for future in self.pending.values():
-            future.cancel()
-        self.pending.clear()
+        pending, self.pending = self.pending, {}
         self.foreground_full_futures.clear()
         self.visible_thumb_pending.clear()
+        for future in pending.values():
+            future.cancel()
 
     def shutdown(self) -> None:
         if self.current_decode_executor is not None:
