@@ -42,8 +42,19 @@ BASE_URL = "https://shotsync.ru"
 
 
 def _app() -> QCoreApplication:
-    """A running Qt event loop object; QtNetwork/QtWebSockets need one."""
-    return QCoreApplication.instance() or QCoreApplication([])
+    """A running Qt event loop object; QtNetwork/QtWebSockets need one.
+
+    When the GUI stack is available a full ``QApplication`` is created so the
+    same single instance can also back the widget suites. Qt refuses to create
+    a ``QApplication`` once a plain ``QCoreApplication`` exists, so building the
+    wrong type here would make later widget tests abort the process.
+    """
+    existing = QCoreApplication.instance()
+    if existing is not None:
+        return existing
+    if HAVE_GUI:
+        return QApplication([])
+    return QCoreApplication([])
 
 
 class SocketParsingTests(unittest.TestCase):
@@ -211,7 +222,7 @@ class HubPersistenceTests(unittest.TestCase):
 @unittest.skipUnless(HAVE_GUI, "QtWidgets/libGL not available in this environment")
 class PanelRenderingTests(unittest.TestCase):
     def setUp(self) -> None:
-        QApplication.instance() or QApplication([])
+        _app()
         self.panel = ShotSyncPanel()
 
     def test_receiving_indicator_is_shown(self) -> None:
