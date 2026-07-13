@@ -3,14 +3,37 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from PIL import Image, ImageCms, ImageFilter, ImageOps
 from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSize
 from PySide6.QtGui import QImage, QImageReader
 
 from .worker_priority import lower_background_priority
 
+if TYPE_CHECKING:
+    from PIL import Image
+
 rawpy = None
+
+# Pillow is only needed when a preview is actually decoded/encoded. The mobile
+# build never packages it (it decodes previews with QImageReader instead), so it
+# is imported lazily to keep ``import rawww.imaging`` free of the dependency.
+Image = None  # type: ignore[assignment]
+ImageCms = None
+ImageFilter = None
+ImageOps = None
+
+
+def _ensure_pillow() -> None:
+    """Import Pillow the first time a decode path needs it."""
+    global Image, ImageCms, ImageFilter, ImageOps
+    if Image is None:
+        from PIL import Image as _Image
+        from PIL import ImageCms as _ImageCms
+        from PIL import ImageFilter as _ImageFilter
+        from PIL import ImageOps as _ImageOps
+
+        Image, ImageCms, ImageFilter, ImageOps = _Image, _ImageCms, _ImageFilter, _ImageOps
 
 
 def _rawpy():
@@ -91,6 +114,7 @@ def decode_image(path: Path, max_size: int) -> DecodedImage:
 
 
 def decode_pixels(path: Path, max_size: int) -> PixelImage:
+    _ensure_pillow()
     if path.suffix.lower() in RAW_EXTENSIONS:
         return _decode_raw_preview(path, max_size)
     return _decode_pillow(path, max_size)
@@ -109,6 +133,7 @@ def decode_original_pixels(path: Path) -> PixelImage:
     by previews, but skips JPEG ``draft`` downsampling. RAW files keep using
     their embedded preview; only files without one fall back to raw decoding.
     """
+    _ensure_pillow()
     if path.suffix.lower() in RAW_EXTENSIONS:
         return _decode_raw_preview(path, None)
     return _decode_pillow(path, None, use_draft=False, sharpen=False)
@@ -205,6 +230,7 @@ def _pillow_to_pixels(path: Path, image: Image.Image, max_size: int | None, *, s
 
 
 def _convert_to_srgb(image: Image.Image) -> Image.Image:
+    _ensure_pillow()
     icc = image.info.get("icc_profile")
     if not icc:
         return image.convert("RGB") if image.mode not in {"RGB", "RGBA"} else image
