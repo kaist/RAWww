@@ -77,6 +77,7 @@ from .exif import MetadataPipeline
 from .imaging import RAW_EXTENSIONS, DecodedImage, PixelImage, decode_original_pixels, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
 from .runtime_paths import data_path
 from .workspace import WorkspaceRequest, WorkspaceState
+from .xmp import build_xmp, write_sidecar
 
 
 THUMB_SIZE = 256
@@ -198,6 +199,12 @@ class DecodeBridge(QObject):
     cacheLoaded = Signal(int, object)
     directoryScanned = Signal(object, Path, object)
     metadataUpdated = Signal(object)
+    xmpWritten = Signal(object)
+
+
+def _write_xmp_task(path: Path, detail: dict, face_sets: list[dict], replacements: dict[str, str]) -> None:
+    """Worker-thread entry point; never blocks the Qt event loop on disk I/O."""
+    write_sidecar(path, build_xmp(detail, face_sets, replacements))
 
 
 class VideoThumbnailer(QObject):
@@ -2048,8 +2055,8 @@ class FullView(QFrame):
             layout.addWidget(button)
         show_button.clicked.connect(lambda: self.faceShowRequested.emit(face))
         show_button.clicked.connect(menu.close)
-        add_button.clicked.connect(lambda: self.faceAddRequested.emit(face))
         add_button.clicked.connect(menu.close)
+        add_button.clicked.connect(lambda: self.faceAddRequested.emit(face))
         action.setDefaultWidget(row)
         menu.addAction(action)
         menu.popup(self.image_view.mapToGlobal(position))
@@ -2349,6 +2356,11 @@ class FullImageView(QWidget):
         self._spinner_timer = QTimer(self)
         self._spinner_timer.setInterval(50)
         self._spinner_timer.timeout.connect(self._advance_spinner)
+        self._cursor_timer = QTimer(self)
+        self._cursor_timer.setSingleShot(True)
+        self._cursor_timer.setInterval(3000)
+        self._cursor_timer.timeout.connect(self._hide_cursor)
+        self._cursor_hidden = False
         self.setMinimumSize(1, 1)
         self.setAutoFillBackground(False)
         self.setMouseTracking(True)
@@ -2357,6 +2369,7 @@ class FullImageView(QWidget):
     def set_pixmap(self, pixmap: QPixmap, *, smooth: bool) -> None:
         self._pixmap = pixmap
         self._smooth = smooth
+        self._note_mouse_activity()
         self.update()
 
     @property
@@ -2404,6 +2417,25 @@ class FullImageView(QWidget):
 
     def _set_zoom_cursor(self) -> None:
         self.setCursor(QCursor(_fomantic_icon("zoom", 20).pixmap(20, 20), 10, 10))
+
+    def _update_cursor(self) -> None:
+        if self._cursor_hidden:
+            return
+        if self._zoom_requested and not self._zoomed:
+            self.setCursor(Qt.CursorShape.BlankCursor)
+        elif self._hovered_face >= 0:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self._set_zoom_cursor()
+
+    def _note_mouse_activity(self) -> None:
+        self._cursor_hidden = False
+        self._update_cursor()
+        self._cursor_timer.start()
+
+    def _hide_cursor(self) -> None:
+        self._cursor_hidden = True
+        self.setCursor(Qt.CursorShape.BlankCursor)
 
     def _advance_spinner(self) -> None:
         self._spinner_angle = (self._spinner_angle + 24) % 360
@@ -2454,6 +2486,7 @@ class FullImageView(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        self._note_mouse_activity()
         if self._zoomed and self._drag_position is not None and self._pixmap is not None:
             # Map the pointer's displacement from the grab point to the whole
             # scene, while keeping the originally focused point under it.
@@ -2471,7 +2504,7 @@ class FullImageView(QWidget):
         hit = self._face_at(event.position())
         if hit != self._hovered_face:
             self._hovered_face = hit
-            self._set_zoom_cursor()
+            self._update_cursor()
             self.update()
         super().mouseMoveEvent(event)
 
@@ -2484,6 +2517,7 @@ class FullImageView(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            self._note_mouse_activity()
             self._drag_position = None
             if self._temporary_zoom:
                 self.zoomReleased.emit()
@@ -2498,6 +2532,13 @@ class FullImageView(QWidget):
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
+            self._note_mouse_activity()
+            # A detected face is an interactive target.  Check it before
+            # starting the press-and-hold zoom, otherwise the temporary zoom
+            # consumes the release event that opens the face menu.
+            if self._face_at(event.position()) >= 0:
+                event.accept()
+                return
             if self._zoomed:
                 self._drag_position = event.position()
                 self._drag_center = QPointF(self._view_center)
@@ -3450,15 +3491,21 @@ class Workspace(QMainWindow):
         self.directory_scan_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_load_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_flush_executor = ThreadPoolExecutor(max_workers=1)
+        self.xmp_executor = ThreadPoolExecutor(max_workers=1)
         self.bridge = DecodeBridge()
         self.bridge.decoded.connect(self._on_decoded)
         self.bridge.failed.connect(self._on_decode_failed)
         self.bridge.cacheLoaded.connect(self._on_cache_loaded)
         self.bridge.directoryScanned.connect(self._on_directory_scanned)
         self.bridge.metadataUpdated.connect(self._on_metadata_updated)
+        self.bridge.xmpWritten.connect(self._on_xmp_written)
         self.video_thumbnailer = VideoThumbnailer(self)
         self.video_thumbnailer.previewReady.connect(self._on_video_preview)
         self.pending: dict[tuple[Path, int], Future] = {}
+        self._xmp_pending: dict[Path, tuple[dict, list[dict], dict[str, str]]] = {}
+        self._xmp_running: set[Path] = set()
+        self._xmp_export_after_cache_load = False
+        self._ignore_folder_changes_until = 0.0
         self.foreground_full_futures: dict[tuple[Path, int], Future] = {}
         self.last_navigation_at = 0.0
         self.pending_full_request: Path | None = None
@@ -3691,6 +3738,7 @@ class Workspace(QMainWindow):
         self.directory_scan_executor.shutdown(wait=False, cancel_futures=True)
         self.cache_load_executor.shutdown(wait=False, cancel_futures=True)
         self.cache_flush_executor.shutdown(wait=False, cancel_futures=False)
+        self.xmp_executor.shutdown(wait=False, cancel_futures=True)
         self.metadata_pipeline.shutdown()
         self.ai_pipeline.shutdown()
         super().closeEvent(event)
@@ -4028,6 +4076,16 @@ class Workspace(QMainWindow):
         self.ai_button.clicked.connect(self._show_ai_menu)
         self.ai_analysis_available = False
         toolbar_layout.addWidget(self.ai_button)
+
+        self.xmp_button = QToolButton()
+        self.xmp_button.setObjectName("toolbarAction")
+        self.xmp_button.setText("XMP")
+        self.xmp_button.setIcon(_fomantic_icon("file", 20, "#d6d6d6"))
+        self.xmp_button.setIconSize(QSize(20, 20))
+        self.xmp_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.xmp_button.setToolTip("Экспорт метаданных в XMP")
+        self.xmp_button.clicked.connect(self._show_xmp_menu)
+        toolbar_layout.addWidget(self.xmp_button)
 
         self.utilities_button = QToolButton()
         self.utilities_button.setObjectName("toolbarAction")
@@ -4646,6 +4704,8 @@ class Workspace(QMainWindow):
 
     def _set_code_replacements(self, sets: list[dict]) -> None:
         self.code_replacement_sets = [entry for entry in sets if isinstance(entry, dict)]
+        if self._xmp_auto_enabled():
+            self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
         active_id = self.settings.value("code_replacements/active_set_id", 0, int)
         if not active_id and self.code_replacement_sets:
             active_id = int(self.code_replacement_sets[0].get("id") or 0)
@@ -5055,6 +5115,10 @@ class Workspace(QMainWindow):
             self.folder_cache.store_photo_selection(
                 name, rating=rating, color_label=color_label, comment=comment
             )
+        if self._xmp_auto_enabled():
+            path = next((candidate for candidate in self.all_paths if candidate.name == name), None)
+            if path is not None:
+                self._queue_xmp(path)
         self.grid.viewport().update()
         if self.current_path is not None and self.current_path.name == name:
             if self.stack.currentWidget() is self.full_view:
@@ -5383,6 +5447,7 @@ class Workspace(QMainWindow):
         del applied
         self._shotsync_marks_fetching = False
         self._refresh_status_panel()
+        self._xmp_export_after_cache_load = self._xmp_auto_enabled()
         # Repaint the grid/details from the freshly written cache.
         if self.current_dir is not None:
             self.load_directory(self.current_dir)
@@ -5707,6 +5772,106 @@ class Workspace(QMainWindow):
         menu.addAction(action)
         menu.exec(self.ai_button.mapToGlobal(QPoint(0, self.ai_button.height())))
 
+    def _xmp_auto_enabled(self) -> bool:
+        return self.settings.value("xmp/auto_export", False, bool)
+
+    def _xmp_replacements(self, detail: dict | None = None) -> dict[str, str]:
+        replacements = {
+            str(code.get("code") or ""): str(code.get("value") or "")
+            for group in self.code_replacement_sets if isinstance(group, dict)
+            for code in group.get("codes", []) if isinstance(code, dict) and code.get("code")
+        }
+        detail = detail or {}
+        try:
+            captured = datetime.fromisoformat(str(detail.get("original_datetime") or ""))
+        except ValueError:
+            captured = None
+        if captured is not None:
+            replacements.update(date=captured.strftime("%d.%m.%Y"), time=captured.strftime("%H:%M"), datetime=captured.strftime("%d.%m.%Y %H:%M"))
+        camera = detail.get("camera") or {}
+        if isinstance(camera, dict) and camera.get("model"):
+            replacements["camera"] = str(camera["model"])
+        capture = detail.get("capture_settings") or {}
+        if isinstance(capture, dict):
+            if capture.get("iso"):
+                replacements["iso"] = str(round(float(capture["iso"])))
+            if capture.get("aperture"):
+                replacements["aperture"] = f"f/{float(capture['aperture']):.1f}"
+            if capture.get("exposure_display"):
+                replacements["shutter"] = str(capture["exposure_display"])
+            if capture.get("focal_length_mm"):
+                replacements["focal"] = f"{round(float(capture['focal_length_mm']))}mm"
+        return replacements
+
+    def _show_xmp_menu(self) -> None:
+        menu = QMenu(self.xmp_button)
+        menu.setObjectName("toolbarPopup")
+        content = QWidget(menu)
+        content.setObjectName("toolbarPopupContent")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(8)
+        title = QLabel("XMP")
+        title.setObjectName("toolbarPopupTitle")
+        layout.addWidget(title)
+        auto = SettingsCheckBox("Автоматически создавать XMP")
+        auto.setChecked(self._xmp_auto_enabled())
+        layout.addWidget(auto)
+        create = QPushButton("Создать XMP файлы")
+        create.setObjectName("toolbarPopupPrimaryButton")
+        create.setEnabled(not auto.isChecked() and self.cache_ready)
+        layout.addWidget(create)
+
+        def set_auto(enabled: bool) -> None:
+            self.settings.setValue("xmp/auto_export", enabled)
+            create.setEnabled(not enabled and self.cache_ready)
+            if enabled:
+                self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+
+        auto.toggled.connect(set_auto)
+        create.clicked.connect(lambda: (menu.close(), self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))))
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(content)
+        menu.addAction(action)
+        menu.exec(self.xmp_button.mapToGlobal(QPoint(0, self.xmp_button.height())))
+
+    def _queue_xmp_paths(self, paths) -> None:
+        for path in paths:
+            self._queue_xmp(path)
+
+    def _queue_xmp(self, path: Path) -> None:
+        if self.closing or not path.is_file() or not is_supported_image(path):
+            return
+        detail = dict(self.photo_details.get(path.name, {}))
+        self._xmp_pending[path] = (detail, list(self.face_sets), self._xmp_replacements(detail))
+        if path not in self._xmp_running:
+            self._start_xmp_write(path)
+
+    def _start_xmp_write(self, path: Path) -> None:
+        payload = self._xmp_pending.pop(path, None)
+        if payload is None or self.closing:
+            return
+        self._xmp_running.add(path)
+        # QFileSystemWatcher reports the directory change caused by our own
+        # sidecar write. The photo list is unchanged, so reloading it only
+        # disrupts selection and scrolling. Leave external changes alone once
+        # this small write window has elapsed.
+        self._ignore_folder_changes_until = max(self._ignore_folder_changes_until, monotonic() + 2.0)
+        future = self.xmp_executor.submit(_write_xmp_task, path, *payload)
+        future.add_done_callback(lambda done, target=path: self.bridge.xmpWritten.emit((target, done)))
+
+    def _on_xmp_written(self, result: object) -> None:
+        path, future = result
+        self._xmp_running.discard(path)
+        if self.closing:
+            return
+        try:
+            future.result()
+        except Exception as exc:
+            self.bridge.failed.emit(str(path), f"XMP: {exc}")
+        if path in self._xmp_pending:
+            self._start_xmp_write(path)
+
     def _show_utilities_menu(self) -> None:
         """Show the reserved place for batch tools without implying availability."""
         menu = QMenu(self.utilities_button)
@@ -5937,11 +6102,15 @@ class Workspace(QMainWindow):
             self.ai_progress_timer.stop()
             self.ai_pipeline.release_analysis_workers()
             self._reload_photo_details()
+            if self._xmp_auto_enabled():
+                self._queue_xmp_paths(analysis_paths)
             self.ai_analysis_available = remaining > 0
         self._refresh_status_panel()
 
     def _folder_changed(self, path: str) -> None:
         if self._selection_progress is not None or self._upload_progress is not None:
+            return
+        if monotonic() < self._ignore_folder_changes_until:
             return
         if not self.closing and Path(path) == self.current_dir:
             self.folder_change_timer.start(FOLDER_CHANGE_DEBOUNCE_MS)
@@ -6327,6 +6496,10 @@ class Workspace(QMainWindow):
             self.image_embeddings = self.folder_cache.load_image_embeddings()
             for path, item in self.items_by_path.items():
                 item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
+        if self._xmp_export_after_cache_load:
+            self._xmp_export_after_cache_load = False
+            if self._xmp_auto_enabled():
+                self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
         self._refresh_camera_filter()
         # Series membership depends on embeddings, which are only available
         # after the folder cache has loaded. Rebuild the grid now so a restored
@@ -6531,6 +6704,8 @@ class Workspace(QMainWindow):
             # server (durably queued; retried automatically while offline).
             if self._shotsync_syncer is not None:
                 self._shotsync_syncer.queue_mark(path.name, detail=dict(detail), changes=changes)
+            if self._xmp_auto_enabled():
+                self._queue_xmp(path)
         self.grid.viewport().update()
         if self.stack.currentWidget() is self.grid_page:
             self.meta_bar.set_metadata(
@@ -6682,22 +6857,30 @@ class Workspace(QMainWindow):
         if not isinstance(face, dict) or not isinstance(face.get("embedding"), list):
             return
         embedding = face["embedding"]
-        if any(self._face_similarity(embedding, item.get("embedding", [])) >= 0.98 for item in self.face_sets):
-            return
-        avatar = self._current_face_avatar(face, 80)
-        self.face_sets.append({
-            "id": sha1(json.dumps(embedding).encode()).hexdigest()[:12],
-            "name": "Без имени",
-            "embedding": embedding,
-            "avatar": self._pixmap_to_base64(avatar),
-        })
-        self._save_face_sets()
-        self._update_analysis_controls()
+        already_added = any(
+            self._face_similarity(embedding, item.get("embedding", [])) >= 0.42
+            for item in self.face_sets
+        )
+        toast_message = "Это лицо уже есть в наборе."
+        if not already_added:
+            avatar = self._current_face_avatar(face, 80)
+            self.face_sets.append({
+                "id": sha1(json.dumps(embedding).encode()).hexdigest()[:12],
+                "name": "Без имени",
+                "embedding": embedding,
+                "avatar": self._pixmap_to_base64(avatar),
+            })
+            self._save_face_sets()
+            self._update_analysis_controls()
+            if self._xmp_auto_enabled():
+                self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+            toast_message = "Лицо добавлено в набор."
+        self._show_face_sets(toast_message)
 
     def _face_set_by_id(self, face_id: str) -> dict | None:
         return next((entry for entry in self.face_sets if entry.get("id") == face_id), None)
 
-    def _show_face_sets(self) -> None:
+    def _show_face_sets(self, toast_message: str | None = None) -> None:
         dialog = QDialog(self)
         dialog.setObjectName("faceSetsDialog")
         dialog.setWindowTitle("Наборы лиц")
@@ -6768,6 +6951,22 @@ class Workspace(QMainWindow):
             body_layout.addStretch(1)
 
         rebuild()
+        if toast_message:
+            toast = QLabel(toast_message, dialog)
+            toast.setObjectName("faceSetsToast")
+            toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            toast.setWordWrap(True)
+            toast.setFixedWidth(300)
+            toast.setMinimumHeight(38)
+
+            def place_toast() -> None:
+                toast.adjustSize()
+                toast.move((dialog.width() - toast.width()) // 2, 48)
+                toast.raise_()
+                toast.show()
+
+            QTimer.singleShot(0, place_toast)
+            QTimer.singleShot(3_000, toast.deleteLater)
         dialog.exec()
 
     def _rename_face_set(self, face_id: str, name: str) -> None:
@@ -6775,10 +6974,14 @@ class Workspace(QMainWindow):
         if entry is not None:
             entry["name"] = name.strip() or "Без имени"
             self._save_face_sets()
+            if self._xmp_auto_enabled():
+                self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
 
     def _delete_face_set(self, face_id: str, rebuild: Callable[[], None]) -> None:
         self.face_sets = [entry for entry in self.face_sets if entry.get("id") != face_id]
         self._save_face_sets()
+        if self._xmp_auto_enabled():
+            self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
         rebuild()
 
     def _show_face_set(self, face_id: str, dialog: QDialog) -> None:
@@ -7637,9 +7840,12 @@ class MainWindow(QMainWindow):
         title_layout.setSpacing(3)
         app_icon = QLabel()
         app_icon.setObjectName("appIcon")
+        app_icon.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        app_icon.setStyleSheet("background: transparent; border: 0;")
+        app_icon.setFixedSize(20, 20)
         app_icon.setToolTip(APP_NAME)
         app_icon.setPixmap(_title_bar_icon().pixmap(16, 16))
-        title_layout.addWidget(app_icon)
+        title_layout.addWidget(app_icon, 0, Qt.AlignmentFlag.AlignVCenter)
         self.tabs = ChromeTabBar()
         self.tabs.setObjectName("workspaceTabs")
         self.tabs.setDocumentMode(True)
@@ -8582,7 +8788,9 @@ def apply_theme(app: QApplication) -> None:
             border-radius: 8px;
             padding: 0;
         }
-        QWidget#toolbarPopupContent { background: transparent; }
+        QWidget#toolbarPopupContent, QWidget#toolbarPopupContent QLabel, QWidget#toolbarPopupContent QCheckBox {
+            background: transparent;
+        }
         QLabel#toolbarPopupTitle {
             background: transparent;
             color: #f2f2f2;
@@ -8593,6 +8801,22 @@ def apply_theme(app: QApplication) -> None:
             background: transparent;
             color: #b8c0ca;
             font-size: 11px;
+        }
+        QMenu#toolbarPopup QCheckBox {
+            color: #dddddd;
+            spacing: 9px;
+            min-height: 28px;
+        }
+        QMenu#toolbarPopup QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+            border: 1px solid #676767;
+            border-radius: 3px;
+            background: #202020;
+        }
+        QMenu#toolbarPopup QCheckBox::indicator:checked {
+            background: #3f6db5;
+            border-color: #79aaff;
         }
         QPushButton#toolbarPopupPrimaryButton, QPushButton#toolbarPopupUtilityButton {
             min-height: 30px;
@@ -8609,7 +8833,13 @@ def apply_theme(app: QApplication) -> None:
             color: #ffffff;
             font-weight: 600;
         }
-        QPushButton#toolbarPopupPrimaryButton:hover { background: #3d6f9d; }
+        QPushButton#toolbarPopupPrimaryButton:hover:!disabled { background: #3d6f9d; }
+        QPushButton#toolbarPopupPrimaryButton:disabled {
+            color: #777d84;
+            background: #303030;
+            border-color: #414141;
+            font-weight: 400;
+        }
         QPushButton#toolbarPopupUtilityButton:disabled {
             color: #777d84;
             background: #303030;

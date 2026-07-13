@@ -24,6 +24,7 @@ uv run rawww
 - Select a processed photo and press **Find face** to show photos containing a matching face; the × button clears face search. **No faces** is available in the shot-size filter.
 - Hotkeys: `1`-`5` assign a rating, `0` clears it, `M` toggles the quick mark, and `C` opens the comment editor.
 - **Коды замены** are available from the keyboard button beside a comment. They are shared with the signed-in ShotSync account: create sets, edit codes, or import CSV/TSV/XLSX. In every comment field type `{`, `\`, `=` or `@` to open and filter code suggestions; Контролька stores the marker (for example `{name}`) and shows its expanded value directly in the field when it is not being edited.
+- The **XMP** button beside AI creates Lightroom/Capture One-compatible `.xmp` sidecars. It exports ratings, colour labels, expanded comments, hashtags as keywords, and named face regions. Enable automatic creation to update sidecars in the background after local or ShotSync metadata changes.
 - Full view: double-click a photo or press `F`. Hold the left mouse button for a temporary 100% inspection and drag to pan; press `Z` to toggle it. The inspector decodes and caches the full JPEG or the embedded RAW preview (falling back to RAW decoding only when needed), focusing the largest recognized face when available (otherwise the cursor position or image centre); arrow keys pan by 5% while it is active.
 - Back to grid: `Esc`, `Enter`, or `G`.
 - Toggle fullscreen: `F11`.
