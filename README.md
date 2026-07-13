@@ -21,6 +21,14 @@ uv run rawww "D:\photos\shoot"
 uv run rawww "D:\photos\shoot\IMG_0001.CR3"
 ```
 
+To diagnose a startup flash on Windows, record every native window created
+during the first three seconds:
+
+```powershell
+$env:RAWWW_TRACE_STARTUP = "1"
+uv run rawww 2> startup-windows.log
+```
+
 A folder is opened in its own workspace tab. A file opens its parent folder
 and immediately switches to Full View for that file; it is presented directly
 fullscreen, without first showing the grid or restored workspaces. This is the
@@ -40,7 +48,7 @@ same command-line contract used by file-manager integrations.
 - Right-click a folder in the tree and choose **Rename** to edit its name inline. Its preview and AI cache is moved to the new path, including caches for nested folders.
 - Select a processed photo and press **Find face** to show photos containing a matching face; the × button clears face search. **No faces** is available in the shot-size filter.
 - Hotkeys: `1`-`5` assign a rating, `0` clears it; `Shift+1`-`5` set red through purple colour labels and `Shift+0` clears the label. `M` toggles the quick mark, `C` opens the comment editor, and `E` opens the active file in the external editor. By default this is Adobe Photoshop; set another executable in **Settings → Behaviour**. Change hotkeys in **Settings → Hotkeys**; arrow keys, Enter and Esc remain reserved for navigation.
-- **Коды замены** are configured in **Настройки → Коды замен**. They work locally without an account; sign in through the shared ShotSync login dialog to use the account's synchronized sets. Create sets, edit codes, or import CSV/TSV/XLSX. In every comment field type `{`, `\`, `=` or `@` to open and filter code suggestions; Контролька stores the marker (for example `{name}`) and shows its expanded value directly in the field when it is not being edited.
+- **Коды замены** are configured in **Настройки → Коды замен**. They work locally without an account; sign in through the shared ShotSync login dialog to use the account's synchronized sets. Create sets, edit codes, or import CSV/TSV/XLSX. A completed code/value row is persisted when **Готово** is pressed even if Enter or Tab was not used first. In every comment field type `{`, `\`, `=` or `@` to open and filter code suggestions; Контролька stores the marker (for example `{name}`) and shows its expanded value directly in the field when it is not being edited.
 - The **Утилиты** button holds batch tools that run across multiple processes: rename, **Групповой резайс** (export the current list to JPEG), and **Уменьшить JPG** (re-encode every JPEG in the open folder in place at a chosen quality, default 85%, overwriting without confirmation and reporting the megabytes saved). Both export tools always keep the embedded ICC profile and keep full EXIF (including sub-IFDs) when **Сохранить EXIF** is ticked. EXIF/ICC is only written by these export tools; the preview pipeline never embeds metadata.
 - The **XMP** button beside AI creates Lightroom/Capture One-compatible `.xmp` sidecars. It exports ratings, colour labels, expanded comments, hashtags as keywords, and named face regions. Enable automatic creation to update sidecars in the background after local or ShotSync metadata changes.
 - Full view: double-click a photo or press `F`. Hold the left mouse button for a temporary 100% inspection and drag to pan; press `Z` to toggle it. The inspector decodes and caches the full JPEG or the embedded RAW preview (falling back to RAW decoding only when needed), focusing the largest recognized face when available (otherwise the cursor position or image centre); arrow keys pan by 5% while it is active. Face focus on zoom can be turned off in **Settings → Interface** (**Акцент на лице при зуме**, on by default), after which zoom always centres on the cursor.

@@ -23,7 +23,7 @@ from typing import Callable
 from send2trash import send2trash
 
 from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
-from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QFont, QFontMetricsF, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface
+from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -1611,26 +1611,19 @@ class FullView(QFrame):
         self.image_view.zoomPressed.connect(self._request_mouse_zoom)
         self.image_view.zoomReleased.connect(self._release_mouse_zoom)
         self.image_view.wheelScrolled.connect(self._navigate_wheel)
-        self.video_widget = QVideoWidget(self)
-        self.video_widget.setObjectName("fullVideoView")
+        self.video_widget: QVideoWidget | None = None
         self.media_stack = QStackedWidget()
         self.media_stack.addWidget(self.image_view)
-        self.media_stack.addWidget(self.video_widget)
         self.video_player = QMediaPlayer(self)
         self.video_audio = QAudioOutput(self)
         self.video_audio.setVolume(1.0)
         self.video_player.setAudioOutput(self.video_audio)
-        self.video_player.setVideoOutput(self.video_widget)
         self.video_player.positionChanged.connect(self._video_position_changed)
         self.video_player.durationChanged.connect(self._video_duration_changed)
         self.video_player.playbackStateChanged.connect(self._video_state_changed)
         self._is_video = False
-        self.video_controls = QFrame(self.video_widget)
+        self.video_controls = QFrame(self)
         self.video_controls.setObjectName("videoControls")
-        # QVideoWidget may use a native child surface on Windows. Make the
-        # controls native too, otherwise that surface can cover them once the
-        # first frame arrives.
-        self.video_controls.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
         self.video_controls.setFixedWidth(360)
         self.video_controls_layout = QHBoxLayout(self.video_controls)
         self.video_controls_layout.setContentsMargins(8, 5, 8, 5)
@@ -1696,7 +1689,6 @@ class FullView(QFrame):
         # host. Reposition them whenever the host resizes (e.g. when the bottom
         # strip is collapsed/expanded) so they always stay pinned to the bottom.
         self.media_panel.installEventFilter(self)
-        self.video_widget.installEventFilter(self)
 
         self.face_filter_chip = QFrame(self.media_panel)
         self.face_filter_chip.setObjectName("fullFaceFilterChip")
@@ -1777,7 +1769,7 @@ class FullView(QFrame):
         self.full_comment_edit = self.meta_bar.comment_edit
         strip_header_layout.addWidget(self.meta_bar, 1)
 
-        self.strip_panel = QFrame()
+        self.strip_panel = QFrame(self)
         self.strip_panel.setObjectName("stripPanel")
         strip_layout = QVBoxLayout(self.strip_panel)
         strip_layout.setContentsMargins(0, 0, 0, 0)
@@ -2055,11 +2047,27 @@ class FullView(QFrame):
         if self.video_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.video_player.pause()
         else:
-            self.video_controls.setParent(self.video_widget)
-            self.media_stack.setCurrentWidget(self.video_widget)
+            video_widget = self._ensure_video_widget()
+            self.video_controls.setParent(video_widget)
+            self.video_controls.setAttribute(
+                Qt.WidgetAttribute.WA_DontCreateNativeAncestors,
+                True,
+            )
+            self.video_controls.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+            self.media_stack.setCurrentWidget(video_widget)
             self._position_video_controls()
             self.video_controls.show()
             self.video_player.play()
+
+    def _ensure_video_widget(self) -> QVideoWidget:
+        if self.video_widget is None:
+            video_widget = QVideoWidget(self.media_stack)
+            video_widget.setObjectName("fullVideoView")
+            video_widget.installEventFilter(self)
+            self.media_stack.addWidget(video_widget)
+            self.video_player.setVideoOutput(video_widget)
+            self.video_widget = video_widget
+        return self.video_widget
 
     def _video_position_changed(self, position: int) -> None:
         if not self.video_seek.isSliderDown():
@@ -9010,6 +9018,69 @@ def _flush_and_close(cache: FolderCache, close: bool) -> None:
             cache.close(flush=False)
 
 
+class _StartupWindowTrace(QObject):
+    _EVENTS = {
+        QEvent.Type.Show,
+        QEvent.Type.Hide,
+        QEvent.Type.PlatformSurface,
+        QEvent.Type.WinIdChange,
+        QEvent.Type.WindowStateChange,
+        QEvent.Type.Expose,
+    }
+
+    def __init__(self, app: QApplication) -> None:
+        super().__init__(app)
+        self.app = app
+        self.started = monotonic()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if event.type() not in self._EVENTS:
+            return False
+        if isinstance(watched, QWindow):
+            self._write(
+                event.type().name,
+                watched.metaObject().className(),
+                watched.objectName(),
+                watched.title(),
+                watched.isVisible(),
+                int(watched.flags()),
+                watched.geometry().getRect(),
+            )
+        elif isinstance(watched, QWidget) and watched.isWindow():
+            self._write(
+                event.type().name,
+                watched.metaObject().className(),
+                watched.objectName(),
+                watched.windowTitle(),
+                watched.isVisible(),
+                int(watched.windowFlags()),
+                watched.geometry().getRect(),
+            )
+        return False
+
+    def snapshot(self, label: str) -> None:
+        windows = [
+            (
+                window.metaObject().className(),
+                window.objectName(),
+                window.title(),
+                window.isVisible(),
+                int(window.flags()),
+                window.geometry().getRect(),
+            )
+            for window in QGuiApplication.allWindows()
+        ]
+        self._write(label, windows)
+
+    def finish(self) -> None:
+        self.snapshot("trace-finished")
+        self.app.removeEventFilter(self)
+
+    def _write(self, *parts: object) -> None:
+        elapsed = monotonic() - self.started
+        print(f"[startup-window {elapsed:0.3f}s]", *parts, file=sys.stderr, flush=True)
+
+
 def main() -> None:
     # Mandatory for frozen (PyInstaller) Windows builds that use
     # ProcessPoolExecutor. Without this, each spawned worker re-launches the
@@ -9022,16 +9093,28 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(_application_icon())
+    startup_trace = _StartupWindowTrace(app) if os.environ.get("RAWWW_TRACE_STARTUP") else None
+    if startup_trace is not None:
+        app.installEventFilter(startup_trace)
+        startup_trace.snapshot("application-created")
     qt_ru = QTranslator(app)
     if qt_ru.load("qtbase_ru", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
         app.installTranslator(qt_ru)
     apply_theme(app)
     window = MainWindow(target_from_argv())
+    if startup_trace is not None:
+        startup_trace.snapshot("main-window-constructed")
     if getattr(window, "_fast_full_view", False):
         window.showFullScreen()
         workspace = window.workspace_stack.currentWidget()
         if isinstance(workspace, Workspace):
             QTimer.singleShot(0, workspace.full_view.finish_fast_resize)
     else:
+        screen = window.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            window.setGeometry(screen.availableGeometry())
         window.showMaximized()
+    if startup_trace is not None:
+        startup_trace.snapshot("show-requested")
+        QTimer.singleShot(3_000, startup_trace.finish)
     sys.exit(app.exec())

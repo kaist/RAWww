@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEvent, QObject
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
 
 from rawww.app import FullView, MainWindow, Workspace
@@ -34,6 +35,21 @@ class _ToastHost(QMainWindow):
     _clear_viewer_toast = Workspace._clear_viewer_toast
 
 
+class _WindowShowRecorder(QObject):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shown = []
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if (
+            event.type() == QEvent.Type.Show
+            and isinstance(watched, QWidget)
+            and watched.isWindow()
+        ):
+            self.shown.append((watched.metaObject().className(), watched.objectName()))
+        return False
+
+
 class AppStateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -43,10 +59,12 @@ class AppStateTests(unittest.TestCase):
         parent = QWidget()
         view = FullView(parent)
         self.assertFalse(view.isWindow())
-        self.assertIsNotNone(view.video_widget.parentWidget())
-        self.assertFalse(view.video_widget.isWindow())
+        self.assertIsNone(view.video_widget)
         self.assertIsNotNone(view.video_controls.parentWidget())
         self.assertFalse(view.video_controls.isWindow())
+        video_widget = view._ensure_video_widget()
+        self.assertIsNotNone(video_widget.parentWidget())
+        self.assertFalse(video_widget.isWindow())
         view.close()
         view.deleteLater()
         parent.deleteLater()
@@ -63,14 +81,27 @@ class AppStateTests(unittest.TestCase):
         parent.deleteLater()
 
     def test_startup_has_no_hidden_app_owned_top_level_windows(self) -> None:
-        window = MainWindow()
-        top_level_names = {widget.objectName() for widget in QApplication.topLevelWidgets()}
+        recorder = _WindowShowRecorder()
+        self.app.installEventFilter(recorder)
+        existing_native_windows = QGuiApplication.allWindows()
+        try:
+            window = MainWindow()
+            top_level_names = {widget.objectName() for widget in QApplication.topLevelWidgets()}
+            native_windows = [
+                (native.metaObject().className(), native.objectName())
+                for native in QGuiApplication.allWindows()
+                if all(native is not existing for existing in existing_native_windows)
+            ]
 
-        self.assertNotIn("overlayLabel", top_level_names)
-        self.assertNotIn("shotsyncLoginDialog", top_level_names)
-        self.assertNotIn("codeSuggestionPopup", top_level_names)
-        window.close()
-        window.deleteLater()
+            self.assertNotIn("overlayLabel", top_level_names)
+            self.assertNotIn("shotsyncLoginDialog", top_level_names)
+            self.assertNotIn("codeSuggestionPopup", top_level_names)
+            self.assertEqual(native_windows, [])
+            self.assertEqual(recorder.shown, [])
+            window.close()
+            window.deleteLater()
+        finally:
+            self.app.removeEventFilter(recorder)
 
     def test_deleted_viewer_toast_is_not_reused(self) -> None:
         host = _ToastHost()
