@@ -55,19 +55,28 @@ jobs:
           unzip -q ndk.zip
           echo "NDK_PATH=$PWD/android-ndk-r26b" >> "$GITHUB_ENV"
 
-      - name: Set up Android SDK (with licenses accepted)
-        uses: android-actions/setup-android@v3
-
-      - name: Provision SDK packages
+      - name: Provision a clean Android SDK
         run: |
-          # buildozer otherwise downloads its own SDK and stalls on the
-          # interactive license prompt, which skips Build-Tools and then fails
-          # with "Aidl not found". Provision a licensed SDK up front and hand it
-          # to buildozer via --sdk-path. build-tools 33.0.2 still ships aidl.
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;33.0.2" > /dev/null
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          echo "SDK_PATH=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+          # A self-contained SDK avoids three buildozer traps:
+          #  * the runner's preinstalled SDK ships a legacy tools/bin/sdkmanager
+          #    that crashes on JDK 17 (NoClassDefFoundError javax/xml/bind ...);
+          #    this dir has only modern cmdline-tools.
+          #  * licenses are accepted here, so buildozer never hits the
+          #    interactive "Accept? (y/N)" prompt.
+          #  * only build-tools 33.0.2 is installed (still ships aidl, removed in
+          #    34+). buildozer picks the highest installed version, so it uses
+          #    this one instead of downloading a newer aidl-less build-tools.
+          SDK="${HOME}/android-sdk"
+          mkdir -p "${SDK}/cmdline-tools"
+          curl -fSL -o cltools.zip \
+            "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          unzip -q cltools.zip -d "${SDK}/cmdline-tools"
+          mv "${SDK}/cmdline-tools/cmdline-tools" "${SDK}/cmdline-tools/latest"
+          mgr="${SDK}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "${mgr}" --sdk_root="${SDK}" --licenses > /dev/null 2>&1 || true
+          "${mgr}" --sdk_root="${SDK}" \
+            "platform-tools" "platforms;android-34" "build-tools;33.0.2" > /dev/null
+          echo "SDK_PATH=${SDK}" >> "$GITHUB_ENV"
 
       - name: Assemble mobile project
         run: |
