@@ -159,6 +159,11 @@ class AppStateTests(unittest.TestCase):
                 combo.currentText(),
             )
             self.assertEqual(
+                combo.view().palette().color(QPalette.ColorRole.Base).name(),
+                "#484848",
+                combo.currentText(),
+            )
+            self.assertEqual(
                 combo.view().palette().color(QPalette.ColorRole.Highlight).name(),
                 "#606060",
                 combo.currentText(),
