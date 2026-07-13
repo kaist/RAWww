@@ -13,10 +13,27 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .subprocess_utils import no_window_kwargs
-
 
 _ROOT = Path(__file__).resolve().parents[2]
+
+
+def _no_window_kwargs() -> dict:
+    """Local copy of ``subprocess_utils.no_window_kwargs``.
+
+    ``version.py`` must stay importable on its own: setuptools reads the dynamic
+    version by executing this module in an isolated build environment where the
+    ``rawww`` package is not installed, so a package-relative import here would
+    break the build.
+    """
+    if sys.platform != "win32":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": startupinfo,
+    }
 
 
 def _git_revision() -> int | None:
@@ -30,7 +47,7 @@ def _git_revision() -> int | None:
             check=True,
             capture_output=True,
             text=True,
-            **no_window_kwargs(),
+            **_no_window_kwargs(),
         )
     except (OSError, subprocess.CalledProcessError, ValueError):
         return None
