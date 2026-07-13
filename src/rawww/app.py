@@ -3511,8 +3511,8 @@ class Workspace(QMainWindow):
         # Кнопка "На уровень вверх"
         self.up_button = QToolButton()
         self.up_button.setObjectName("directoryAction")
-        self.up_button.setIcon(_fomantic_icon("level-up", 16))
-        self.up_button.setIconSize(QSize(14, 14))
+        self.up_button.setIcon(_fomantic_icon("arrow-up", 16, "#e6e6e6"))
+        self.up_button.setIconSize(QSize(16, 16))
         self.up_button.setToolTip("На уровень вверх")
         self.up_button.clicked.connect(self._go_up_directory)
         directory_header.addWidget(self.up_button)
@@ -3520,8 +3520,8 @@ class Workspace(QMainWindow):
         # Кнопка "Создать папку"
         self.new_folder_button = QToolButton()
         self.new_folder_button.setObjectName("directoryAction")
-        self.new_folder_button.setIcon(_fomantic_icon("folder-plus", 16))
-        self.new_folder_button.setIconSize(QSize(14, 14))
+        self.new_folder_button.setIcon(_fomantic_icon("folder-plus", 16, "#e6e6e6"))
+        self.new_folder_button.setIconSize(QSize(16, 16))
         self.new_folder_button.setToolTip("Создать папку")
         self.new_folder_button.clicked.connect(self._create_new_folder)
         directory_header.addWidget(self.new_folder_button)
@@ -6077,6 +6077,8 @@ class Workspace(QMainWindow):
         if self.ai_analysis_available:
             start = QPushButton("Обработать серии и лица")
             start.setObjectName("toolbarPopupPrimaryButton")
+            start.setIcon(_fomantic_icon("magic", 16, "#ffffff"))
+            start.setIconSize(QSize(16, 16))
             start.clicked.connect(lambda: (menu.close(), self._start_ai_analysis()))
             layout.addWidget(start)
         elif self.ai_pipeline.pending_count() == 0:
@@ -6137,6 +6139,8 @@ class Workspace(QMainWindow):
         layout.addWidget(auto)
         create = QPushButton("Создать XMP файлы")
         create.setObjectName("toolbarPopupPrimaryButton")
+        create.setIcon(_fomantic_icon("file", 16, "#ffffff"))
+        create.setIconSize(QSize(16, 16))
         create.setEnabled(not auto.isChecked() and self.cache_ready)
         layout.addWidget(create)
 
@@ -6208,12 +6212,14 @@ class Workspace(QMainWindow):
         hint.setWordWrap(True)
         hint.setFixedWidth(270)
         layout.addWidget(hint)
-        for label, callback in (
-            ("Групповое переименование", self._show_batch_rename_dialog),
-            ("Групповой резайс", self._show_batch_resize_dialog),
+        for label, icon, callback in (
+            ("Групповое переименование", "edit", self._show_batch_rename_dialog),
+            ("Групповой резайс", "expand", self._show_batch_resize_dialog),
         ):
             button = QPushButton(label)
             button.setObjectName("toolbarPopupUtilityButton")
+            button.setIcon(_fomantic_icon(icon, 16, "#ededed"))
+            button.setIconSize(QSize(16, 16))
             if callback is None:
                 button.setEnabled(False)
                 button.setToolTip("Пока не реализовано")
