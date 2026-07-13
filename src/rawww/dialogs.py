@@ -375,6 +375,11 @@ class SettingsDialog(QDialog):
         self.mark_indicator_position_control.setEnabled(self.show_full_view_mark_indicator.isChecked())
         self.show_full_view_mark_indicator.toggled.connect(self.mark_indicator_position_control.setEnabled)
         layout.addWidget(self.mark_indicator_position_control)
+        self.zoom_focus_face = SettingsCheckBox("Акцент на лице при зуме")
+        self.zoom_focus_face.setChecked(
+            self.settings.value("interface/zoom_focus_face", True, bool)
+        )
+        layout.addWidget(self.zoom_focus_face)
         layout.addStretch(1)
         return tab
 
@@ -474,6 +479,7 @@ class SettingsDialog(QDialog):
             "interface/full_view_mark_indicator_position",
             self.full_view_mark_indicator_position.currentData(),
         )
+        self.settings.setValue("interface/zoom_focus_face", self.zoom_focus_face.isChecked())
         self.settings.setValue("editor/use_custom_executable", self.custom_editor.isChecked())
         self.settings.setValue("editor/executable", self.editor_executable.text().strip())
         self.settings.setValue("hotkeys/swap_rating_and_color", self.swap_rating_color.isChecked())
