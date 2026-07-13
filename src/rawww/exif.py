@@ -6,10 +6,12 @@ import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
+
 from concurrent.futures import Future, ProcessPoolExecutor
 
 from .cache import FolderCache
 from .runtime_paths import data_path
+from .subprocess_utils import no_window_kwargs
 
 from .worker_priority import lower_background_priority
 
@@ -72,6 +74,7 @@ class ExifToolClient:
                 [self.executable, "-stay_open", "True", "-@", "-", "-common_args", "-json", "-n", "-G1", "-fast2"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, encoding="utf-8",
+                **no_window_kwargs(),
             )
         except OSError as exc:
             raise ExifToolError(f"Cannot start ExifTool: {exc}") from exc

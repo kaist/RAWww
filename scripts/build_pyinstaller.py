@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist" / "ctrlka"
 PORTABLE_MARKER = DIST / "portable.flag"
 CONTENTS = DIST / "bin"
+BUILD_VERSION_MODULE = ROOT / "src" / "rawww" / "_build_version.py"
 EXCLUDED_QT_MODULES = (
     "PySide6.Qt3DAnimation",
     "PySide6.Qt3DCore",
@@ -146,6 +147,33 @@ def _clean_previous_build() -> None:
             shutil.rmtree(directory)
 
 
+def _bake_build_version() -> None:
+    """Freeze the Git-derived version into the package before bundling.
+
+    The shipped application must not run Git at runtime (it flashes a console
+    window and there is no repository on a client machine). Resolving it here
+    and importing the result inside ``rawww.version`` keeps the frozen build
+    self-contained.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        revision = int(result.stdout.strip())
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        revision = 0
+    version = f"1.0.{max(revision, 0)}"
+    BUILD_VERSION_MODULE.write_text(
+        f'"""Generated at build time. Do not edit or commit."""\n\nVERSION = "{version}"\n',
+        encoding="utf-8",
+    )
+    print(f"Baked build version: {version}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--upx", action="store_true", help="compress DLL/EXE/PYD files with UPX --brute")
@@ -153,6 +181,7 @@ def main() -> None:
     parser.add_argument("--portable", action="store_true", help="mark the frozen build as portable")
     args = parser.parse_args()
     _clean_previous_build()
+    _bake_build_version()
     command = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--clean", "--onedir", "--name", "ctrlka",
@@ -167,6 +196,7 @@ def main() -> None:
         "--add-data", f"{ROOT / 'src' / 'rawww' / 'assets'}{os.pathsep}data/assets",
         "--collect-binaries", "onnxruntime",
         "--hidden-import", "rawpy",
+        "--hidden-import", "rawww._build_version",
     ]
     command.append("--console" if args.console else "--windowed")
     for module in EXCLUDED_QT_MODULES:
@@ -176,7 +206,11 @@ def main() -> None:
         # settings before this script gets a chance to run ``--brute``.
         command.append("--noupx")
     command.append(str(ROOT / "scripts" / "pyinstaller_entry.py"))
-    subprocess.run(command, cwd=ROOT, check=True)
+    try:
+        subprocess.run(command, cwd=ROOT, check=True)
+    finally:
+        # The generated module is a build artifact; never leave it in the tree.
+        BUILD_VERSION_MODULE.unlink(missing_ok=True)
     _move_application_data(DIST)
     _prune_known_unused_qt_files(DIST)
     _prune_qt_translations(DIST)
