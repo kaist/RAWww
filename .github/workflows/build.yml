@@ -17,32 +17,51 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Windows installer
+          - name: Windows packages
             os: windows-latest
-            artifact: ctrlka-windows
-          - name: macOS installer
+          - name: macOS DMG
             os: macos-14
-            artifact: ctrlka-macos
           - name: Linux AppImage
             os: ubuntu-22.04
-            artifact: ctrlka-linux
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
+
       - name: Install dependencies
-        run: uv sync
-      - name: Build PyInstaller bundle
-        run: uv run python scripts/build_pyinstaller.py
+        run: uv sync --locked
+
+      - name: Build portable Windows application
+        if: runner.os == 'Windows'
+        run: uv run python scripts/build_pyinstaller.py --portable
+
+      - name: Create Windows portable archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/ctrlka -DestinationPath dist/ctrlka-windows-portable.zip
+
+      - name: Prepare Windows installer build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Remove-Item dist/ctrlka/portable.flag -Force
+
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        run: choco install innosetup --no-progress --yes
 
       - name: Build Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          choco install innosetup --no-progress -y
-          iscc installer/ctrlka.iss
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\ctrlka.iss'
+
+      - name: Build macOS application
+        if: runner.os == 'macOS'
+        run: uv run python scripts/build_pyinstaller.py
 
       - name: Build macOS DMG
         if: runner.os == 'macOS'
@@ -58,11 +77,15 @@ jobs:
           <key>CFBundleIdentifier</key><string>ru.ctrlka.app</string>
           <key>CFBundleName</key><string>Контролька</string>
           <key>CFBundlePackageType</key><string>APPL</string>
-          <key>CFBundleVersion</key><string>0.1.0</string>
+          <key>CFBundleVersion</key><string>1.0</string>
           </dict></plist>
           PLIST
           chmod +x "dist/ctrlka.app/Contents/MacOS/ctrlka"
           hdiutil create -volname Контролька -srcfolder "dist/ctrlka.app" -ov -format UDZO "dist/ctrlka-macos.dmg"
+
+      - name: Build Linux application
+        if: runner.os == 'Linux'
+        run: uv run python scripts/build_pyinstaller.py
 
       - name: Build Linux AppImage
         if: runner.os == 'Linux'
@@ -90,11 +113,28 @@ jobs:
           chmod +x appimagetool.AppImage
           ARCH=x86_64 ./appimagetool.AppImage AppDir dist/ctrlka-linux.AppImage
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Windows artifacts
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: ctrlka-windows
           path: |
-            dist/installer/*
-            dist/*.dmg
-            dist/*.AppImage
+            dist/ctrlka-windows-portable.zip
+            dist/installer/ctrlka-windows-setup.exe
+          if-no-files-found: error
+
+      - name: Upload macOS artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctrlka-macos
+          path: dist/ctrlka-macos.dmg
+          if-no-files-found: error
+
+      - name: Upload Linux artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctrlka-linux
+          path: dist/ctrlka-linux.AppImage
           if-no-files-found: error

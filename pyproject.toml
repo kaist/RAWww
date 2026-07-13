@@ -1,6 +1,6 @@
 [project]
 name = "rawww"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Add your description here"
 readme = "README.md"
 authors = [
@@ -22,8 +22,14 @@ rawww = "rawww:main"
 rawww-ai-benchmark = "rawww.ai_benchmark:main"
 
 [build-system]
-requires = ["uv_build>=0.11.21,<0.12.0"]
-build-backend = "uv_build"
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = { attr = "rawww.version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [dependency-groups]
 dev = [

@@ -16,7 +16,11 @@ Compression=lzma2
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
 WizardStyle=modern
+LanguageDetectionMethod=none
 UninstallDisplayIcon={app}\{#MyAppExeName}
+
+[Languages]
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Files]
 Source: "..\dist\ctrlka\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

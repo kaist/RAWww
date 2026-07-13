@@ -149,7 +149,7 @@ FOMANTIC_ICON_CODES = {
     "link": "\uf0c1",
     "cog": "\uf013", "help": "\uf128", "magic": "\uf0d0", "wrench": "\uf0ad",
     "edit": "\uf044", "calendar": "\uf133", "clock": "\uf017", "camera": "\uf030",
-    "file": "\uf15b", "arrow-right": "\uf061",
+    "file": "\uf15b", "arrow-right": "\uf061", "level-up": "\uf3bf", "folder-plus": "\uf65e",
 }
 FOMANTIC_ICON_FAMILY = ""
 
@@ -456,7 +456,7 @@ class PhotoGrid(QListWidget):
                         self.audioRequested.emit(Path(value))
                         event.accept()
                         return
-                badge = QRect(rect.right() - 36, rect.top() + 4, 32, 12)
+                badge = QRect(rect.left() + 6, rect.top() + 6, 32, 12)
                 if series.get("count", 0) > 1 and badge.contains(event.position().toPoint()):
                     value = item.data(Qt.ItemDataRole.UserRole)
                     if value:
@@ -660,7 +660,16 @@ class MarkIndicatorButton(QToolButton):
             font.setBold(True)
             painter.setFont(font)
             painter.setPen(QColor("#ffffff"))
-            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+            metrics = QFontMetricsF(font)
+            glyph_bounds = metrics.tightBoundingRect(self.text())
+            center = QRectF(self.rect()).center()
+            painter.drawText(
+                QPointF(
+                    center.x() - glyph_bounds.width() / 2 - glyph_bounds.left(),
+                    center.y() - glyph_bounds.height() / 2 - glyph_bounds.top(),
+                ),
+                self.text(),
+            )
 
 
 class PhotoCardDelegate(QStyledItemDelegate):
@@ -782,6 +791,7 @@ class PhotoCardDelegate(QStyledItemDelegate):
 
         # For folders: full width text, no ratings/badges.
         caption_rect = QRect(rect.left() + 5, rect.bottom() - bottom + 2, rect.width() - 10, bottom - 2)
+        text_rect = QRect(caption_rect)
         if path_obj and path_obj.is_dir():
             text_rect = QRect(rect.left() + 8, rect.bottom() - (20 if self.compact else 24) - 1, rect.width() - 16, 20 if self.compact else 24)
         # For folders always use just the folder name, never full path
@@ -792,19 +802,16 @@ class PhotoCardDelegate(QStyledItemDelegate):
         color = QColor("#242424")
         painter.setPen(color)
         font = QFont(option.font)
-        font.setPointSizeF(8.5 if self.compact else (10.5 if path_obj and path_obj.is_dir() else 7.5))
+        font.setPointSizeF(
+            7.0 if self.compact and not (path_obj and path_obj.is_dir())
+            else 8.5 if self.compact
+            else 10.5 if path_obj and path_obj.is_dir()
+            else 7.5
+        )
         font.setWeight(QFont.Weight.Normal)
         painter.setFont(font)
         rating = int(detail.get("rating") or 0) if not (path_obj and path_obj.is_dir()) else 0
         rating_text = "★" * rating
-        if not (path_obj and path_obj.is_dir()):
-            # Always reserve five stars, regardless of the current rating.
-            # This keeps the filename clear of the rating area and guarantees
-            # that a later five-star mark cannot be clipped.
-            rating_width = min(painter.fontMetrics().horizontalAdvance("★" * 5) + 5, caption_rect.width())
-            text_rect = QRect(caption_rect)
-            text_rect.setWidth(max(0, caption_rect.width() - rating_width - 3))
-            rating_rect = QRect(caption_rect.right() - rating_width + 1, caption_rect.top(), rating_width, caption_rect.height())
         display_text = text
         font_metrics = painter.fontMetrics()
         if path_obj and path_obj.is_file() and font_metrics.horizontalAdvance(text) > text_rect.width():
@@ -820,14 +827,13 @@ class PhotoCardDelegate(QStyledItemDelegate):
         )
         # Only render ratings and series badges for photos, not folders
         if not (path_obj and path_obj.is_dir()):
-            if rating_text:
-                painter.setPen(QColor("#3a3123"))
-                painter.drawText(rating_rect, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, rating_text)
             count = int(series.get("count", 0) or 0)
+            badge_height = 10 if self.compact else 12
+            badge_top = rect.top() + 4
+            badge_left = rect.left() + 4
             if count > 1:
                 badge_width = 26 if self.compact else 32
-                badge_height = 10 if self.compact else 12
-                badge_rect = QRect(rect.right() - badge_width - 4, rect.top() + 4, badge_width, badge_height)
+                badge_rect = QRect(badge_left, badge_top, badge_width, badge_height)
                 painter.setPen(QColor("#262626"))
                 icon_font = QFont(FOMANTIC_ICON_FAMILY or option.font.family())
                 icon_font.setPixelSize(7 if self.compact else 8)
@@ -840,6 +846,15 @@ class PhotoCardDelegate(QStyledItemDelegate):
                 marker = "−" if series.get("expanded") else "+"
                 badge_text = str(count) if self.compact else f"{count} {marker}"
                 painter.drawText(QRect(badge_rect.left() + icon_width, badge_rect.top(), badge_width - icon_width, badge_rect.height()), Qt.AlignmentFlag.AlignCenter, badge_text)
+                badge_left += badge_width + 3
+            if rating_text:
+                rating_font = QFont(option.font)
+                rating_font.setPointSizeF(7.0 if self.compact else 8.0)
+                painter.setFont(rating_font)
+                rating_width = painter.fontMetrics().horizontalAdvance(rating_text)
+                rating_rect = QRect(badge_left, badge_top, rating_width + 2, badge_height)
+                painter.setPen(QColor("#3a3123"))
+                painter.drawText(rating_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, rating_text)
         painter.restore()
 
     def sizeHint(self, option, index) -> QSize:
@@ -904,7 +919,7 @@ class ViewerStrip(QListWidget):
             if item is not None:
                 series = item.data(SERIES_ROLE) or {}
                 rect = self.visualItemRect(item).adjusted(2, 2, -2, -2)
-                badge = QRect(rect.right() - 30, rect.top() + 4, 26, 10)
+                badge = QRect(rect.left() + 4, rect.top() + 4, 26, 10)
                 if int(series.get("count", 0) or 0) > 1 and badge.contains(event.position().toPoint()):
                     value = item.data(Qt.ItemDataRole.UserRole)
                     if value:
@@ -1989,6 +2004,7 @@ class FullView(QFrame):
         self.image_view.faceClicked.connect(self._show_face_actions)
         self.image_view.zoomPressed.connect(self._request_mouse_zoom)
         self.image_view.zoomReleased.connect(self._release_mouse_zoom)
+        self.image_view.wheelScrolled.connect(self._navigate_wheel)
         self.video_widget = QVideoWidget()
         self.video_widget.setObjectName("fullVideoView")
         self.media_stack = QStackedWidget()
@@ -2476,6 +2492,12 @@ class FullView(QFrame):
         self.image_view.reset_zoom(self._preview_pixmap)
         self._update_mark_indicator()
 
+    def _navigate_wheel(self, direction: int) -> None:
+        if direction > 0:
+            self.previousRequested.emit()
+        elif direction < 0:
+            self.nextRequested.emit()
+
     def refresh_mark_indicator(self) -> None:
         """Apply a changed interface preference without reopening Full View."""
         self._update_mark_indicator()
@@ -2640,6 +2662,7 @@ class FullImageView(QWidget):
     faceClicked = Signal(object, QPoint)
     zoomPressed = Signal(object)
     zoomReleased = Signal()
+    wheelScrolled = Signal(int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -2663,6 +2686,7 @@ class FullImageView(QWidget):
         self._cursor_timer.setInterval(3000)
         self._cursor_timer.timeout.connect(self._hide_cursor)
         self._cursor_hidden = False
+        self._wheel_delta = 0
         self.setMinimumSize(1, 1)
         self.setAutoFillBackground(False)
         self.setMouseTracking(True)
@@ -2853,6 +2877,23 @@ class FullImageView(QWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        if self._zoom_requested:
+            event.ignore()
+            return
+        delta = event.angleDelta().y()
+        if not delta:
+            delta = event.pixelDelta().y() * 3
+        if not delta:
+            event.ignore()
+            return
+        self._wheel_delta += delta
+        while abs(self._wheel_delta) >= 120:
+            direction = 1 if self._wheel_delta > 0 else -1
+            self.wheelScrolled.emit(direction)
+            self._wheel_delta -= direction * 120
+        event.accept()
 
     def _face_at(self, position) -> int:
         if self._pixmap is None or self._pixmap.isNull():
@@ -3108,10 +3149,6 @@ class SettingsDialog(QDialog):
         self.code_replacements_editor = CodeReplacementsEditor(client, settings, changed, login_requested)
         tabs.addTab(self.code_replacements_editor, "Коды замен")
         tabs.addTab(self._interface_tab(), "Интерфейс")
-        cache_tab_index = tabs.addTab(self._cache_tab(), "Кэш")
-        tabs.currentChanged.connect(
-            lambda index: self._refresh_cache_size() if index == cache_tab_index else None
-        )
         tabs.addTab(self._about_tab(), "О приложении")
         layout.addWidget(tabs, 1)
 
@@ -3143,16 +3180,34 @@ class SettingsDialog(QDialog):
 
         self.restore_workspaces = SettingsCheckBox("Восстанавливать открытые вкладки")
         self.restore_workspaces.setChecked(self.settings.value("restore_workspaces", True, bool))
-        self.restore_workspaces.toggled.connect(self._update_behavior_state)
         layout.addWidget(self.restore_workspaces)
-        self.restore_active_workspace = SettingsCheckBox("Возвращаться к активной вкладке")
-        self.restore_active_workspace.setChecked(self.settings.value("restore_active_workspace", True, bool))
-        layout.addWidget(self.restore_active_workspace)
         self.delete_without_confirmation = SettingsCheckBox("Удалять без подтверждения по DEL или Shift+DEL")
         self.delete_without_confirmation.setChecked(
             self.settings.value("behavior/delete_without_confirmation", False, bool)
         )
         layout.addWidget(self.delete_without_confirmation)
+
+        cache_card = QFrame()
+        cache_card.setObjectName("externalEditorCard")
+        cache_layout = QVBoxLayout(cache_card)
+        cache_layout.setContentsMargins(14, 13, 14, 14)
+        cache_layout.setSpacing(7)
+        cache_heading = QLabel("Кэш")
+        cache_heading.setObjectName("externalEditorTitle")
+        cache_layout.addWidget(cache_heading)
+        cache_hint = QLabel("Кэш содержит миниатюры и результаты анализа фотографий. Очистка не удаляет исходные файлы.")
+        cache_hint.setObjectName("externalEditorHint")
+        cache_hint.setWordWrap(True)
+        cache_layout.addWidget(cache_hint)
+        self.cache_size_label = QLabel()
+        self.cache_size_label.setObjectName("settingsHint")
+        cache_layout.addWidget(self.cache_size_label)
+        clear_cache_button = QPushButton("Очистить кэш")
+        clear_cache_button.setObjectName("settingsPrimaryButton")
+        clear_cache_button.clicked.connect(self._clear_cache)
+        cache_layout.addWidget(clear_cache_button, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(cache_card)
+        self._refresh_cache_size()
 
         editor_card = QFrame()
         editor_card.setObjectName("externalEditorCard")
@@ -3229,7 +3284,6 @@ class SettingsDialog(QDialog):
             layout.addWidget(integration_card)
             self._refresh_explorer_integration_button()
         layout.addStretch(1)
-        self._update_behavior_state(self.restore_workspaces.isChecked())
         self._update_editor_choice_state(self.custom_editor.isChecked())
         return tab
 
@@ -3406,30 +3460,6 @@ class SettingsDialog(QDialog):
         layout.addStretch(1)
         return tab
 
-    def _cache_tab(self) -> QWidget:
-        tab = QWidget()
-        tab.setObjectName("settingsTabPage")
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(18, 20, 18, 18)
-        layout.setSpacing(10)
-        heading = QLabel("Кэш")
-        heading.setObjectName("settingsSectionTitle")
-        layout.addWidget(heading)
-        hint = QLabel("Кэш содержит миниатюры и результаты анализа фотографий. Очистка не удаляет исходные файлы.")
-        hint.setObjectName("settingsHint")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
-        self.cache_size_label = QLabel()
-        self.cache_size_label.setObjectName("settingsHint")
-        layout.addWidget(self.cache_size_label)
-        clear = QPushButton("Очистить кэш")
-        clear.setObjectName("settingsPrimaryButton")
-        clear.clicked.connect(self._clear_cache)
-        layout.addWidget(clear, 0, Qt.AlignmentFlag.AlignLeft)
-        layout.addStretch(1)
-        self._refresh_cache_size()
-        return tab
-
     def _refresh_cache_size(self) -> None:
         self.cache_size_label.setText(f"Размер: {self._format_size(self.cache_size_provider())}")
 
@@ -3476,9 +3506,6 @@ class SettingsDialog(QDialog):
         layout.addStretch(1)
         return tab
 
-    def _update_behavior_state(self, enabled: bool) -> None:
-        self.restore_active_workspace.setEnabled(enabled)
-
     def _save(self) -> None:
         sequences = {identifier: editor.keySequence() for identifier, editor in self.hotkey_edits.items()}
         if any(_uses_reserved_navigation_key(sequence) for sequence in sequences.values()):
@@ -3493,7 +3520,6 @@ class SettingsDialog(QDialog):
             if text:
                 assigned[text] = identifier
         self.settings.setValue("restore_workspaces", self.restore_workspaces.isChecked())
-        self.settings.setValue("restore_active_workspace", self.restore_active_workspace.isChecked())
         self.settings.setValue("behavior/delete_without_confirmation", self.delete_without_confirmation.isChecked())
         self.settings.setValue("interface/show_full_view_counter", self.show_full_view_counter.isChecked())
         self.settings.setValue(
@@ -5024,7 +5050,7 @@ class Workspace(QMainWindow):
         self.volume_removability: dict[str, bool] = {}
         self.drive_button_layout = QHBoxLayout()
         self.drive_button_layout.setContentsMargins(0, 0, 0, 0)
-        self.drive_button_layout.setSpacing(4)
+        self.drive_button_layout.setSpacing(3)
         self.drive_button_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         sidebar_layout.addLayout(self.drive_button_layout)
 
@@ -5035,7 +5061,7 @@ class Workspace(QMainWindow):
         self.shotsync_button.setObjectName("driveButton")
         self.shotsync_button.setCheckable(True)
         self.shotsync_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.shotsync_button.setIconSize(QSize(20, 20))
+        self.shotsync_button.setIconSize(QSize(16, 16))
         self.shotsync_button.setProperty("volumeKey", SHOTSYNC_VOLUME_KEY)
         self.shotsync_button.setText("ShotSync")
         self.shotsync_button.setToolTip("Съёмки ShotSync (shotsync.ru)")
@@ -5047,33 +5073,39 @@ class Workspace(QMainWindow):
 
         self._refresh_volume_buttons()
 
-        # Создаем тулбар с кнопками навигации над деревом папок
-        folder_toolbar = QWidget()
-        folder_toolbar.setObjectName("folderToolbar")
-        folder_toolbar_layout = QHBoxLayout(folder_toolbar)
-        folder_toolbar_layout.setContentsMargins(0, 0, 0, 8)
-        folder_toolbar_layout.setSpacing(4)
-        
+        # Панель дерева папок с действиями в заголовке.
+        directory_panel = QWidget()
+        directory_panel.setObjectName("directoryPanel")
+        directory_layout = QVBoxLayout(directory_panel)
+        directory_layout.setContentsMargins(0, 0, 0, 0)
+        directory_layout.setSpacing(4)
+        directory_header = QHBoxLayout()
+        directory_header.setContentsMargins(2, 0, 2, 0)
+        directory_header.setSpacing(3)
+        directory_title = QLabel("ПАПКИ")
+        directory_title.setObjectName("directoryTitle")
+        directory_header.addWidget(directory_title)
+        directory_header.addStretch()
+
         # Кнопка "На уровень вверх"
         self.up_button = QToolButton()
-        self.up_button.setObjectName("folderToolButton")
-        self.up_button.setIcon(_sidebar_tool_icon("up"))
-        self.up_button.setIconSize(QSize(16, 16))
+        self.up_button.setObjectName("directoryAction")
+        self.up_button.setIcon(_fomantic_icon("level-up", 16))
+        self.up_button.setIconSize(QSize(14, 14))
         self.up_button.setToolTip("На уровень вверх")
         self.up_button.clicked.connect(self._go_up_directory)
-        folder_toolbar_layout.addWidget(self.up_button)
+        directory_header.addWidget(self.up_button)
         
         # Кнопка "Создать папку"
         self.new_folder_button = QToolButton()
-        self.new_folder_button.setObjectName("folderToolButton")
-        self.new_folder_button.setIcon(_sidebar_tool_icon("new-folder"))
-        self.new_folder_button.setIconSize(QSize(16, 16))
+        self.new_folder_button.setObjectName("directoryAction")
+        self.new_folder_button.setIcon(_fomantic_icon("folder-plus", 16))
+        self.new_folder_button.setIconSize(QSize(14, 14))
         self.new_folder_button.setToolTip("Создать папку")
         self.new_folder_button.clicked.connect(self._create_new_folder)
-        folder_toolbar_layout.addWidget(self.new_folder_button)
-        
-        # Выравниваем кнопки по левому краю
-        folder_toolbar_layout.addStretch()
+        directory_header.addWidget(self.new_folder_button)
+        directory_layout.addLayout(directory_header)
+        directory_layout.addWidget(self.dir_tree, 1)
         
         # The sidebar body swaps between the local folder browser and the
         # ShotSync cloud panel depending on which "disk" is selected.
@@ -5083,8 +5115,6 @@ class Workspace(QMainWindow):
         local_layout = QVBoxLayout(local_page)
         local_layout.setContentsMargins(0, 0, 0, 0)
         local_layout.setSpacing(8)
-        local_layout.addWidget(folder_toolbar)
-
         favorites = QWidget()
         favorites.setObjectName("favoritesPanel")
         favorites.setMinimumHeight(48)
@@ -5123,7 +5153,7 @@ class Workspace(QMainWindow):
         self.favorites_splitter = FavoritesSplitter(Qt.Orientation.Vertical)
         self.favorites_splitter.setObjectName("favoritesSplitter")
         self.favorites_splitter.setChildrenCollapsible(False)
-        self.favorites_splitter.addWidget(self.dir_tree)
+        self.favorites_splitter.addWidget(directory_panel)
         self.favorites_splitter.addWidget(favorites)
         self.favorites_splitter.setStretchFactor(0, 1)
         self.favorites_splitter.setStretchFactor(1, 0)
@@ -5158,54 +5188,57 @@ class Workspace(QMainWindow):
         toolbar = QWidget()
         toolbar.setObjectName("viewerToolbar")
         toolbar_layout = QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(10, 8, 10, 8)
-        toolbar_layout.setSpacing(7)
+        toolbar_layout.setContentsMargins(8, 4, 8, 4)
+        toolbar_layout.setSpacing(5)
 
         filter_panel = QWidget()
         filter_panel.setObjectName("viewerFiltersPanel")
+        filter_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         filter_layout = QHBoxLayout(filter_panel)
         filter_layout.setContentsMargins(7, 4, 7, 4)
-        filter_layout.setSpacing(6)
+        filter_layout.setSpacing(3)
+        filter_layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         filter_icon = QLabel()
-        filter_icon.setPixmap(_fomantic_icon("filter", 14, "#a8b0bd").pixmap(QSize(14, 14)))
+        filter_icon.setFixedSize(12, 12)
+        filter_icon.setPixmap(_fomantic_icon("filter", 12, "#a8b0bd").pixmap(QSize(12, 12)))
         filter_layout.addWidget(filter_icon)
 
         
         self.rating_filter = QComboBox()
         self.rating_filter.addItem("Все рейтинги", None)
-        self.rating_filter.setItemIcon(0, _fomantic_icon("star", 12, "#a8b0bd"))
+        self.rating_filter.setItemIcon(0, _fomantic_icon("star", 10, "#a8b0bd"))
         for rating in range(5, 0, -1):
             self.rating_filter.addItem("★" * rating, rating)
-            self.rating_filter.setItemIcon(self.rating_filter.count() - 1, _fomantic_icon("star", 12, "#a8b0bd"))
-        self.rating_filter.setFixedWidth(148)
+            self.rating_filter.setItemIcon(self.rating_filter.count() - 1, _fomantic_icon("star", 10, "#a8b0bd"))
+        self.rating_filter.setFixedWidth(118)
         self.color_filter = QComboBox()
         for label, value in (("Все цвета", None), ("Без цвета", ""), ("Красный", "red"), ("Жёлтый", "yellow"), ("Зелёный", "green"), ("Синий", "blue"), ("Фиолетовый", "purple")):
             self.color_filter.addItem(label, value)
             if value is not None:
                 self.color_filter.setItemIcon(self.color_filter.count() - 1, _color_swatch_icon(value or None))
-        self.color_filter.setItemIcon(0, _fomantic_icon("brush", 12, "#a8b0bd"))
-        self.color_filter.setFixedWidth(148)
+        self.color_filter.setItemIcon(0, _fomantic_icon("brush", 10, "#a8b0bd"))
+        self.color_filter.setFixedWidth(118)
         self.media_filter = QComboBox()
         for label, value in (("Фото и видео", None), ("Фото", "image"), ("Видео", "video")):
             self.media_filter.addItem(label, value)
-        self.media_filter.setItemIcon(0, _fomantic_icon("media", 12, "#a8b0bd"))
-        self.media_filter.setItemIcon(1, _fomantic_icon("images", 12, "#a8b0bd"))
-        self.media_filter.setItemIcon(2, _fomantic_icon("film", 12, "#a8b0bd"))
-        self.media_filter.setFixedWidth(148)
+        self.media_filter.setItemIcon(0, _fomantic_icon("media", 10, "#a8b0bd"))
+        self.media_filter.setItemIcon(1, _fomantic_icon("images", 10, "#a8b0bd"))
+        self.media_filter.setItemIcon(2, _fomantic_icon("film", 10, "#a8b0bd"))
+        self.media_filter.setFixedWidth(118)
         self.file_type_filter = QComboBox()
         # The combined option is the neutral/default state: it must not hide
         # videos or other supported image formats. The dedicated JPG/RAW
         # options below are the actual file-type filters.
         for label, value in (("JPG и RAW", None), ("Только JPG", "jpg"), ("Только RAW", "raw")):
             self.file_type_filter.addItem(label, value)
-        self.file_type_filter.setItemIcon(0, _fomantic_icon("images", 12, "#a8b0bd"))
-        self.file_type_filter.setItemIcon(1, _fomantic_icon("file", 12, "#a8b0bd"))
-        self.file_type_filter.setItemIcon(2, _fomantic_icon("camera", 12, "#a8b0bd"))
-        self.file_type_filter.setFixedWidth(132)
+        self.file_type_filter.setItemIcon(0, _fomantic_icon("images", 10, "#a8b0bd"))
+        self.file_type_filter.setItemIcon(1, _fomantic_icon("file", 10, "#a8b0bd"))
+        self.file_type_filter.setItemIcon(2, _fomantic_icon("camera", 10, "#a8b0bd"))
+        self.file_type_filter.setFixedWidth(106)
         self.camera_filter = QComboBox()
         self.camera_filter.addItem("Все камеры", None)
-        self.camera_filter.setItemIcon(0, _fomantic_icon("images", 12, "#a8b0bd"))
-        self.camera_filter.setFixedWidth(170)
+        self.camera_filter.setItemIcon(0, _fomantic_icon("images", 10, "#a8b0bd"))
+        self.camera_filter.setFixedWidth(132)
         self.shot_filter = QComboBox()
         for label, value in (("Все планы", None), ("Крупный", "closeup"), ("Средний", "medium"), ("Общий", "wide"), ("Без лиц", "no_face")):
             self.shot_filter.addItem(label, value)
@@ -5213,20 +5246,20 @@ class Workspace(QMainWindow):
         self.sort_combo = QComboBox()
         for label, value in (("По имени ↑", "name"), ("По имени ↓", "name_desc"), ("По времени ↑", "time"), ("По времени ↓", "time_desc"), ("По рейтингу", "rating")):
             self.sort_combo.addItem(label, value)
-        self.sort_combo.setItemIcon(0, _fomantic_icon("sort", 12, "#a8b0bd"))
+        self.sort_combo.setItemIcon(0, _fomantic_icon("sort", 10, "#a8b0bd"))
         for index in range(1, self.sort_combo.count()):
-            self.sort_combo.setItemIcon(index, _fomantic_icon("sort", 12, "#a8b0bd"))
+            self.sort_combo.setItemIcon(index, _fomantic_icon("sort", 10, "#a8b0bd"))
         self.sort_combo.setCurrentIndex(self.sort_combo.findData("time"))
-        self.sort_combo.setFixedWidth(148)
+        self.sort_combo.setFixedWidth(118)
         self.search_edit = CenteredSearchEdit()
         self.search_edit.setObjectName("viewerSearchEdit")
         self.search_edit.addAction(
-            _fomantic_icon("search", 14, "#a8b0bd"),
+            _fomantic_icon("search", 12, "#a8b0bd"),
             QLineEdit.ActionPosition.LeadingPosition,
         )
         self.search_edit.setPlaceholderText("Поиск")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setFixedWidth(132)
+        self.search_edit.setFixedWidth(112)
         # Match the native height of the neighbouring combo-box controls.
         self.search_edit.setFixedHeight(self.media_filter.sizeHint().height())
         for control in (self.rating_filter, self.color_filter, self.media_filter, self.file_type_filter, self.camera_filter, self.shot_filter, self.sort_combo):
@@ -5238,17 +5271,17 @@ class Workspace(QMainWindow):
         self.face_filter_chip = QFrame()
         self.face_filter_chip.setObjectName("fullFaceFilterChip")
         chip_layout = QHBoxLayout(self.face_filter_chip)
-        chip_layout.setContentsMargins(5, 3, 4, 3)
-        chip_layout.setSpacing(4)
+        chip_layout.setContentsMargins(3, 2, 3, 2)
+        chip_layout.setSpacing(2)
         self.face_filter_avatar_label = QLabel()
-        self.face_filter_avatar_label.setFixedSize(26, 26)
+        self.face_filter_avatar_label.setFixedSize(20, 20)
         self.face_filter_avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         chip_layout.addWidget(self.face_filter_avatar_label)
         self.face_clear_button = QToolButton()
         self.face_clear_button.setObjectName("fullFaceFilterClear")
-        self.face_clear_button.setIcon(_fomantic_icon("close", 12))
-        self.face_clear_button.setFixedSize(20, 20)
-        self.face_clear_button.setIconSize(QSize(12, 12))
+        self.face_clear_button.setIcon(_fomantic_icon("close", 10))
+        self.face_clear_button.setFixedSize(17, 17)
+        self.face_clear_button.setIconSize(QSize(10, 10))
         self.face_clear_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.face_clear_button.setAutoRaise(True)
         self.face_clear_button.setToolTip("Сбросить фильтр по лицу")
@@ -5266,7 +5299,7 @@ class Workspace(QMainWindow):
         self.ai_button.setToolTip("AI: серии и лица")
         self.ai_button.clicked.connect(self._show_ai_menu)
         self.ai_analysis_available = False
-        toolbar_layout.addWidget(self.ai_button)
+        self.ai_button.setFixedSize(52, 44)
 
         self.xmp_button = QToolButton()
         self.xmp_button.setObjectName("toolbarAction")
@@ -5276,7 +5309,7 @@ class Workspace(QMainWindow):
         self.xmp_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.xmp_button.setToolTip("Экспорт метаданных в XMP")
         self.xmp_button.clicked.connect(self._show_xmp_menu)
-        toolbar_layout.addWidget(self.xmp_button)
+        self.xmp_button.setFixedSize(52, 44)
 
         self.utilities_button = QToolButton()
         self.utilities_button.setObjectName("toolbarAction")
@@ -5286,7 +5319,17 @@ class Workspace(QMainWindow):
         self.utilities_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.utilities_button.setToolTip("Утилиты")
         self.utilities_button.clicked.connect(self._show_utilities_menu)
-        toolbar_layout.addWidget(self.utilities_button)
+        self.utilities_button.setFixedSize(52, 44)
+        toolbar_actions = QWidget()
+        toolbar_actions.setObjectName("toolbarActionsGroup")
+        toolbar_actions.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        toolbar_actions_layout = QHBoxLayout(toolbar_actions)
+        toolbar_actions_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_actions_layout.setSpacing(0)
+        toolbar_actions_layout.addWidget(self.ai_button)
+        toolbar_actions_layout.addWidget(self.xmp_button)
+        toolbar_actions_layout.addWidget(self.utilities_button)
+        toolbar_layout.addWidget(toolbar_actions)
         self.status_panel = QWidget()
         self.status_panel.setObjectName("viewerStatusPanel")
         self.status_panel.setMinimumWidth(0)
@@ -5316,19 +5359,19 @@ class Workspace(QMainWindow):
         self.ai_panel = QWidget()
         self.ai_panel.setObjectName("viewerAiPanel")
         ai_layout = QHBoxLayout(self.ai_panel)
-        ai_layout.setContentsMargins(10, 4, 10, 4)
-        ai_layout.setSpacing(18)
+        ai_layout.setContentsMargins(8, 2, 8, 2)
+        ai_layout.setSpacing(10)
         self.series_faces_group = QWidget()
         self.series_faces_group.setObjectName("aiPanelGroup")
         series_faces_layout = QHBoxLayout(self.series_faces_group)
         series_faces_layout.setContentsMargins(0, 0, 0, 0)
-        series_faces_layout.setSpacing(5)
+        series_faces_layout.setSpacing(3)
         series_faces_title = QLabel("СЕРИИ И ЛИЦА")
         series_faces_title.setObjectName("aiPanelTitle")
         series_faces_layout.addWidget(series_faces_title)
         self.series_toggle = QToolButton()
         self.series_toggle.setObjectName("aiFilter")
-        self.series_toggle.setIcon(_fomantic_icon("images", 13))
+        self.series_toggle.setIcon(_fomantic_icon("images", 11))
         self.series_toggle.setText("Серии")
         self.series_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.series_toggle.setToolTip("Включить или выключить группировку по сериям")
@@ -5338,7 +5381,7 @@ class Workspace(QMainWindow):
         series_faces_layout.addWidget(self.series_toggle)
         self.faces_panel_button = QToolButton()
         self.faces_panel_button.setObjectName("aiFilter")
-        self.faces_panel_button.setIcon(_fomantic_icon("user", 13))
+        self.faces_panel_button.setIcon(_fomantic_icon("user", 11))
         self.faces_panel_button.setText("Лица")
         self.faces_panel_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.faces_panel_button.setToolTip("Открыть наборы лиц")
@@ -5350,7 +5393,7 @@ class Workspace(QMainWindow):
         self.shot_group.setObjectName("aiPanelGroup")
         shot_layout = QHBoxLayout(self.shot_group)
         shot_layout.setContentsMargins(0, 0, 0, 0)
-        shot_layout.setSpacing(5)
+        shot_layout.setSpacing(3)
         self.ai_panel_title = QLabel("КРУПНОСТЬ ПЛАНА")
         self.ai_panel_title.setObjectName("aiPanelTitle")
         shot_layout.addWidget(self.ai_panel_title)
@@ -5924,7 +5967,7 @@ class Workspace(QMainWindow):
         self.dir_tree.setCurrentIndex(index)
         menu = QMenu(self.dir_tree)
         create = menu.addAction("Создать папку")
-        create.setIcon(_sidebar_tool_icon("new-folder"))
+        create.setIcon(_fomantic_icon("folder-plus", 14))
         create.triggered.connect(
             lambda _checked=False, target=path: QTimer.singleShot(
                 0, lambda: self._create_new_folder(target)
@@ -6318,7 +6361,7 @@ class Workspace(QMainWindow):
                 button.setObjectName("driveButton")
                 button.setCheckable(True)
                 button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-                button.setIconSize(QSize(20, 20))
+                button.setIconSize(QSize(16, 16))
                 button.setProperty("volumeKey", key)
                 button.clicked.connect(lambda _checked=False, root=path: self._drive_selected(root))
                 self.drive_buttons.addButton(button)
@@ -6402,13 +6445,13 @@ class Workspace(QMainWindow):
         logo_path = data_path("assets") / "shotsync.png"
         if logo_path.exists():
             px = QPixmap(str(logo_path)).scaled(
-                20, 20,
+                16, 16,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
             if not px.isNull():
                 return QIcon(px)
-        return _fomantic_icon("cloud", 18, "#8fb8ff")
+        return _fomantic_icon("cloud", 16, "#8fb8ff")
 
     def _activate_shotsync(self) -> None:
         """Switch the sidebar to the ShotSync cloud panel."""
@@ -10162,7 +10205,6 @@ class MainWindow(QMainWindow):
             if (workspace := self.workspace_stack.widget(index)) is not None and workspace.current_dir.is_dir()
         ]
         self.settings.setValue("open_workspaces", directories)
-        self.settings.setValue("active_workspace", self.tabs.currentIndex())
         shotsync_paths = [
             str(workspace.current_dir)
             for index in range(self.workspace_stack.count())
@@ -10214,8 +10256,6 @@ class MainWindow(QMainWindow):
             workspace = self.workspace_stack.widget(index)
             if isinstance(workspace, Workspace) and str(workspace.current_dir) in shotsync_paths:
                 workspace._activate_shotsync()
-        active = self.settings.value("active_workspace", 0, int) if self.settings.value("restore_active_workspace", True, bool) else 0
-        self.tabs.setCurrentIndex(max(0, min(active, self.tabs.count() - 1)))
 
     def _show_full_view(self, workspace: Workspace) -> None:
         index = self.workspace_stack.indexOf(workspace)
@@ -10666,11 +10706,11 @@ def apply_theme(app: QApplication) -> None:
         QToolButton#driveButton {
             background: #292929;
             border: 1px solid #3a3a3a;
-            border-radius: 7px;
+            border-radius: 5px;
             color: #e8e8e8;
             font-weight: 600;
-            min-height: 26px;
-            padding: 1px 6px 1px 5px;
+            min-height: 22px;
+            padding: 0 3px;
         }
         QToolButton#driveButton:hover {
             background: #363636;
@@ -10681,27 +10721,33 @@ def apply_theme(app: QApplication) -> None:
             border-color: #79aaff;
             color: white;
         }
-        QWidget#folderToolbar {
+        QWidget#directoryPanel {
             background: transparent;
         }
-        QToolButton#folderToolButton {
-            background: #262626;
-            border: 1px solid #151515;
+        QLabel#directoryTitle {
+            background: transparent;
+            color: #a9a9a9;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        QToolButton#directoryAction {
+            background: transparent;
+            border: 1px solid transparent;
             border-radius: 3px;
-            min-width: 28px;
-            max-width: 28px;
-            min-height: 26px;
-            max-height: 26px;
+            min-width: 22px;
+            max-width: 22px;
+            min-height: 20px;
+            max-height: 20px;
             padding: 0;
         }
-        QToolButton#folderToolButton:hover {
+        QToolButton#directoryAction:hover {
             background: #303030;
             border-color: #4b4b4b;
         }
-        QToolButton#folderToolButton:pressed {
+        QToolButton#directoryAction:pressed {
             background: #1b1b1b;
         }
-        QToolButton#folderToolButton:disabled {
+        QToolButton#directoryAction:disabled {
             background: #202020;
             border-color: #121212;
         }
@@ -11072,7 +11118,7 @@ def apply_theme(app: QApplication) -> None:
         }
         /* Visual language shared with the ShotSync /v viewer. */
         QWidget#viewerToolbar {
-            min-height: 42px;
+            min-height: 36px;
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                 stop:0 #3d3d3d, stop:0.48 #303030, stop:1 #272727);
             border-bottom: 1px solid #111111;
@@ -11080,13 +11126,14 @@ def apply_theme(app: QApplication) -> None:
         }
         QWidget#viewerToolbar QComboBox, QWidget#viewerToolbar QLineEdit,
         QWidget#viewerToolbar QPushButton, QWidget#viewerToolbar QToolButton {
-            min-height: 24px;
+            min-height: 21px;
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                 stop:0 #515151, stop:1 #404040);
             border: 1px solid #1b1b1b;
             border-radius: 2px;
             color: #ececec;
-            padding: 2px 8px;
+            padding: 1px 6px;
+            font-size: 10px;
         }
         QWidget#viewerToolbar QLineEdit {
             background: #303030;
@@ -11125,7 +11172,7 @@ def apply_theme(app: QApplication) -> None:
             background: #707070;
         }
         QWidget#viewerFiltersPanel {
-            min-height: 32px;
+            min-height: 27px;
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                 stop:0 rgba(46, 46, 46, 0.96), stop:1 rgba(35, 35, 35, 0.96));
             border: 1px solid rgba(255, 255, 255, 0.12);
@@ -11144,8 +11191,9 @@ def apply_theme(app: QApplication) -> None:
         }
         QWidget#viewerFiltersPanel QComboBox,
         QWidget#viewerFiltersPanel QLineEdit {
-            min-height: 24px;
-            max-height: 24px;
+            min-height: 21px;
+            max-height: 21px;
+            font-size: 10px;
         }
         QFrame#faceFilterChip {
             background: #343434;
@@ -11206,13 +11254,13 @@ def apply_theme(app: QApplication) -> None:
         }
         QFrame#faceSetRow { background: transparent; border: none; }
         QWidget#viewerFiltersPanel QComboBox {
-            padding-left: 7px;
-            padding-right: 4px;
+            padding-left: 5px;
+            padding-right: 3px;
         }
         QWidget#viewerFiltersPanel QLineEdit {
             background: #303030;
-            padding-left: 9px;
-            padding-right: 9px;
+            padding-left: 7px;
+            padding-right: 7px;
             padding-top: 0;
             padding-bottom: 0;
         }
@@ -11494,7 +11542,7 @@ def apply_theme(app: QApplication) -> None:
         QPushButton#batchResizePrimaryButton:hover { background: #3d6f9d; }
         QPushButton#batchResizePrimaryButton:disabled { background: #303030; border-color: #464646; color: #777d84; }
         QWidget#viewerAiPanel {
-            min-height: 36px;
+            min-height: 30px;
             background: transparent;
             border-bottom: 1px solid #131313;
             border-top: 1px solid rgba(255, 255, 255, 0.05);
@@ -11507,13 +11555,13 @@ def apply_theme(app: QApplication) -> None:
             padding-right: 4px;
         }
         QToolButton#aiFilter {
-            min-height: 24px;
+            min-height: 21px;
             border: 1px solid #363636;
-            border-radius: 12px;
+            border-radius: 10px;
             background: #242424;
             color: #c9c9c9;
-            padding: 0 9px;
-            font-size: 11px;
+            padding: 0 7px;
+            font-size: 10px;
         }
         QToolButton#aiFilter:hover { background: #303030; color: #f0f0f0; }
         QToolButton#aiFilter:checked {
@@ -11522,13 +11570,13 @@ def apply_theme(app: QApplication) -> None:
             color: #ffffff;
         }
         QToolButton#shotFilter {
-            min-height: 24px;
+            min-height: 21px;
             border: 1px solid #363636;
             border-radius: 12px;
             background: #242424;
             color: #c9c9c9;
-            padding: 0 9px;
-            font-size: 11px;
+            padding: 0 7px;
+            font-size: 10px;
         }
         QToolButton#shotFilter:hover { background: #303030; color: #f0f0f0; }
         QToolButton#shotFilter:checked {
@@ -11683,7 +11731,7 @@ def apply_theme(app: QApplication) -> None:
         QFrame#audioPanel {
             background: #171717;
             border: 1px solid #454545;
-            border-radius: 12px;
+            border-radius: 10px;
         }
         QLabel#videoTime { min-width: 82px; background: transparent; color: #d5d5d5; font-size: 11px; font-weight: 600; }
         QSlider#videoSeek { background: transparent; }
@@ -11954,33 +12002,6 @@ def _set_windows_app_user_model_id() -> None:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ru.shotsync.ctrlka")
     except (AttributeError, OSError):
         pass
-
-
-def _sidebar_tool_icon(kind: str) -> QIcon:
-    """Monochrome icons for the compact directory toolbar."""
-    pixmap = QPixmap(32, 32)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor("#e2e2e2"), 1.8)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-
-    if kind == "up":
-        painter.drawLine(7, 24, 15, 16)
-        painter.drawLine(15, 16, 23, 24)
-        painter.drawLine(15, 16, 15, 9)
-    elif kind == "new-folder":
-        painter.setBrush(QColor("#f0f0f0"))
-        painter.drawRoundedRect(QRectF(5, 10, 22, 14), 2.5, 2.5)
-        painter.drawRoundedRect(QRectF(7, 7, 8, 5), 1.8, 1.8)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawLine(16, 13, 16, 21)
-        painter.drawLine(12, 17, 20, 17)
-
-    painter.end()
-    return QIcon(pixmap)
 
 
 def _mounted_volume_paths() -> list[Path]:

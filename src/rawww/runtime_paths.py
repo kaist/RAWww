@@ -6,9 +6,13 @@ import sys
 from pathlib import Path
 
 
-# Set to True for a self-contained distribution.  The normal installed build
-# keeps using platform-native data locations.
-PORTABLE = False
+# A portable PyInstaller distribution carries this marker beside its executable.
+# The regular installer intentionally does not, because its application
+# directory is normally under Program Files and is not writable by the user.
+PORTABLE = bool(
+    getattr(sys, "frozen", False)
+    and (Path(sys.executable).resolve().parent / "portable.flag").is_file()
+)
 
 
 def application_directory() -> Path:

@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist" / "ctrlka"
+PORTABLE_MARKER = DIST / "portable.flag"
 CONTENTS = DIST / "bin"
 EXCLUDED_QT_MODULES = (
     "PySide6.Qt3DAnimation",
@@ -69,6 +70,11 @@ def _report_size(directory: Path) -> None:
     for path in sorted(files, key=lambda item: item.stat().st_size, reverse=True)[:25]:
         relative = path.relative_to(directory)
         print(f"  {path.stat().st_size / 1024 / 1024:7.1f} MiB  {relative}")
+
+
+def _add_portable_marker() -> None:
+    PORTABLE_MARKER.touch()
+    print(f"Portable marker: {PORTABLE_MARKER}")
 
 
 def _prune_known_unused_qt_files(directory: Path) -> None:
@@ -144,6 +150,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--upx", action="store_true", help="compress DLL/EXE/PYD files with UPX --brute")
     parser.add_argument("--console", action="store_true", help="keep a console for diagnosing startup errors")
+    parser.add_argument("--portable", action="store_true", help="mark the frozen build as portable")
     args = parser.parse_args()
     _clean_previous_build()
     command = [
@@ -175,6 +182,8 @@ def main() -> None:
     _prune_qt_translations(DIST)
     if args.upx:
         _compress_binaries(DIST)
+    if args.portable:
+        _add_portable_marker()
     _report_size(DIST)
 
 

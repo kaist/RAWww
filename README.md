@@ -72,7 +72,9 @@ uv run python -m unittest discover -s tests -v
 
 ## Updates
 
-The application version is stored in `src/rawww/version.py`. Контролька checks
+The application version is generated as `1.0.<Git commit count>` during build
+and is shared with the running application through `src/rawww/version.py`.
+Контролька checks
 `https://shotsync.ru/ctrlka/api/version/` ten seconds after launch by default;
 this can be disabled in **Settings → About**. Published releases and their
 platform-specific builds are managed in the ShotSync admin panel.
@@ -99,6 +101,15 @@ automatically removes unused Qt QML/Quick/PDF/OpenGL DLLs and keeps only the
 Russian Qt base translation after every build; `onedir`
 is also the format used to inspect and safely reduce bundled data before making
 an optional `onefile` release.
+
+GitHub Actions builds the Windows `onedir` package as
+`ctrlka-windows-portable.zip` and the Russian Inno Setup installer on every
+push or when started manually. Both files are published as the
+`rawww-windows` workflow artifact.
+
+The portable build keeps its settings, cache, and working data in the `work`
+folder beside `ctrlka.exe`; the installer build uses the normal Windows data
+locations.
 
 ## File-manager integration
 
