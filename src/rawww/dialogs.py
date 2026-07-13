@@ -468,6 +468,8 @@ class SettingsDialog(QDialog):
         return tab
 
     def _save(self) -> None:
+        if not self.code_replacements_editor.commit_pending_code():
+            return
         sequences = {identifier: editor.keySequence() for identifier, editor in self.hotkey_edits.items()}
         if any(_uses_reserved_navigation_key(sequence) for sequence in sequences.values()):
             QMessageBox.warning(self, "Горячие клавиши", "Стрелки, Enter и Esc нельзя назначать на другие действия.")

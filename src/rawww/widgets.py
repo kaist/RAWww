@@ -142,6 +142,7 @@ class CodeReplacementsEditor(QWidget):
 
     def _save_local_sets(self) -> None:
         self.settings.setValue("code_replacements/local_sets", self.sets)
+        self.settings.sync()
         self._changed(self.sets)
 
     def _ensure_default_local_set(self) -> None:
@@ -211,6 +212,24 @@ class CodeReplacementsEditor(QWidget):
         if watched is value and event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Return, Qt.Key.Key_Enter) and code.text().strip() and value.text().strip():
             self._add_code(code.text(), value.text()); event.accept(); return True
         return super().eventFilter(watched, event)
+
+    def commit_pending_code(self) -> bool:
+        if self.table.rowCount() == 0:
+            return True
+        row = self.table.rowCount() - 1
+        code = self.table.cellWidget(row, 0)
+        value = self.table.cellWidget(row, 1)
+        if not isinstance(code, QLineEdit) or not isinstance(value, QLineEdit):
+            return True
+        code_text = code.text().strip()
+        value_text = value.text().strip()
+        if not code_text and not value_text:
+            return True
+        if not code_text or not value_text:
+            self.status.setText("Заполните код и значение.")
+            return False
+        self._add_code(code_text, value_text)
+        return True
 
     def _create_set(self) -> None:
         name, ok = QInputDialog.getText(self, "Новый набор", "Название:")
