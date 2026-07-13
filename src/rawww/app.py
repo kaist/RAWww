@@ -8347,8 +8347,7 @@ class MainWindow(QMainWindow):
             workspace._flush_folder_cache(wait=True, close=True)
             workspace.folder_cache = None
             workspace.cache_ready = False
-            workspace.memory_cache.clear()
-            workspace.thumbnail_cache.clear()
+            workspace.decode_cache.clear()
         clear_cache()
         for index in range(self.workspace_stack.count()):
             workspace = self.workspace_stack.widget(index)
