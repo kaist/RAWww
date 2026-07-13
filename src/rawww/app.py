@@ -2384,12 +2384,13 @@ class FullImageView(QWidget):
 
     def _zoom_focus(self) -> QPointF:
         faces = []
-        for face in self._faces:
-            bbox = face.get("bbox") or {}
-            try:
-                faces.append((float(bbox["width"]) * float(bbox["height"]), bbox))
-            except (KeyError, TypeError, ValueError):
-                pass
+        if _application_settings().value("interface/zoom_focus_face", True, bool):
+            for face in self._faces:
+                bbox = face.get("bbox") or {}
+                try:
+                    faces.append((float(bbox["width"]) * float(bbox["height"]), bbox))
+                except (KeyError, TypeError, ValueError):
+                    pass
         if faces:
             _area, bbox = max(faces, key=lambda item: item[0])
             return QPointF(float(bbox["x"]) + float(bbox["width"]) / 2, float(bbox["y"]) + float(bbox["height"]) / 2)
