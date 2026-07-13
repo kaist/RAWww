@@ -135,8 +135,9 @@ FOMANTIC_ICON_CODES = {
     "filter": "\uf0b0", "lightbulb": "\uf0eb", "volume": "\uf028", "microphone": "\uf130", "close": "\uf00d",
     "plus": "\uf067", "trash": "\uf1f8",
     "expand": "\uf065", "zoom": "\uf00e", "zoom-out": "\uf010", "play": "\uf04b", "pause": "\uf04c", "film": "\uf008",
-    "cloud": "\uf0c2", "sign-out": "\uf08b", "lock": "\uf023", "sync": "\uf021",
+    "cloud": "\uf0c2", "sign-out": "\uf2f5", "lock": "\uf023", "sync": "\uf021",
     "download": "\uf56d", "eye": "\uf06e", "stop": "\uf04d",
+    "link": "\uf0c1",
     "cog": "\uf013", "magic": "\uf0d0", "wrench": "\uf0ad",
     "edit": "\uf044", "calendar": "\uf133", "clock": "\uf017", "camera": "\uf030",
     "file": "\uf15b", "arrow-right": "\uf061",
@@ -4954,7 +4955,10 @@ class Workspace(QMainWindow):
         self.media_filter.setItemIcon(2, _fomantic_icon("film", 12, "#a8b0bd"))
         self.media_filter.setFixedWidth(148)
         self.file_type_filter = QComboBox()
-        for label, value in (("JPG и RAW", "jpg_raw"), ("Только JPG", "jpg"), ("Только RAW", "raw")):
+        # The combined option is the neutral/default state: it must not hide
+        # videos or other supported image formats. The dedicated JPG/RAW
+        # options below are the actual file-type filters.
+        for label, value in (("JPG и RAW", None), ("Только JPG", "jpg"), ("Только RAW", "raw")):
             self.file_type_filter.addItem(label, value)
         self.file_type_filter.setItemIcon(0, _fomantic_icon("images", 12, "#a8b0bd"))
         self.file_type_filter.setItemIcon(1, _fomantic_icon("file", 12, "#a8b0bd"))
@@ -7973,8 +7977,6 @@ class Workspace(QMainWindow):
                     continue
                 if file_type == "raw" and suffix not in RAW_EXTENSIONS:
                     continue
-                if file_type == "jpg_raw" and suffix not in (JPEG_EXTENSIONS | RAW_EXTENSIONS):
-                    continue
                 detail = self.photo_details.get(path.name, {})
                 if camera_key is not None and self._camera_filter_key(detail) != camera_key:
                     continue
@@ -8168,8 +8170,6 @@ class Workspace(QMainWindow):
             if file_type == "jpg" and suffix not in JPEG_EXTENSIONS:
                 return False
             if file_type == "raw" and suffix not in RAW_EXTENSIONS:
-                return False
-            if file_type == "jpg_raw" and suffix not in (JPEG_EXTENSIONS | RAW_EXTENSIONS):
                 return False
             detail = self.photo_details.get(path.name, {})
             if camera_key is not None and self._camera_filter_key(detail) != camera_key:
@@ -9642,7 +9642,12 @@ class MainWindow(QMainWindow):
                     QMessageBox.information(self, "Обновления", "У вас установлена актуальная версия Контрольки.")
             except Exception:
                 # A background check must never interrupt the photo workflow.
-                pass
+                if interactive:
+                    QMessageBox.warning(
+                        self,
+                        "Обновления",
+                        "Не удалось проверить обновления. Проверьте подключение к интернету и повторите попытку позже.",
+                    )
 
         def wait_for_finish() -> None:
             if future.done():
@@ -10577,6 +10582,18 @@ def apply_theme(app: QApplication) -> None:
             font-family: Lato;
             font-size: 15px;
             font-weight: 700;
+        }
+        QToolButton#shotsyncViewerLink {
+            background: transparent;
+            border: 0;
+            border-radius: 4px;
+            color: #b9c5d6;
+            font-size: 16px;
+            padding: 0;
+        }
+        QToolButton#shotsyncViewerLink:hover {
+            background: #424242;
+            color: #ffffff;
         }
         QWidget#shotsyncShootingCard[currentShooting="true"] {
             border: 2px solid #dddddd;

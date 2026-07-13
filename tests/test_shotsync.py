@@ -229,6 +229,18 @@ class PanelRenderingTests(unittest.TestCase):
         self.panel.receiveRequested.emit(shooting)
         self.assertEqual(emitted, [shooting])
 
+    def test_viewer_link_opens_shooting_in_browser(self) -> None:
+        from PySide6.QtWidgets import QToolButton
+
+        self.panel.set_shootings([
+            {"id": 42, "viewer_url": "/v/view-secret/", "title": "Portrait", "photo_count": 0, "status": "active"}
+        ])
+        viewer_button = self.panel.findChild(QToolButton, "shotsyncViewerLink")
+        self.assertIsNotNone(viewer_button)
+        with patch("rawww.shotsync_panel.QDesktopServices.openUrl") as open_url:
+            viewer_button.click()
+        self.assertEqual(open_url.call_args.args[0].toString(), "https://shotsync.ru/v/view-secret/")
+
 
 @unittest.skipUnless(HAVE_GUI, "QtGui/libGL not available in this environment")
 class CacheShotSyncTests(unittest.TestCase):

@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import QSize, QTimer, Qt, Signal
-from PySide6.QtGui import QIcon, QImage, QPainter, QPainterPath, QPixmap, QTransform
+from PySide6.QtCore import QSize, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon, QImage, QPainter, QPainterPath, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 IconProvider = Callable[..., QIcon]
+SHOTSYNC_BASE_URL = "https://shotsync.ru"
 
 
 def _rounded_avatar(image: QImage, size: int = 40) -> QPixmap:
@@ -400,10 +401,33 @@ class ShotSyncPanel(QWidget):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(6)
         title = QLabel(str(shooting.get("title") or "Без названия"))
         title.setObjectName("shotsyncShootingTitle")
         title.setWordWrap(True)
-        layout.addWidget(title)
+        title_row.addWidget(title, 1)
+
+        viewer_url = str(shooting.get("viewer_url") or "").strip()
+        if viewer_url:
+            if viewer_url.startswith("/"):
+                viewer_url = f"{SHOTSYNC_BASE_URL}{viewer_url}"
+            viewer_button = QToolButton()
+            viewer_button.setObjectName("shotsyncViewerLink")
+            viewer_icon = self._icon("link", 15, "#b9c5d6")
+            viewer_button.setIcon(viewer_icon)
+            viewer_button.setIconSize(QSize(15, 15))
+            viewer_button.setFixedSize(24, 24)
+            viewer_button.setToolTip("Открыть во вьювере ShotSync в браузере")
+            viewer_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            if viewer_icon.isNull():
+                viewer_button.setText("🔗")
+            viewer_button.clicked.connect(
+                lambda: QDesktopServices.openUrl(QUrl(viewer_url))
+            )
+            title_row.addWidget(viewer_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(title_row)
         photo_count = shooting.get("photo_count") or 0
         state = "Слежение: новые фото будут загружаться в выбранную папку." if receiving else {
             "uploaded": "Ваша папка отправлена на отбор. Метки можно получить с сервера.",
