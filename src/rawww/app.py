@@ -6864,6 +6864,11 @@ class Workspace(QMainWindow):
                 self._promote_current_full_task(self.current_path, full_size)
                 self._submit_decode(self.current_path, full_size, full_priority=True)
                 self._preload_neighbors(self.current_path)
+            # The preview strip was built empty because the folder had not been
+            # scanned when Full View opened. Rebuild it now so it shows the
+            # neighbours and scrolls to the current photo without needing a
+            # manual left/right keypress.
+            self._refresh_full_view_navigation(self.current_path)
         if ENABLE_EXIF_METADATA and self.folder_cache is not None:
             self.metadata_pipeline.scan(
                 [path for path in self.view_paths if is_supported_image(path)],
