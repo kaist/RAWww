@@ -982,8 +982,7 @@ def apply_theme(app: QApplication) -> None:
             padding-right: 3px;
         }
         QWidget#viewerFiltersPanel QComboBox QAbstractItemView {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #515151, stop:1 #404040);
+            background: #484848;
             border-color: #1b1b1b;
             color: #ececec;
             selection-background-color: #606060;
