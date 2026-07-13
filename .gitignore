@@ -20,6 +20,9 @@ wheels/
 !.env.example
 .rawww/
 
+# Build-time generated version module (see scripts/build_pyinstaller.py)
+src/rawww/_build_version.py
+
 # Editor and OS files
 .idea/
 .vscode/

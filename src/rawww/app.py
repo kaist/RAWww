@@ -83,6 +83,7 @@ from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection
 from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, decode_original_pixels, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
 from .launch import target_from_argv
 from .runtime_paths import PORTABLE, data_path, work_path
+from .subprocess_utils import no_window_kwargs
 from .workspace import WorkspaceRequest, WorkspaceState
 from .xmp import build_xmp, write_sidecar
 from .updater import fetch_release_info, is_newer
@@ -8431,6 +8432,24 @@ class Workspace(QMainWindow):
         self._apply_view()
         self._update_analysis_controls()
         self._refresh_ai_status()
+        if (
+            self.stack.currentWidget() is self.full_view
+            and self.current_path is not None
+            and self.current_path.parent == self.current_dir
+            and not is_supported_video(self.current_path)
+        ):
+            # A file launch opens Full View before the folder is scanned, so the
+            # requested photo could not be decoded yet (_submit_decode bails
+            # while folder_cache is None) and the deferred load_directory
+            # cancelled any in-flight decode. Now that the cache is ready,
+            # decode the shown photo so it reaches full resolution instead of
+            # staying on the thumbnail fallback.
+            full_size = self._full_preview_size()
+            if self._cache_get((self.current_path, full_size)) is None:
+                self._show_best_cached_full(self.current_path, full_size)
+                self._promote_current_full_task(self.current_path, full_size)
+                self._submit_decode(self.current_path, full_size, full_priority=True)
+                self._preload_neighbors(self.current_path)
         if ENABLE_EXIF_METADATA and self.folder_cache is not None:
             self.metadata_pipeline.scan(
                 [path for path in self.view_paths if is_supported_image(path)],
@@ -9306,7 +9325,7 @@ class Workspace(QMainWindow):
                 )
                 return
         try:
-            subprocess.Popen(command)
+            subprocess.Popen(command, **no_window_kwargs())
         except OSError as error:
             QMessageBox.warning(self, "Не удалось открыть редактор", str(error))
 
@@ -9370,11 +9389,17 @@ class Workspace(QMainWindow):
         value = current.data(Qt.ItemDataRole.UserRole)
         if not value:
             return
+        if self.stack.currentWidget() is not self.grid_page:
+            # Full View owns the current photo. A grid selection that changes
+            # in the background (for example while the folder populates after a
+            # file launch) must not hijack current_path, otherwise the launched
+            # photo's decode is dropped in _on_decoded and Full View stays blank.
+            return
         path = Path(value)
         self.current_path = path
         self.workspace_state.current_photo = path
         self._refresh_status_panel()
-        if self.stack.currentWidget() is self.grid_page and hasattr(self, "meta_bar"):
+        if hasattr(self, "meta_bar"):
             self.meta_bar.set_metadata(self.photo_details.get(path.name, {}))
         self.pending_grid_full_request = path
         self.grid_full_request_timer.start(70)

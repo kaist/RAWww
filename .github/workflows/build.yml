@@ -1,9 +1,6 @@
 name: Build desktop packages
 
 on:
-  push:
-    branches: ["**"]
-    tags: ["v*", "*"]
   workflow_dispatch:
 
 permissions:
