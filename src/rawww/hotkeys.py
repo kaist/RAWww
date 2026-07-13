@@ -10,6 +10,8 @@ HOTKEY_DEFAULTS: dict[str, tuple[str, str]] = {
     "full_view": ("Полный просмотр", "F"),
     "open_in_editor": ("Открыть в редакторе", "E"),
     "grid": ("Сетка", "G"),
+    "strip_collapse": ("Свернуть нижнюю панель (полный просмотр)", "Ctrl+Down"),
+    "strip_expand": ("Развернуть нижнюю панель (полный просмотр)", "Ctrl+Up"),
     "refresh": ("Обновить", "Ctrl+R"),
     "fullscreen": ("Полный экран", "F11"),
     "quick_mark": ("Быстрая метка", "M"),
@@ -31,6 +33,10 @@ def _hotkey_sequence(settings: QSettings, identifier: str) -> QKeySequence:
 
 
 def _uses_reserved_navigation_key(sequence: QKeySequence) -> bool:
-    """Arrows, Enter and Escape always retain their navigation behaviour."""
-    reserved = {Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape}
-    return any((sequence[index].toCombined() & 0x01FFFFFF) in {int(key) for key in reserved} for index in range(sequence.count()))
+    """Bare arrows, Enter and Escape always retain their navigation behaviour.
+
+    Only the unmodified keys are reserved; combinations such as ``Ctrl+Up``
+    stay assignable because they never collide with plain navigation.
+    """
+    reserved = {int(key) for key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape)}
+    return any(sequence[index].toCombined() in reserved for index in range(sequence.count()))

@@ -1714,9 +1714,8 @@ class FullView(QFrame):
         strip_layout.setSpacing(0)
         strip_layout.addWidget(strip_header)
         strip_layout.addWidget(self.photo_strip)
-        if _application_settings().value("viewer_strip_collapsed", False, bool):
-            self.photo_strip.hide()
-            self.strip_toggle.setIcon(_fomantic_icon("chevron-up", 12))
+        self._strip_level = self._load_strip_level()
+        self._apply_strip_level()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1731,15 +1730,43 @@ class FullView(QFrame):
         self.zoom_action.triggered.connect(self._toggle_zoom)
         self.addAction(self.zoom_action)
 
-    def toggle_strip(self) -> None:
-        visible = self.photo_strip.isVisible()
-        self.photo_strip.setVisible(not visible)
-        self.strip_toggle.setIcon(_fomantic_icon("chevron-up" if visible else "chevron-down", 12))
-        self.strip_toggle.setToolTip("Развернуть ленту превью" if visible else "Свернуть ленту превью")
-        _application_settings().setValue("viewer_strip_collapsed", visible)
+    # Full-view lower area has three states driven by Ctrl+Down / Ctrl+Up:
+    # 0 = strip and metadata bar visible, 1 = only the metadata bar (thumbnail
+    # strip collapsed), 2 = the whole panel hidden.
+    STRIP_FULL = 0
+    STRIP_COLLAPSED = 1
+    STRIP_HIDDEN = 2
+
+    def _load_strip_level(self) -> int:
+        settings = _application_settings()
+        if settings.contains("viewer_strip_level"):
+            return max(self.STRIP_FULL, min(self.STRIP_HIDDEN, settings.value("viewer_strip_level", self.STRIP_FULL, int)))
+        # Migrate the previous two-state collapsed flag.
+        return self.STRIP_COLLAPSED if settings.value("viewer_strip_collapsed", False, bool) else self.STRIP_FULL
+
+    def _apply_strip_level(self) -> None:
+        self.strip_panel.setVisible(self._strip_level != self.STRIP_HIDDEN)
+        self.photo_strip.setVisible(self._strip_level == self.STRIP_FULL)
+        collapsed = self._strip_level != self.STRIP_FULL
+        self.strip_toggle.setIcon(_fomantic_icon("chevron-up" if collapsed else "chevron-down", 12))
+        self.strip_toggle.setToolTip("Развернуть ленту превью" if collapsed else "Свернуть ленту превью")
+
+    def set_strip_level(self, level: int) -> None:
+        level = max(self.STRIP_FULL, min(self.STRIP_HIDDEN, level))
+        if level == self._strip_level:
+            return
+        self._strip_level = level
+        self._apply_strip_level()
+        _application_settings().setValue("viewer_strip_level", level)
         # The host's resize (handled in eventFilter) keeps the controls pinned,
         # but reposition once more after the layout settles as a safety net.
         QTimer.singleShot(0, self._position_video_controls)
+
+    def cycle_strip(self, step: int) -> None:
+        self.set_strip_level(self._strip_level + step)
+
+    def toggle_strip(self) -> None:
+        self.set_strip_level(self.STRIP_FULL if self._strip_level != self.STRIP_FULL else self.STRIP_COLLAPSED)
 
     def set_counter(self, text: str, visible: bool) -> None:
         self.counter_label.setText(text)
@@ -3917,6 +3944,8 @@ class Workspace(QMainWindow):
         add_hotkey("full_view", self._open_selected)
         add_hotkey("open_in_editor", self._open_in_editor)
         add_hotkey("grid", self.show_grid)
+        add_hotkey("strip_collapse", lambda: self._cycle_full_view_strip(1))
+        add_hotkey("strip_expand", lambda: self._cycle_full_view_strip(-1))
 
         # Navigation keys are intentionally not exposed in the preferences.
         escape = QAction("Back", self)
@@ -3942,6 +3971,11 @@ class Workspace(QMainWindow):
     def _reload_hotkeys(self) -> None:
         for identifier, action in self._hotkey_actions.items():
             action.setShortcut(_hotkey_sequence(self.settings, identifier))
+
+    def _cycle_full_view_strip(self, step: int) -> None:
+        """Collapse/expand the full-view lower panel; a no-op outside full view."""
+        if self.stack.currentWidget() is self.full_view:
+            self.full_view.cycle_strip(step)
 
     def _quick_transfer_destinations(self) -> list[Path]:
         """Last used destination first, then open tabs and the remaining history."""
