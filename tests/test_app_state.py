@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QEvent
+from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
 
 from rawww.app import FullView, Workspace
 
@@ -28,17 +29,50 @@ class _Signal:
         self.values.append(value)
 
 
+class _ToastHost(QMainWindow):
+    _show_viewer_toast = Workspace._show_viewer_toast
+    _clear_viewer_toast = Workspace._clear_viewer_toast
+
+
 class AppStateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_video_widget_is_never_a_top_level_window(self) -> None:
-        view = FullView()
+    def test_player_widgets_are_never_top_level_windows(self) -> None:
+        parent = QWidget()
+        view = FullView(parent)
+        self.assertFalse(view.isWindow())
         self.assertIsNotNone(view.video_widget.parentWidget())
         self.assertFalse(view.video_widget.isWindow())
+        self.assertIsNotNone(view.video_controls.parentWidget())
+        self.assertFalse(view.video_controls.isWindow())
         view.close()
         view.deleteLater()
+        parent.deleteLater()
+
+    def test_workspace_is_constructed_as_a_child_widget(self) -> None:
+        parent = QStackedWidget()
+        workspace = Workspace(defer_initial_scan=True, parent=parent)
+        self.assertFalse(workspace.isWindow())
+        self.assertFalse(workspace.full_view.isWindow())
+        self.assertFalse(workspace.full_view.video_controls.isWindow())
+        workspace.close()
+        workspace.deleteLater()
+        parent.deleteLater()
+
+    def test_deleted_viewer_toast_is_not_reused(self) -> None:
+        host = _ToastHost()
+        host.setCentralWidget(QWidget())
+        host._show_viewer_toast("Первый")
+        first = host._viewer_toast
+        first.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+        self.assertIsNone(host._viewer_toast)
+        host._show_viewer_toast("Второй")
+        self.assertEqual(host._viewer_toast.text(), "Второй")
+        host.close()
 
     def test_ai_waits_until_cached_previews_reach_the_ui(self) -> None:
         first = Path("/photos/first.jpg")

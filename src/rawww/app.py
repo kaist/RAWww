@@ -1576,8 +1576,8 @@ class FullView(QFrame):
     originalRequested = Signal(object)
     markIndicatorRequested = Signal()
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self.setObjectName("fullView")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._pixmap: QPixmap | None = None
@@ -1610,7 +1610,7 @@ class FullView(QFrame):
         self.video_player.durationChanged.connect(self._video_duration_changed)
         self.video_player.playbackStateChanged.connect(self._video_state_changed)
         self._is_video = False
-        self.video_controls = QFrame()
+        self.video_controls = QFrame(self.video_widget)
         self.video_controls.setObjectName("videoControls")
         # QVideoWidget may use a native child surface on Windows. Make the
         # controls native too, otherwise that surface can cover them once the
@@ -3090,8 +3090,10 @@ class Workspace(QMainWindow):
         initial_directory: Path | None = None,
         *,
         defer_initial_scan: bool = False,
+        parent: QWidget | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.Widget)
         self.setWindowTitle(APP_NAME)
         self.resize(1440, 920)
         self.closing = False
@@ -3270,9 +3272,9 @@ class Workspace(QMainWindow):
         self.normal_window_flags = self.windowFlags()
         self.normal_window_state = self.windowState()
 
-        self.stack = QStackedWidget()
+        self.stack = QStackedWidget(self)
         self.grid_page = self._build_grid_page()
-        self.full_view = FullView()
+        self.full_view = FullView(self.stack)
         self.full_view.exitRequested.connect(self.show_grid)
         self.full_view.originalRequested.connect(self._request_original_zoom)
         self.full_view.nextRequested.connect(self.next_image)
@@ -6005,6 +6007,7 @@ class Workspace(QMainWindow):
         parent = self.centralWidget() or self
         previous = getattr(self, "_viewer_toast", None)
         if previous is not None:
+            self._viewer_toast = None
             previous.deleteLater()
 
         toast = QLabel(message, parent)
@@ -6018,11 +6021,18 @@ class Workspace(QMainWindow):
         toast.raise_()
         toast.show()
         self._viewer_toast = toast
+        toast.destroyed.connect(
+            lambda _object=None, current=toast: self._clear_viewer_toast(current)
+        )
 
         timer = QTimer(toast)
         timer.setSingleShot(True)
         timer.timeout.connect(toast.deleteLater)
         timer.start(1_800)
+
+    def _clear_viewer_toast(self, toast: QLabel) -> None:
+        if getattr(self, "_viewer_toast", None) is toast:
+            self._viewer_toast = None
 
     def _directory_scanned(self, request: WorkspaceRequest, directory: Path, future: Future) -> None:
         if self.closing:
@@ -8499,11 +8509,12 @@ class MainWindow(QMainWindow):
         *,
         defer_initial_scan: bool = False,
     ) -> None:
-        workspace = Workspace(directory, defer_initial_scan=defer_initial_scan)
+        workspace = Workspace(
+            directory,
+            defer_initial_scan=defer_initial_scan,
+            parent=self.workspace_stack,
+        )
         workspace.destination_paths_provider = self._open_workspace_paths
-        # A workspace is a regular widget inside the tab host, not a second
-        # native top-level window.
-        workspace.setWindowFlags(Qt.WindowType.Widget)
         index = self.workspace_stack.addWidget(workspace)
         self.tabs.addTab(_workspace_title(workspace.current_dir))
         workspace.windowTitleChanged.connect(
