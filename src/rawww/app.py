@@ -13,18 +13,22 @@ from hashlib import sha1
 from uuid import uuid4
 import plistlib
 import subprocess
+import webbrowser
 from collections import OrderedDict, deque
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Callable
 
-from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QRect, QRectF, QIODevice, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QUrl, QStringListModel
-from PySide6.QtGui import QAction, QColor, QCursor, QFont, QFontDatabase, QFontMetricsF, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface
+from send2trash import send2trash
+
+from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QKeyCombination, QLibraryInfo, QPoint, QPointF, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
+from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QFont, QFontDatabase, QFontMetricsF, QIcon, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygon, QShortcut, QTextCharFormat, QTextFormat, QTextObjectInterface
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QComboBox,
     QCompleter,
     QCheckBox,
@@ -49,6 +53,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionButton,
     QSplitter,
+    QSplitterHandle,
     QScrollArea,
     QSlider,
     QSpinBox,
@@ -69,18 +74,19 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from .cache import FolderCache
+from .cache import FolderCache, maintain_folder_caches, prune_folder_cache, relocate_folder_caches, remove_folder_cache
 from .shotsync_client import ShotSyncClient
 from .shotsync_login import ShotSyncLoginDialog
 from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
 from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection_root
-from .ai import AiPipeline
-from .exif import MetadataPipeline
-from .imaging import RAW_EXTENSIONS, DecodedImage, PixelImage, decode_original_pixels, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
+from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, decode_original_pixels, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
+from .launch import target_from_argv
 from .runtime_paths import data_path
 from .workspace import WorkspaceRequest, WorkspaceState
 from .xmp import build_xmp, write_sidecar
+from .updater import fetch_release_info, is_newer
+from .version import __version__
 
 
 THUMB_SIZE = 256
@@ -119,9 +125,10 @@ SHOTSYNC_BASE_URL = "https://shotsync.ru"
 SHOTSYNC_VOLUME_KEY = "__shotsync__"
 ENABLE_EXIF_METADATA = True
 APP_NAME = "Контролька"
+APP_VERSION = __version__
 
 FOMANTIC_ICON_CODES = {
-    "images": "\uf302", "user": "\uf007", "brush": "\uf1fc", "media": "\uf87c",
+    "images": "\uf302", "grid": "\uf00a", "user": "\uf007", "brush": "\uf1fc", "media": "\uf87c",
     "sort": "\uf160", "search": "\uf002", "star": "\uf005", "ban": "\uf05e",
     "chevron-down": "\uf078", "chevron-up": "\uf077", "bookmark": "\uf02e",
     "step-forward": "\uf051", "keyboard": "\uf11c", "folder": "\uf07c",
@@ -247,6 +254,12 @@ class VideoThumbnailer(QObject):
             self._queued.clear()
             self._reset_current()
 
+    def cancel(self) -> None:
+        """Drop queued/current work while keeping the thumbnailer active."""
+        self._queue.clear()
+        self._queued.clear()
+        self._reset_current()
+
     def _reset_current(self) -> None:
         # Bump the generation so any late status/frame callbacks from the clip
         # we are abandoning are ignored instead of being attributed elsewhere.
@@ -333,6 +346,33 @@ class FolderNameEditor(QLineEdit):
         self.accepted.emit()
 
 
+def _local_paths_from_mime(mime: QMimeData) -> list[Path]:
+    """Return existing local file URLs, keeping their original drag order."""
+    if not mime.hasUrls():
+        return []
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for url in mime.urls():
+        if not url.isLocalFile():
+            continue
+        path = Path(url.toLocalFile())
+        if path.exists() and path not in seen:
+            paths.append(path)
+            seen.add(path)
+    return paths
+
+
+_PREFERRED_DROP_EFFECT_MIME = 'application/x-qt-windows-mime;value="Preferred DropEffect"'
+
+
+def _mime_requests_move(mime: QMimeData) -> bool:
+    """Recognise our cut marker and Windows Explorer's standard cut marker."""
+    if mime.hasFormat("application/x-rawww-cut"):
+        return True
+    effect = bytes(mime.data(_PREFERRED_DROP_EFFECT_MIME))
+    return bool(effect and int.from_bytes(effect[:4], "little") & 2)
+
+
 class PhotoGrid(QListWidget):
     openRequested = Signal(Path)
     viewportChanged = Signal()
@@ -340,6 +380,8 @@ class PhotoGrid(QListWidget):
     seriesToggleRequested = Signal(Path)
     audioRequested = Signal(Path)
     audioHoverChanged = Signal(object)
+    deleteRequested = Signal(bool)  # permanent
+    pathsDropped = Signal(object, object, object)  # paths, destination, action
 
     def __init__(self) -> None:
         super().__init__()
@@ -355,6 +397,12 @@ class PhotoGrid(QListWidget):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.card_size = 1
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QListWidget.DragDropMode.DragDrop)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
         self._hovered_audio_path: Path | None = None
@@ -406,6 +454,52 @@ class PhotoGrid(QListWidget):
                         event.accept()
                         return
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Delete:
+            self.deleteRequested.emit(bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def startDrag(self, supported_actions) -> None:  # noqa: N802
+        paths = [Path(item.data(Qt.ItemDataRole.UserRole)) for item in self.selectedItems()
+                 if item.data(Qt.ItemDataRole.UserRole)]
+        if not paths:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+        mime.setData("application/x-rawww-drag", b"1")
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        paths = _local_paths_from_mime(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        item = self.itemAt(event.position().toPoint())
+        destination = None
+        if item is not None:
+            candidate = item.data(Qt.ItemDataRole.UserRole)
+            if candidate and Path(candidate).is_dir():
+                destination = Path(candidate)
+        action = event.proposedAction() if event.mimeData().hasFormat("application/x-rawww-drag") else Qt.DropAction.CopyAction
+        self.pathsDropped.emit(paths, destination, action)
+        event.acceptProposedAction()
 
     @staticmethod
     def _audio_badge_rect(rect: QRect) -> QRect:
@@ -1914,6 +2008,10 @@ class FullView(QFrame):
         media_layout.setSpacing(0)
         media_layout.addWidget(self.media_stack, 1)
         stage_layout.addWidget(self.media_panel, 1)
+        self.counter_label = QLabel(self.media_panel)
+        self.counter_label.setObjectName("fullViewCounter")
+        self.counter_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.counter_label.hide()
         # The floating video controls are positioned manually on top of their
         # host. Reposition them whenever the host resizes (e.g. when the bottom
         # strip is collapsed/expanded) so they always stay pinned to the bottom.
@@ -2032,6 +2130,20 @@ class FullView(QFrame):
         # The host's resize (handled in eventFilter) keeps the controls pinned,
         # but reposition once more after the layout settles as a safety net.
         QTimer.singleShot(0, self._position_video_controls)
+
+    def set_counter(self, text: str, visible: bool) -> None:
+        self.counter_label.setText(text)
+        self.counter_label.adjustSize()
+        self.counter_label.setVisible(visible)
+        if visible:
+            self._position_counter()
+
+    def _position_counter(self) -> None:
+        if not self.counter_label.isVisible():
+            return
+        self.counter_label.adjustSize()
+        self.counter_label.move(12, 12)
+        self.counter_label.raise_()
 
     def stop_video(self) -> None:
         """Fully stop playback so nothing keeps running after leaving full view."""
@@ -2361,6 +2473,7 @@ class FullView(QFrame):
         self.image_view.update()
         QTimer.singleShot(0, self._position_video_controls)
         QTimer.singleShot(0, self._position_face_filter_chip)
+        QTimer.singleShot(0, self._position_counter)
 
     def _position_face_filter_chip(self) -> None:
         if not self.face_filter_chip.isVisible():
@@ -2792,6 +2905,8 @@ HOTKEY_DEFAULTS: dict[str, tuple[str, str]] = {
     "fullscreen": ("Полный экран", "F11"),
     "quick_mark": ("Быстрая метка", "M"),
     "comment": ("Комментарий", "C"),
+    "quick_copy": ("Быстрое копирование", "Shift+C"),
+    "quick_move": ("Быстрое перемещение", "Shift+M"),
     **{f"rating_{rating}": (f"Рейтинг {rating}" if rating else "Сбросить рейтинг", str(rating)) for rating in range(6)},
     **{f"color_{index}": (label, f"Shift+{index}") for index, label in enumerate(("Сбросить цветовую метку", "Красная метка", "Жёлтая метка", "Зелёная метка", "Синяя метка", "Фиолетовая метка"))},
 }
@@ -2814,9 +2929,10 @@ def _uses_reserved_navigation_key(sequence: QKeySequence) -> bool:
 class SettingsDialog(QDialog):
     """Application settings presented in the same visual language as the shell."""
 
-    def __init__(self, settings: QSettings, client: ShotSyncClient, changed: Callable[[list[dict]], None], login_requested: Callable[[], bool], parent=None) -> None:
+    def __init__(self, settings: QSettings, client: ShotSyncClient, changed: Callable[[list[dict]], None], login_requested: Callable[[], bool], update_requested: Callable[[], None], parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
+        self.update_requested = update_requested
         self.setObjectName("settingsDialog")
         self.setWindowTitle("Настройки")
         self.setModal(True)
@@ -2836,8 +2952,8 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._hotkeys_tab(), "Горячие клавиши")
         self.code_replacements_editor = CodeReplacementsEditor(client, settings, changed, login_requested)
         tabs.addTab(self.code_replacements_editor, "Коды замен")
-        tabs.addTab(self._placeholder_tab("Интерфейс", "Параметры внешнего вида появятся здесь."), "Интерфейс")
-        tabs.addTab(self._placeholder_tab("О приложении", "Контролька — рабочее пространство для просмотра и отбора материалов."), "О приложении")
+        tabs.addTab(self._interface_tab(), "Интерфейс")
+        tabs.addTab(self._about_tab(), "О приложении")
         layout.addWidget(tabs, 1)
 
         buttons = QHBoxLayout()
@@ -2873,6 +2989,11 @@ class SettingsDialog(QDialog):
         self.restore_active_workspace = SettingsCheckBox("Возвращаться к активной вкладке")
         self.restore_active_workspace.setChecked(self.settings.value("restore_active_workspace", True, bool))
         layout.addWidget(self.restore_active_workspace)
+        self.delete_without_confirmation = SettingsCheckBox("Удалять без подтверждения по DEL или Shift+DEL")
+        self.delete_without_confirmation.setChecked(
+            self.settings.value("behavior/delete_without_confirmation", False, bool)
+        )
+        layout.addWidget(self.delete_without_confirmation)
 
         editor_card = QFrame()
         editor_card.setObjectName("externalEditorCard")
@@ -2925,6 +3046,29 @@ class SettingsDialog(QDialog):
         self.custom_editor_controls.setLayout(editor_row)
         editor_layout.addWidget(self.custom_editor_controls)
         layout.addWidget(editor_card)
+
+        if sys.platform == "win32":
+            integration_card = QFrame()
+            integration_card.setObjectName("externalEditorCard")
+            integration_layout = QVBoxLayout(integration_card)
+            integration_layout.setContentsMargins(14, 13, 14, 14)
+            integration_layout.setSpacing(7)
+            integration_heading = QLabel("Интеграция с Проводником")
+            integration_heading.setObjectName("externalEditorTitle")
+            integration_layout.addWidget(integration_heading)
+            integration_hint = QLabel(
+                "Добавляет «Открыть в Контрольке» для поддерживаемых файлов и папок. "
+                "Программа просмотра по умолчанию не меняется."
+            )
+            integration_hint.setObjectName("externalEditorHint")
+            integration_hint.setWordWrap(True)
+            integration_layout.addWidget(integration_hint)
+            self.explorer_integration_button = QPushButton()
+            self.explorer_integration_button.setObjectName("settingsSecondaryButton")
+            self.explorer_integration_button.clicked.connect(self._toggle_explorer_integration)
+            integration_layout.addWidget(self.explorer_integration_button, 0, Qt.AlignmentFlag.AlignLeft)
+            layout.addWidget(integration_card)
+            self._refresh_explorer_integration_button()
         layout.addStretch(1)
         self._update_behavior_state(self.restore_workspaces.isChecked())
         self._update_editor_choice_state(self.custom_editor.isChecked())
@@ -2942,6 +3086,46 @@ class SettingsDialog(QDialog):
         )
         if path:
             self.editor_executable.setText(path)
+
+    def _refresh_explorer_integration_button(self) -> None:
+        from .windows_integration import is_registered
+
+        if not getattr(sys, "frozen", False):
+            self.explorer_integration_button.setText("Доступно в собранном приложении")
+            self.explorer_integration_button.setEnabled(False)
+            self.explorer_integration_button.setToolTip("Соберите приложение, чтобы Проводник запускал ctrlka.exe.")
+            return
+        self.explorer_integration_button.setEnabled(True)
+        self.explorer_integration_button.setText("Удалить из Проводника" if is_registered() else "Добавить в Проводник")
+
+    def _toggle_explorer_integration(self) -> None:
+        from .windows_integration import is_registered, register, unregister
+
+        if not getattr(sys, "frozen", False):
+            return
+
+        if is_registered():
+            if QMessageBox.question(
+                self,
+                "Удалить интеграцию?",
+                "Убрать команду «Открыть в Контрольке» из Проводника?",
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                unregister()
+            except OSError as exc:
+                QMessageBox.warning(self, "Не удалось изменить Проводник", str(exc))
+                return
+            self._refresh_explorer_integration_button()
+            return
+
+        executable = Path(sys.executable)
+        try:
+            register(executable)
+        except OSError as exc:
+            QMessageBox.warning(self, "Не удалось изменить Проводник", str(exc))
+            return
+        self._refresh_explorer_integration_button()
 
     def _hotkeys_tab(self) -> QWidget:
         tab = QWidget()
@@ -2990,6 +3174,53 @@ class SettingsDialog(QDialog):
         for identifier, editor in self.hotkey_edits.items():
             editor.setKeySequence(QKeySequence(HOTKEY_DEFAULTS[identifier][1]))
 
+    def _interface_tab(self) -> QWidget:
+        tab = QWidget()
+        tab.setObjectName("settingsTabPage")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(18, 20, 18, 18)
+        layout.setSpacing(8)
+        heading = QLabel("Интерфейс")
+        heading.setObjectName("settingsSectionTitle")
+        layout.addWidget(heading)
+        hint = QLabel("Настройте элементы, которые показываются поверх изображения в полном просмотре.")
+        hint.setObjectName("settingsHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.show_full_view_counter = SettingsCheckBox("Показывать счетчик файлов в полном просмотре")
+        self.show_full_view_counter.setChecked(
+            self.settings.value("interface/show_full_view_counter", True, bool)
+        )
+        layout.addWidget(self.show_full_view_counter)
+        layout.addStretch(1)
+        return tab
+
+    def _about_tab(self) -> QWidget:
+        tab = QWidget()
+        tab.setObjectName("settingsTabPage")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(18, 20, 18, 18)
+        layout.setSpacing(10)
+        title = QLabel("Контролька")
+        title.setObjectName("settingsSectionTitle")
+        layout.addWidget(title)
+        version = QLabel(f"Версия {APP_VERSION}")
+        version.setObjectName("settingsHint")
+        layout.addWidget(version)
+        description = QLabel("Рабочее пространство для просмотра, отбора и подготовки фотоматериалов.")
+        description.setObjectName("settingsHint")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        self.auto_update_check = SettingsCheckBox("Автоматически проверять обновления при запуске")
+        self.auto_update_check.setChecked(self.settings.value("updates/auto_check", True, bool))
+        layout.addWidget(self.auto_update_check)
+        check = QPushButton("Проверить обновления")
+        check.setObjectName("settingsPrimaryButton")
+        check.clicked.connect(lambda: self.update_requested())
+        layout.addWidget(check, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch(1)
+        return tab
+
     def _set_rating_color_scheme(self, color_on_plain_digits: bool) -> None:
         """Switch all number pairs together, leaving other custom keys alone."""
         for number in range(6):
@@ -3033,12 +3264,137 @@ class SettingsDialog(QDialog):
                 assigned[text] = identifier
         self.settings.setValue("restore_workspaces", self.restore_workspaces.isChecked())
         self.settings.setValue("restore_active_workspace", self.restore_active_workspace.isChecked())
+        self.settings.setValue("behavior/delete_without_confirmation", self.delete_without_confirmation.isChecked())
+        self.settings.setValue("interface/show_full_view_counter", self.show_full_view_counter.isChecked())
         self.settings.setValue("editor/use_custom_executable", self.custom_editor.isChecked())
         self.settings.setValue("editor/executable", self.editor_executable.text().strip())
         self.settings.setValue("hotkeys/swap_rating_and_color", self.swap_rating_color.isChecked())
+        self.settings.setValue("updates/auto_check", self.auto_update_check.isChecked())
         for identifier, sequence in sequences.items():
             self.settings.setValue(f"hotkeys/{identifier}", sequence.toString(QKeySequence.SequenceFormat.PortableText))
         self.accept()
+
+
+class QuickTransferDialog(QDialog):
+    """A small destination picker designed to be operated without a mouse."""
+
+    def __init__(self, operation: str, destinations: list[Path], hotkey: QKeySequence, accepted: Callable, parent=None) -> None:
+        super().__init__(parent)
+        self.hotkey, self._accepted = hotkey, accepted
+        self.setObjectName("quickTransferDialog")
+        self.setWindowTitle(f"Быстрое {operation}")
+        self.setModal(True)
+        self.setFixedWidth(680)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setSpacing(10)
+        title = QLabel(f"Куда {operation} выделенные файлы?")
+        title.setObjectName("quickTransferTitle")
+        layout.addWidget(title)
+        hint = QLabel(f"↑/↓ — выбрать · повторите {hotkey.toString()} или Enter — выполнить · 1–9 — выполнить сразу")
+        hint.setObjectName("quickTransferHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(True)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+        self.destinations = QListWidget()
+        self.destinations.setObjectName("quickTransferDestinations")
+        self.destinations.installEventFilter(self)
+        for number, destination in enumerate(destinations[:9], start=1):
+            item = QListWidgetItem(f"{number}.  {destination}")
+            item.setData(Qt.ItemDataRole.UserRole, destination)
+            self.destinations.addItem(item)
+        # QListWidget consumes Enter before the dialog sees it, so handle the
+        # list's activation signal as well as the dialog-level shortcut.
+        self.destinations.itemActivated.connect(lambda item: self._choose_item(item, True))
+        layout.addWidget(self.destinations)
+        self.repeat_shortcut = QShortcut(hotkey, self)
+        self.repeat_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.repeat_shortcut.activated.connect(lambda: self._choose_selected(True))
+        buttons = QHBoxLayout()
+        add_path = QPushButton("Добавить путь…")
+        add_path.setObjectName("settingsSecondaryButton")
+        add_path.setAutoDefault(False)
+        add_path.clicked.connect(self._add_path)
+        buttons.addWidget(add_path)
+        buttons.addStretch(1)
+        cancel = QPushButton("Отмена")
+        cancel.setObjectName("settingsSecondaryButton")
+        cancel.setAutoDefault(False)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        choose = QPushButton(operation.capitalize())
+        choose.setObjectName("settingsPrimaryButton")
+        choose.setAutoDefault(False)
+        choose.setDefault(False)
+        choose.clicked.connect(lambda: self._choose_selected(True))
+        buttons.addWidget(choose)
+        layout.addLayout(buttons)
+        if self.destinations.count():
+            self.destinations.setCurrentRow(0)
+        self.destinations.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _add_path(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Выберите папку назначения")
+        if not path:
+            return
+        destination = Path(path)
+        for row in range(self.destinations.count()):
+            if self.destinations.item(row).data(Qt.ItemDataRole.UserRole) == destination:
+                self.destinations.setCurrentRow(row)
+                return
+        if self.destinations.count() >= 9:
+            QMessageBox.information(self, "Быстрое перемещение", "Можно сохранить не более 9 путей.")
+            return
+        item = QListWidgetItem(f"{self.destinations.count() + 1}.  {destination}")
+        item.setData(Qt.ItemDataRole.UserRole, destination)
+        self.destinations.addItem(item)
+        self.destinations.setCurrentItem(item)
+
+    def _choose_selected(self, update_recent: bool) -> None:
+        self._choose_item(self.destinations.currentItem(), update_recent)
+
+    def _choose_item(self, item: QListWidgetItem | None, update_recent: bool) -> None:
+        if item is None:
+            return
+        destination = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(destination, Path) and destination.is_dir():
+            self.destinations.setEnabled(False)
+            self.progress.setValue(0)
+            self.progress.show()
+            self._accepted(destination, update_recent, self._set_progress)
+            self.accept()
+
+    def _set_progress(self, completed: int, total: int) -> None:
+        self.progress.setRange(0, max(1, total))
+        self.progress.setValue(completed)
+        self.progress.setFormat(f"{completed} из {total}")
+        QApplication.processEvents()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if self._choose_number(event):
+            return
+        sequence = QKeySequence(QKeyCombination(event.modifiers(), Qt.Key(event.key())))
+        if self.hotkey.matches(sequence) == QKeySequence.SequenceMatch.ExactMatch:
+            self._choose_selected(True)
+            return
+        super().keyPressEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.destinations and event.type() == QEvent.Type.KeyPress and self._choose_number(event):
+            return True
+        return super().eventFilter(watched, event)
+
+    def _choose_number(self, event) -> bool:
+        number = event.key() - int(Qt.Key.Key_0)
+        if not (1 <= number <= 9 and event.modifiers() == Qt.KeyboardModifier.NoModifier):
+            return False
+        if number <= self.destinations.count():
+            self.destinations.setCurrentRow(number - 1)
+            self._choose_selected(False)
+        return True
 
 
 class BatchRenameDialog(QDialog):
@@ -3526,13 +3882,246 @@ class BatchResizeDialog(QDialog):
         QApplication.processEvents()
 
 
+class DirectoryTree(QTreeView):
+    """Folder tree that accepts local file URLs without letting its model move them."""
+
+    pathsDropped = Signal(object, object, object)  # paths, destination, action
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setProperty("treeFocused", False)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def focusInEvent(self, event) -> None:  # noqa: N802
+        self.setProperty("treeFocused", True)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.viewport().update()
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        self.setProperty("treeFocused", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.viewport().update()
+        super().focusOutEvent(event)
+
+    def startDrag(self, supported_actions) -> None:  # noqa: N802
+        selection = self.selectionModel()
+        if selection is None:
+            return
+        paths = [
+            Path(self.model().filePath(index))
+            for index in selection.selectedRows(0)
+            if index.isValid()
+        ]
+        if not paths:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+        mime.setData("application/x-rawww-drag", b"1")
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction, Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        paths = _local_paths_from_mime(event.mimeData())
+        index = self.indexAt(event.position().toPoint())
+        destination = Path(self.model().filePath(index)) if index.isValid() else None
+        if not paths or destination is None or not destination.is_dir():
+            event.ignore()
+            return
+        action = event.proposedAction() if event.mimeData().hasFormat("application/x-rawww-drag") else Qt.DropAction.CopyAction
+        self.pathsDropped.emit(paths, destination, action)
+        event.acceptProposedAction()
+
+
+class FavoritesList(QListWidget):
+    """A reorderable list that exposes its folder path while being dragged."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("favoritesList")
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def startDrag(self, supported_actions) -> None:  # noqa: N802
+        item = self.currentItem()
+        if item is None:
+            return
+        mime = self.model().mimeData(self.selectedIndexes())
+        mime.setData("application/x-rawww-favorite-path", item.data(Qt.ItemDataRole.UserRole).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+
+
+class FavoritesSplitterHandle(QSplitterHandle):
+    """Visible grip for resizing the favorites panel."""
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#353535"))
+        center = self.rect().center()
+        color = QColor("#b0b0b0") if self.underMouse() else QColor("#858585")
+        painter.setPen(QPen(color, 1.6))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for offset in (-3, 0, 3):
+            if self.orientation() == Qt.Orientation.Vertical:
+                painter.drawLine(center.x() - 12, center.y() + offset, center.x() + 12, center.y() + offset)
+            else:
+                painter.drawLine(center.x() + offset, center.y() - 12, center.x() + offset, center.y() + 12)
+        painter.end()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.update()
+        super().leaveEvent(event)
+
+
+class FavoritesSplitter(QSplitter):
+    def createHandle(self):  # noqa: N802
+        return FavoritesSplitterHandle(self.orientation(), self)
+
+
+class CenteredSearchEdit(QLineEdit):
+    """Search field whose leading and clear actions stay vertically centered."""
+
+    def _center_action_buttons(self) -> None:
+        for button in self.findChildren(QToolButton):
+            if not button.isVisible() and not button.isEnabled():
+                continue
+            height = button.sizeHint().height()
+            if height <= 0:
+                continue
+            button.move(button.x(), max(0, (self.height() - height) // 2))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._center_action_buttons)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        QTimer.singleShot(0, self._center_action_buttons)
+
+
+class GridZoomControls(QFrame):
+    """Compact overlay controls for changing the thumbnail size."""
+
+    def __init__(self, changed: Callable[[int], None], parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("gridZoomControls")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(1)
+        for icon, delta, tooltip in (
+            ("zoom-out", -1, "Уменьшить миниатюры"),
+            ("zoom", 1, "Увеличить миниатюры"),
+        ):
+            button = QToolButton(self)
+            button.setObjectName("gridZoomButton")
+            button.setIcon(_fomantic_icon(icon, 18, "#aeb5bf"))
+            button.setIconSize(QSize(18, 18))
+            button.setFixedSize(22, 22)
+            button.setToolTip(tooltip)
+            button.clicked.connect(lambda _checked=False, amount=delta: changed(amount))
+            layout.addWidget(button)
+        self.adjustSize()
+
+
+class FavoritesTrashButton(QToolButton):
+    """Drop target used to remove a folder from the favorites list."""
+
+    favoriteDropped = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("favoritesTrash")
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasFormat("application/x-rawww-favorite-path"):
+            self.setProperty("dropActive", True)
+            self.style().unpolish(self)
+            self.style().polish(self)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        self.dragEnterEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self.setProperty("dropActive", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        path = bytes(event.mimeData().data("application/x-rawww-favorite-path")).decode("utf-8", errors="replace")
+        self.setProperty("dropActive", False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        if path:
+            self.favoriteDropped.emit(path)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+
 class ChromeTabBar(QTabBar):
     """Chrome-like tab widths instead of Qt's full-row expansion."""
     closeRequested = Signal(int)
+    pathsDropped = Signal(object, int, object)  # paths, tab index, action
 
     def __init__(self) -> None:
         super().__init__()
         self._tab_width = 220
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls() and self.tabAt(event.position().toPoint()) >= 0:
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        paths = _local_paths_from_mime(event.mimeData())
+        index = self.tabAt(event.position().toPoint())
+        if not paths or index < 0:
+            event.ignore()
+            return
+        action = event.proposedAction() if event.mimeData().hasFormat("application/x-rawww-drag") else Qt.DropAction.CopyAction
+        self.pathsDropped.emit(paths, index, action)
+        event.acceptProposedAction()
 
     def tabSizeHint(self, index: int) -> QSize:  # noqa: N802
         return QSize(self._tab_width, 38)
@@ -3727,8 +4316,14 @@ class Workspace(QMainWindow):
     gridRequested = Signal()
     openFolderRequested = Signal(object)   # Path: open (or focus) a folder tab
     shotsyncFolderChanged = Signal(bool)   # current folder is linked to ShotSync
+    _cache_maintenance_started = False
 
-    def __init__(self, initial_directory: Path | None = None) -> None:
+    def __init__(
+        self,
+        initial_directory: Path | None = None,
+        *,
+        defer_initial_scan: bool = False,
+    ) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.resize(1440, 920)
@@ -3744,6 +4339,7 @@ class Workspace(QMainWindow):
         self.directory_scan_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_load_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_flush_executor = ThreadPoolExecutor(max_workers=1)
+        self.cache_maintenance_executor = ThreadPoolExecutor(max_workers=1)
         self.xmp_executor = ThreadPoolExecutor(max_workers=1)
         self.bridge = DecodeBridge()
         self.bridge.decoded.connect(self._on_decoded)
@@ -3789,6 +4385,7 @@ class Workspace(QMainWindow):
         self.photo_details: dict[str, dict] = {}
         self.image_embeddings: dict[str, bytes] = {}
         self.settings = QSettings(APP_NAME, APP_NAME)
+        self.destination_paths_provider: Callable[[], list[Path]] | None = None
 
         # ShotSync cloud integration. The key is remembered between launches
         # and validated lazily the first time the ShotSync disk is opened.
@@ -3874,8 +4471,10 @@ class Workspace(QMainWindow):
         self._folder_context_active = False
         self._pending_folder_grid_context: tuple[list[str], int] | None = None
         self.folder_cache: FolderCache | None = None
-        self.ai_pipeline = AiPipeline()
-        self.metadata_pipeline = MetadataPipeline()
+        # Native AI and metadata dependencies are loaded only on their first
+        # use, keeping a direct file launch focused on first-frame latency.
+        self._ai_pipeline = None
+        self._metadata_pipeline = None
         self.ai_progress_total = 0
         self.preview_progress_total = 0
         # ShotSync upload progress, shown in the shared top status bar.
@@ -3957,9 +4556,17 @@ class Workspace(QMainWindow):
         self.ai_progress_timer.timeout.connect(self._update_ai_progress)
 
         self._create_actions()
-        QTimer.singleShot(0, lambda: self.load_directory(self.current_dir))
+        # A direct OS file-open should spend its first CPU/I/O budget on the
+        # requested frame, not on scanning every sibling and opening SQLite.
+        # The grid catches up shortly afterwards, while folder launches retain
+        # their existing immediate population behaviour.
+        initial_scan_delay = 350 if defer_initial_scan else 0
+        QTimer.singleShot(initial_scan_delay, lambda: self.load_directory(self.current_dir))
         QTimer.singleShot(0, self._focus_grid_panel)
         QTimer.singleShot(0, self._restore_face_filter_chip)
+        # Maintenance is deliberately delayed and isolated from interactive
+        # cache work so startup and first-folder rendering keep priority.
+        QTimer.singleShot(5_000, self._start_cache_maintenance)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         # Future callbacks run on worker threads. Mark shutdown before stopping
@@ -3993,10 +4600,36 @@ class Workspace(QMainWindow):
         self.directory_scan_executor.shutdown(wait=False, cancel_futures=True)
         self.cache_load_executor.shutdown(wait=False, cancel_futures=True)
         self.cache_flush_executor.shutdown(wait=False, cancel_futures=False)
+        self.cache_maintenance_executor.shutdown(wait=False, cancel_futures=True)
         self.xmp_executor.shutdown(wait=False, cancel_futures=True)
-        self.metadata_pipeline.shutdown()
-        self.ai_pipeline.shutdown()
+        if self._metadata_pipeline is not None:
+            self._metadata_pipeline.shutdown()
+        if self._ai_pipeline is not None:
+            self._ai_pipeline.shutdown()
         super().closeEvent(event)
+
+    @property
+    def ai_pipeline(self):
+        if self._ai_pipeline is None:
+            from .ai import AiPipeline
+
+            self._ai_pipeline = AiPipeline()
+        return self._ai_pipeline
+
+    @property
+    def metadata_pipeline(self):
+        if self._metadata_pipeline is None:
+            from .exif import MetadataPipeline
+
+            self._metadata_pipeline = MetadataPipeline()
+        return self._metadata_pipeline
+
+    def _start_cache_maintenance(self) -> None:
+        """Queue startup cache cleanup after interactive startup has settled."""
+        if self.closing or type(self)._cache_maintenance_started:
+            return
+        type(self)._cache_maintenance_started = True
+        self.cache_maintenance_executor.submit(maintain_folder_caches)
 
     def set_workspace_active(self, active: bool) -> None:
         """Run preview generation only for the tab currently on screen."""
@@ -4099,8 +4732,14 @@ class Workspace(QMainWindow):
         self.dir_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Drives)
         self.dir_model.setRootPath(QDir.rootPath())
         
-        self.dir_tree = QTreeView()
+        self.dir_tree = DirectoryTree()
         self.dir_tree.setModel(self.dir_model)
+        self.dir_tree.setSelectionMode(QTreeView.SelectionMode.ExtendedSelection)
+        # QFileSystemModel loads children asynchronously; enable its explicit
+        # name-column sort instead of retaining the filesystem enumeration
+        # order as folders arrive.
+        self.dir_tree.setSortingEnabled(True)
+        self.dir_tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         # Включаем возможность редактирования элементов дерева
         self.dir_tree.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
         self._folder_name_editor: FolderNameEditor | None = None
@@ -4108,6 +4747,9 @@ class Workspace(QMainWindow):
         for column in range(1, self.dir_model.columnCount()):
             self.dir_tree.hideColumn(column)
         self.dir_tree.clicked.connect(self._directory_selected)
+        self.dir_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.dir_tree.customContextMenuRequested.connect(self._show_directory_context_menu)
+        self.dir_tree.pathsDropped.connect(self._receive_dropped_paths)
         self.dir_tree.setHeaderHidden(True)
         self.dir_tree.setMinimumWidth(260)
 
@@ -4120,6 +4762,8 @@ class Workspace(QMainWindow):
         self.grid.audioRequested.connect(self._open_grid_audio)
         self.grid.audioHoverChanged.connect(self._set_grid_audio_hover)
         self.grid.seriesToggleRequested.connect(self._toggle_grid_series)
+        self.grid.deleteRequested.connect(self._delete_grid_selection)
+        self.grid.pathsDropped.connect(self._receive_dropped_paths)
         self.grid.currentItemChanged.connect(self._grid_current_item_changed)
         self.grid.itemSelectionChanged.connect(self._selection_changed)
         self.grid.verticalScrollBar().valueChanged.connect(self._schedule_visible_thumb_priority)
@@ -4128,7 +4772,8 @@ class Workspace(QMainWindow):
         self.grid_audio_output = QAudioOutput(self)
         self.grid_audio_player.setAudioOutput(self.grid_audio_output)
         self.grid_audio_path = ""
-        splitter = QSplitter()
+        splitter = FavoritesSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("panelSplitter")
         sidebar = QWidget()
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(8, 8, 8, 8)
@@ -4200,7 +4845,52 @@ class Workspace(QMainWindow):
         local_layout.setContentsMargins(0, 0, 0, 0)
         local_layout.setSpacing(8)
         local_layout.addWidget(folder_toolbar)
-        local_layout.addWidget(self.dir_tree, 1)
+
+        favorites = QWidget()
+        favorites.setObjectName("favoritesPanel")
+        favorites.setMinimumHeight(48)
+        favorites_layout = QVBoxLayout(favorites)
+        favorites_layout.setContentsMargins(0, 2, 0, 0)
+        favorites_layout.setSpacing(4)
+        favorites_header = QHBoxLayout()
+        favorites_header.setContentsMargins(2, 0, 2, 0)
+        favorites_title = QLabel("ИЗБРАННОЕ")
+        favorites_title.setObjectName("favoritesTitle")
+        favorites_header.addWidget(favorites_title)
+        favorites_header.addStretch()
+        self.favorites_trash = FavoritesTrashButton()
+        self.favorites_trash.setIcon(_fomantic_icon("trash", 13, "#a8a8a8"))
+        self.favorites_trash.setIconSize(QSize(13, 13))
+        self.favorites_trash.setToolTip("Удалить выбранную папку из избранного или перетащить её сюда")
+        self.favorites_trash.clicked.connect(self._remove_selected_favorite)
+        self.favorites_trash.favoriteDropped.connect(self._remove_favorite)
+        favorites_header.addWidget(self.favorites_trash)
+        self.add_favorite_button = QToolButton()
+        self.add_favorite_button.setObjectName("favoritesAdd")
+        self.add_favorite_button.setIcon(_fomantic_icon("plus", 13))
+        self.add_favorite_button.setIconSize(QSize(13, 13))
+        self.add_favorite_button.setToolTip("Добавить текущую папку в избранное")
+        self.add_favorite_button.clicked.connect(self._add_current_directory_to_favorites)
+        favorites_header.addWidget(self.add_favorite_button)
+        favorites_layout.addLayout(favorites_header)
+
+        self.favorites_list = FavoritesList()
+        self.favorites_list.itemActivated.connect(self._open_favorite)
+        self.favorites_list.itemClicked.connect(self._open_favorite)
+        self.favorites_list.model().rowsMoved.connect(lambda *_: self._save_favorites())
+        favorites_layout.addWidget(self.favorites_list, 1)
+        self._load_favorites()
+        self.favorites_panel = favorites
+        self.favorites_splitter = FavoritesSplitter(Qt.Orientation.Vertical)
+        self.favorites_splitter.setObjectName("favoritesSplitter")
+        self.favorites_splitter.setChildrenCollapsible(False)
+        self.favorites_splitter.addWidget(self.dir_tree)
+        self.favorites_splitter.addWidget(favorites)
+        self.favorites_splitter.setStretchFactor(0, 1)
+        self.favorites_splitter.setStretchFactor(1, 0)
+        self.favorites_splitter.splitterMoved.connect(lambda *_: self._save_favorites_height())
+        local_layout.addWidget(self.favorites_splitter, 1)
+        QTimer.singleShot(0, self._restore_favorites_height)
 
         self.shotsync_panel = ShotSyncPanel(icon_provider=_fomantic_icon)
         self.shotsync_panel.loginRequested.connect(self._show_shotsync_login)
@@ -4263,6 +4953,13 @@ class Workspace(QMainWindow):
         self.media_filter.setItemIcon(1, _fomantic_icon("images", 12, "#a8b0bd"))
         self.media_filter.setItemIcon(2, _fomantic_icon("film", 12, "#a8b0bd"))
         self.media_filter.setFixedWidth(148)
+        self.file_type_filter = QComboBox()
+        for label, value in (("JPG и RAW", "jpg_raw"), ("Только JPG", "jpg"), ("Только RAW", "raw")):
+            self.file_type_filter.addItem(label, value)
+        self.file_type_filter.setItemIcon(0, _fomantic_icon("images", 12, "#a8b0bd"))
+        self.file_type_filter.setItemIcon(1, _fomantic_icon("file", 12, "#a8b0bd"))
+        self.file_type_filter.setItemIcon(2, _fomantic_icon("camera", 12, "#a8b0bd"))
+        self.file_type_filter.setFixedWidth(132)
         self.camera_filter = QComboBox()
         self.camera_filter.addItem("Все камеры", None)
         self.camera_filter.setItemIcon(0, _fomantic_icon("images", 12, "#a8b0bd"))
@@ -4279,25 +4976,22 @@ class Workspace(QMainWindow):
             self.sort_combo.setItemIcon(index, _fomantic_icon("sort", 12, "#a8b0bd"))
         self.sort_combo.setCurrentIndex(self.sort_combo.findData("time"))
         self.sort_combo.setFixedWidth(148)
-        search_box = QWidget()
-        search_box.setObjectName("viewerSearchBox")
-        search_layout = QHBoxLayout(search_box)
-        search_layout.setContentsMargins(5, 0, 5, 0)
-        search_layout.setSpacing(3)
-        search_icon = QLabel()
-        search_icon.setObjectName("viewerSearchIcon")
-        search_icon.setPixmap(_fomantic_icon("search", 14, "#a8b0bd").pixmap(QSize(14, 14)))
-        search_layout.addWidget(search_icon)
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Поиск по имени или комментарию")
+        self.search_edit = CenteredSearchEdit()
+        self.search_edit.setObjectName("viewerSearchEdit")
+        self.search_edit.addAction(
+            _fomantic_icon("search", 14, "#a8b0bd"),
+            QLineEdit.ActionPosition.LeadingPosition,
+        )
+        self.search_edit.setPlaceholderText("Поиск")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setFixedWidth(148)
-        search_layout.addWidget(self.search_edit)
-        for control in (self.rating_filter, self.color_filter, self.media_filter, self.camera_filter, self.shot_filter, self.sort_combo):
+        self.search_edit.setFixedWidth(132)
+        # Match the native height of the neighbouring combo-box controls.
+        self.search_edit.setFixedHeight(self.media_filter.sizeHint().height())
+        for control in (self.rating_filter, self.color_filter, self.media_filter, self.file_type_filter, self.camera_filter, self.shot_filter, self.sort_combo):
             control.currentIndexChanged.connect(self._apply_view)
             filter_layout.addWidget(control)
         self.search_edit.textChanged.connect(self._apply_view)
-        filter_layout.addWidget(search_box)
+        filter_layout.addWidget(self.search_edit)
 
         self.face_filter_chip = QFrame()
         self.face_filter_chip.setObjectName("fullFaceFilterChip")
@@ -4351,13 +5045,6 @@ class Workspace(QMainWindow):
         self.utilities_button.setToolTip("Утилиты")
         self.utilities_button.clicked.connect(self._show_utilities_menu)
         toolbar_layout.addWidget(self.utilities_button)
-        for icon, delta in (("zoom-out", -1), ("zoom", 1)):
-            button = QToolButton()
-            button.setIcon(_fomantic_icon(icon, 13))
-            button.setToolTip("Размер превью")
-            button.clicked.connect(lambda _checked=False, d=delta: self.grid.change_card_size(d))
-            toolbar_layout.addWidget(button)
-
         self.status_panel = QWidget()
         self.status_panel.setObjectName("viewerStatusPanel")
         self.status_panel.setMinimumWidth(0)
@@ -4378,6 +5065,7 @@ class Workspace(QMainWindow):
         self.status_label = QLabel()
         self.status_label.setObjectName("viewerStatusText")
         self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         status_layout.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignBottom)
         self.status_panel.installEventFilter(self)
         toolbar_layout.addWidget(self.status_panel, 1)
@@ -4451,6 +5139,9 @@ class Workspace(QMainWindow):
 
         self.grid_content_stack = QStackedWidget()
         self.grid_content_stack.addWidget(self.grid)
+        self.grid_zoom_controls = GridZoomControls(self.grid.change_card_size, self.grid_content_stack)
+        self.grid_content_stack.installEventFilter(self)
+        self._position_grid_zoom_controls()
         content_layout.addWidget(self.grid_content_stack, 1)
         content_layout.addWidget(meta)
         splitter.addWidget(sidebar)
@@ -4531,6 +5222,8 @@ class Workspace(QMainWindow):
         add_hotkey("fullscreen", self.toggle_fullscreen)
         add_hotkey("quick_mark", self._apply_quick_mark)
         add_hotkey("comment", self._show_comment_dialog)
+        add_hotkey("quick_copy", lambda: self._show_quick_transfer(move=False))
+        add_hotkey("quick_move", lambda: self._show_quick_transfer(move=True))
 
         for rating in range(0, 6):
             add_hotkey(f"rating_{rating}", lambda _checked=False, value=rating: self._set_selected_rating(value or None))
@@ -4543,6 +5236,62 @@ class Workspace(QMainWindow):
     def _reload_hotkeys(self) -> None:
         for identifier, action in self._hotkey_actions.items():
             action.setShortcut(_hotkey_sequence(self.settings, identifier))
+
+    def _quick_transfer_destinations(self) -> list[Path]:
+        """Last used destination first, then open tabs and the remaining history."""
+        raw_history = self.settings.value("quick_transfer/recent_destinations", [], list)
+        history = [Path(value) for value in raw_history if isinstance(value, str) and Path(value).is_dir()]
+        tabs = self.destination_paths_provider() if self.destination_paths_provider else []
+        candidates = [*history, *tabs]
+        destinations: list[Path] = []
+        for path in candidates:
+            if path.is_dir() and path not in destinations and path != self.current_dir:
+                destinations.append(path)
+            if len(destinations) == 9:
+                break
+        return destinations
+
+    def _remember_quick_transfer_destination(self, destination: Path) -> None:
+        history = [path for path in self._quick_transfer_destinations() if path != destination]
+        self.settings.setValue("quick_transfer/recent_destinations", [str(destination), *(str(path) for path in history)][:9])
+
+    def _show_quick_transfer(self, *, move: bool) -> None:
+        sources = [path for path in self._file_panel_paths() if path.exists()]
+        if not sources:
+            return
+        identifier = "quick_move" if move else "quick_copy"
+        operation = "переместить" if move else "скопировать"
+        dialog = QuickTransferDialog(
+            operation,
+            self._quick_transfer_destinations(),
+            _hotkey_sequence(self.settings, identifier),
+            lambda destination, update_recent, progress: self._quick_transfer_to(
+                sources, destination, move, update_recent, progress
+            ),
+            self,
+        )
+        # A WindowShortcut QAction can otherwise consume the repeated shortcut
+        # before this modal dialog receives its key press.  The dialog owns
+        # both quick-transfer shortcuts until it closes.
+        quick_actions = [self._hotkey_actions[name] for name in ("quick_copy", "quick_move")]
+        enabled = [action.isEnabled() for action in quick_actions]
+        for action in quick_actions:
+            action.setEnabled(False)
+        try:
+            dialog.exec()
+        finally:
+            for action, was_enabled in zip(quick_actions, enabled):
+                action.setEnabled(was_enabled)
+
+    def _quick_transfer_to(self, sources: list[Path], destination: Path, move: bool, update_recent: bool, progress: Callable[[int, int], None]) -> None:
+        if update_recent:
+            self._remember_quick_transfer_destination(destination)
+        self._receive_dropped_paths(
+            sources,
+            destination,
+            Qt.DropAction.MoveAction if move else Qt.DropAction.CopyAction,
+            progress=progress,
+        )
 
     def _install_grid_page_key_filters(self) -> None:
         self._register_grid_page_focus_widget(self.grid_page)
@@ -4578,12 +5327,50 @@ class Workspace(QMainWindow):
             return
         self._focus_directory_panel()
 
+    def _position_grid_zoom_controls(self) -> None:
+        if not hasattr(self, "grid_zoom_controls"):
+            return
+        margin = 10
+        controls = self.grid_zoom_controls
+        controls.adjustSize()
+        controls.move(
+            max(margin, self.grid_content_stack.width() - controls.width() - margin),
+            max(margin, self.grid_content_stack.height() - controls.height() - margin),
+        )
+        controls.raise_()
+
     def eventFilter(self, watched, event) -> bool:
+        if watched is getattr(self, "grid_content_stack", None) and event.type() == QEvent.Type.Resize:
+            QTimer.singleShot(0, self._position_grid_zoom_controls)
         if watched is getattr(self, "status_panel", None) and event.type() == QEvent.Type.Resize:
             self._fit_status_text()
         if event.type() == QEvent.Type.KeyPress and self.stack.currentWidget() is self.grid_page:
             focus_widget = watched if isinstance(watched, QWidget) else QApplication.focusWidget()
             if self._is_grid_page_widget(focus_widget):
+                file_panel_focused = self._is_directory_focus_widget(focus_widget) or focus_widget is self.grid or self.grid.isAncestorOf(focus_widget)
+                if file_panel_focused and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    if event.key() == Qt.Key.Key_C:
+                        self._copy_file_selection(cut=False)
+                        return True
+                    if event.key() == Qt.Key.Key_X:
+                        self._copy_file_selection(cut=True)
+                        return True
+                    if event.key() == Qt.Key.Key_V:
+                        self._paste_file_selection()
+                        return True
+                    if event.key() == Qt.Key.Key_D:
+                        if self._is_directory_focus_widget(focus_widget):
+                            self.dir_tree.clearSelection()
+                        else:
+                            self.grid.clearSelection()
+                        return True
+                if event.key() == Qt.Key.Key_Delete and self._is_directory_focus_widget(focus_widget):
+                    index = self.dir_tree.currentIndex()
+                    if index.isValid():
+                        self._delete_paths([Path(self.dir_model.filePath(index))], permanent=bool(
+                            event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+                        ))
+                        return True
                 if event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
                     self._toggle_primary_panel_focus()
                     return True
@@ -4644,7 +5431,7 @@ class Workspace(QMainWindow):
         QTimer.singleShot(0, lambda target=path, idx=index: self._show_folder_name_editor(target, idx))
 
     def _show_folder_name_editor(self, path: Path, index) -> None:
-        if self.dir_model._new_folder_path != path or not index.isValid():
+        if not index.isValid():
             return
         if self._folder_name_editor is not None:
             self._folder_name_editor.deleteLater()
@@ -4683,12 +5470,35 @@ class Workspace(QMainWindow):
                 QTimer.singleShot(0, editor.setFocus)
                 return
             try:
+                current_relative = self.current_dir.relative_to(old_path)
+            except ValueError:
+                current_relative = None
+            if current_relative is not None:
+                # SQLite cannot reliably move an open database on Windows.
+                # Close this workspace's cache before moving its path-hashed
+                # database, then reopen it at the renamed location.
+                self._flush_folder_cache(wait=True, close=True)
+                self.folder_cache = None
+                self.cache_ready = False
+            try:
                 old_path.rename(new_path)
             except OSError as error:
                 editor.setStyleSheet("border: 1px solid #c43d2f;")
                 editor.setToolTip(str(error))
+                if current_relative is not None:
+                    self.load_directory(old_path / current_relative)
                 QTimer.singleShot(0, editor.setFocus)
                 return
+            try:
+                relocate_folder_caches(old_path, new_path)
+            except OSError as error:
+                QMessageBox.warning(
+                    self,
+                    "Кэш папки",
+                    f"Папка переименована, но не удалось перенести её кэш:\n{error}",
+                )
+            if current_relative is not None:
+                self.load_directory(new_path / current_relative)
         self._finish_folder_name_editor()
 
     def _cancel_folder_name(self) -> None:
@@ -4746,6 +5556,485 @@ class Workspace(QMainWindow):
     def _directory_selected(self, index) -> None:
         path = Path(self.dir_model.filePath(index))
         self.load_directory(path)
+
+    @staticmethod
+    def _favorite_path_key(path: Path) -> str:
+        try:
+            return str(path.expanduser().resolve()).casefold()
+        except OSError:
+            return str(path.expanduser()).casefold()
+
+    def _default_favorite_paths(self) -> list[Path]:
+        locations = (
+            QStandardPaths.StandardLocation.DocumentsLocation,
+            QStandardPaths.StandardLocation.PicturesLocation,
+        )
+        paths: list[Path] = []
+        for location in locations:
+            value = QStandardPaths.writableLocation(location)
+            path = Path(value) if value else None
+            if path is not None and path.is_dir() and path not in paths:
+                paths.append(path)
+        return paths
+
+    def _load_favorites(self) -> None:
+        key = "sidebar/favorite_paths"
+        if self.settings.contains(key):
+            stored = self.settings.value(key, [], list)
+            raw_paths = stored if isinstance(stored, (list, tuple)) else [stored]
+        else:
+            raw_paths = [str(path) for path in self._default_favorite_paths()]
+            self.settings.setValue(key, raw_paths)
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for raw_path in raw_paths:
+            path = Path(str(raw_path)).expanduser()
+            path_key = self._favorite_path_key(path)
+            if path.is_dir() and path_key not in seen:
+                paths.append(path)
+                seen.add(path_key)
+        self._set_favorites(paths)
+
+    def _set_favorites(self, paths: list[Path]) -> None:
+        self.favorites_list.clear()
+        for path in paths:
+            item = QListWidgetItem(self.volume_icon_provider.icon(QFileInfo(str(path))), path.name or str(path))
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            item.setToolTip(str(path))
+            self.favorites_list.addItem(item)
+
+    def _save_favorites(self) -> None:
+        self.settings.setValue(
+            "sidebar/favorite_paths",
+            [self.favorites_list.item(row).data(Qt.ItemDataRole.UserRole) for row in range(self.favorites_list.count())],
+        )
+
+    def _restore_favorites_height(self) -> None:
+        if not hasattr(self, "favorites_splitter"):
+            return
+        requested = self.settings.value("sidebar/favorites_height", 144, int)
+        available = max(48, self.favorites_splitter.height() - self.favorites_splitter.handleWidth())
+        height = max(48, min(int(requested), max(48, available - 48)))
+        self.favorites_splitter.setSizes([max(48, available - height), height])
+
+    def _save_favorites_height(self) -> None:
+        if hasattr(self, "favorites_panel") and self.favorites_panel.height() >= 48:
+            self.settings.setValue("sidebar/favorites_height", self.favorites_panel.height())
+
+    def _add_current_directory_to_favorites(self) -> None:
+        path = self.current_dir
+        if not path.is_dir():
+            return
+        path_key = self._favorite_path_key(path)
+        for row in range(self.favorites_list.count()):
+            item = self.favorites_list.item(row)
+            if self._favorite_path_key(Path(item.data(Qt.ItemDataRole.UserRole))) == path_key:
+                self.favorites_list.setCurrentItem(item)
+                return
+        item = QListWidgetItem(self.volume_icon_provider.icon(QFileInfo(str(path))), path.name or str(path))
+        item.setData(Qt.ItemDataRole.UserRole, str(path))
+        item.setToolTip(str(path))
+        self.favorites_list.addItem(item)
+        self._save_favorites()
+
+    def _open_favorite(self, item: QListWidgetItem) -> None:
+        path = Path(item.data(Qt.ItemDataRole.UserRole))
+        if path.is_dir():
+            self.load_directory(path)
+            self._reveal_favorite_in_tree(path)
+
+    def _reveal_favorite_in_tree(self, path: Path, attempts_left: int = 20) -> None:
+        """Expand and select a favorite after QFileSystemModel has loaded it."""
+        index = self.dir_model.index(str(path))
+        if not index.isValid():
+            if attempts_left > 0:
+                QTimer.singleShot(
+                    50,
+                    lambda target=path, attempts=attempts_left - 1: self._reveal_favorite_in_tree(target, attempts),
+                )
+            return
+        self._expand_tree_path(index)
+        self.dir_tree.setCurrentIndex(index)
+        self.dir_tree.scrollTo(index, QTreeView.ScrollHint.EnsureVisible)
+
+    def _remove_selected_favorite(self) -> None:
+        item = self.favorites_list.currentItem()
+        if item is not None:
+            self._remove_favorite(str(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _remove_favorite(self, path_text: str) -> None:
+        path_key = self._favorite_path_key(Path(path_text))
+        for row in range(self.favorites_list.count()):
+            item = self.favorites_list.item(row)
+            if self._favorite_path_key(Path(item.data(Qt.ItemDataRole.UserRole))) == path_key:
+                self.favorites_list.takeItem(row)
+                self._save_favorites()
+                break
+
+    def _show_directory_context_menu(self, position: QPoint) -> None:
+        index = self.dir_tree.indexAt(position)
+        if not index.isValid():
+            return
+        path = Path(self.dir_model.filePath(index))
+        if not path.is_dir():
+            return
+        self.dir_tree.setCurrentIndex(index)
+        menu = QMenu(self.dir_tree)
+        rename = menu.addAction("Переименовать")
+        rename.triggered.connect(
+            lambda _checked=False, target=path: QTimer.singleShot(
+                0, lambda: self._begin_directory_inline_rename(target)
+            )
+        )
+        delete = menu.addAction("Удалить")
+        delete.setIcon(_fomantic_icon("trash", 13))
+        delete.triggered.connect(lambda _checked=False, target=path: self._delete_paths([target], permanent=False))
+        menu.exec(self.dir_tree.viewport().mapToGlobal(position))
+
+    def _delete_grid_selection(self, permanent: bool) -> None:
+        self._delete_paths(self._selected_paths(), permanent=permanent)
+
+    def _file_panel_paths(self) -> list[Path]:
+        """Return the selected filesystem entries from the active file panel."""
+        focus = QApplication.focusWidget()
+        if self._is_directory_focus_widget(focus):
+            selection = self.dir_tree.selectionModel()
+            if selection is None:
+                return []
+            return [
+                Path(self.dir_model.filePath(index))
+                for index in selection.selectedRows(0)
+                if index.isValid()
+            ]
+        return self._selected_paths()
+
+    def _paste_destination(self) -> Path:
+        focus = QApplication.focusWidget()
+        if self._is_directory_focus_widget(focus):
+            index = self.dir_tree.currentIndex()
+            if index.isValid():
+                candidate = Path(self.dir_model.filePath(index))
+                if candidate.is_dir():
+                    return candidate
+        return self.current_dir
+
+    def _copy_file_selection(self, *, cut: bool) -> None:
+        paths = [path for path in self._file_panel_paths() if path.exists()]
+        if not paths:
+            return
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+        # Explorer understands Preferred DropEffect, making Ctrl+X usable
+        # outside the application as well as in another RAWww tab.
+        mime.setData(_PREFERRED_DROP_EFFECT_MIME, (2 if cut else 1).to_bytes(4, "little"))
+        if cut:
+            mime.setData("application/x-rawww-cut", b"1")
+        QApplication.clipboard().setMimeData(mime)
+
+    def _paste_file_selection(self) -> None:
+        mime = QApplication.clipboard().mimeData()
+        paths = _local_paths_from_mime(mime)
+        if not paths:
+            return
+        action = Qt.DropAction.MoveAction if _mime_requests_move(mime) else Qt.DropAction.CopyAction
+        self._receive_dropped_paths(paths, self._paste_destination(), action)
+
+    @staticmethod
+    def _renamed_transfer_target(target: Path) -> Path:
+        """Return the first non-existing ``name (N)`` variant of a target."""
+        for number in range(2, 10_000):
+            candidate = target.with_name(f"{target.stem} ({number}){target.suffix}")
+            if not candidate.exists():
+                return candidate
+        raise OSError("Не удалось подобрать свободное имя")
+
+    def _resolve_transfer_conflict(self, source: Path, target: Path, move: bool) -> str:
+        verb = "перемещении" if move else "копировании"
+        dialog = QMessageBox(self)
+        dialog.setObjectName("transferConflictDialog")
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Файл уже существует")
+        dialog.setText(f"В папке назначения уже есть «{target.name}».")
+        dialog.setInformativeText(f"Что сделать при {verb} «{source.name}»?")
+        skip = dialog.addButton("Пропустить", QMessageBox.ButtonRole.ActionRole)
+        rename = dialog.addButton("Переименовать", QMessageBox.ButtonRole.ActionRole)
+        replace = dialog.addButton("Заменить", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = dialog.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(rename)
+        dialog.exec()
+        chosen = dialog.clickedButton()
+        if chosen is skip:
+            return "skip"
+        if chosen is rename:
+            return "rename"
+        if chosen is replace:
+            return "replace"
+        return "cancel"
+
+    def _receive_dropped_paths(self, paths: list[Path], destination: Path | None, action, progress: Callable[[int, int], None] | None = None) -> None:
+        """Copy external files or copy/move app files into a folder destination."""
+        if destination is None:
+            destination = self.current_dir
+        if not destination.is_dir():
+            return
+        sources = list(dict.fromkeys(path for path in paths if path.exists()))
+        if not sources:
+            return
+        move = action == Qt.DropAction.MoveAction
+        # Moving the folder currently being viewed must release its SQLite
+        # cache before relocating that cache alongside the folder.
+        if move and self.current_dir in sources:
+            self.load_directory(self.current_dir.parent)
+        errors: list[str] = []
+        changed = False
+        moved_files: list[Path] = []
+        moved_folders: list[tuple[Path, Path]] = []
+        # Avoid a delayed watcher reload after the grid has been reconciled
+        # below, just as delete does.
+        if move and any(source.parent == self.current_dir for source in sources):
+            self.folder_change_timer.stop()
+            self._ignore_folder_changes_until = max(
+                self._ignore_folder_changes_until,
+                monotonic() + FOLDER_CHANGE_DEBOUNCE_MS / 1_000 + 0.5,
+            )
+        for completed, source in enumerate(sources, start=1):
+            try:
+                source_resolved = source.resolve()
+                destination_resolved = destination.resolve()
+            except OSError:
+                source_resolved, destination_resolved = source, destination
+            if source.parent == destination:
+                if move:
+                    continue
+                errors.append(f"{source.name}: уже находится в этой папке")
+                continue
+            if source.is_dir() and destination_resolved.is_relative_to(source_resolved):
+                errors.append(f"{source.name}: нельзя поместить папку внутрь самой себя")
+                continue
+            target = destination / source.name
+            if target.exists():
+                resolution = self._resolve_transfer_conflict(source, target, move)
+                if resolution == "cancel":
+                    break
+                if resolution == "skip":
+                    continue
+                if resolution == "rename":
+                    try:
+                        target = self._renamed_transfer_target(target)
+                    except OSError as exc:
+                        errors.append(f"{source.name}: {exc}")
+                        continue
+                elif resolution == "replace":
+                    try:
+                        if target.is_dir():
+                            remove_folder_cache(target)
+                            shutil.rmtree(target)
+                        else:
+                            target.unlink()
+                        self.cache_flush_executor.submit(prune_folder_cache, destination)
+                    except OSError as exc:
+                        errors.append(f"{source.name}: не удалось заменить {exc}")
+                        continue
+            is_folder = source.is_dir()
+            try:
+                if move:
+                    shutil.move(str(source), str(target))
+                    if is_folder:
+                        moved_folders.append((source, target))
+                    else:
+                        moved_files.append(source)
+                elif is_folder:
+                    shutil.copytree(source, target)
+                else:
+                    shutil.copy2(source, target)
+                changed = True
+            except OSError as exc:
+                errors.append(f"{source.name}: {exc}")
+            if progress is not None:
+                progress(completed, len(sources))
+        for source, target in moved_folders:
+            try:
+                relocate_folder_caches(source, target)
+            except OSError as exc:
+                errors.append(f"кэш {source.name}: {exc}")
+        if changed:
+            moved_from_current = [
+                source for source in [*moved_files, *(source for source, _target in moved_folders)]
+                if source.parent == self.current_dir
+            ]
+            if moved_from_current:
+                # Keep the grid stable instead of rebuilding every thumbnail.
+                self._remove_paths_from_grid(moved_from_current)
+                self.cache_flush_executor.submit(prune_folder_cache, self.current_dir)
+            # The current folder received files: its grid must discover them.
+            if self.current_dir == destination:
+                self.folder_change_timer.stop()
+                self.load_directory(self.current_dir)
+        if errors:
+            QMessageBox.warning(self, "Копирование файлов", "Не удалось обработать некоторые объекты:\n" + "\n".join(errors))
+
+    def _delete_paths(self, paths: list[Path], *, permanent: bool) -> None:
+        """Delete grid/tree entries, preserving selection copies from ShotSync."""
+        targets = list(dict.fromkeys(path for path in paths if path.exists()))
+        if not targets:
+            return
+        files = [path for path in targets if path.is_file()]
+        try:
+            is_selection_copy = self.current_dir.is_relative_to(selection_root())
+        except OSError:
+            is_selection_copy = False
+        if files and is_selection_copy:
+            QMessageBox.information(
+                self,
+                "ShotSync",
+                "Фотографии из съёмки, взятой на отбор из ShotSync, нельзя удалить отдельно.",
+            )
+            targets = [path for path in targets if path.is_dir()]
+            if not targets:
+                return
+        for folder in (path for path in targets if path.is_dir()):
+            try:
+                resolved = folder.resolve()
+            except OSError:
+                resolved = folder
+            if resolved.parent == resolved:
+                QMessageBox.warning(self, "Удаление", "Нельзя удалить корневую папку диска.")
+                return
+
+        action = "удалить навсегда" if permanent else "переместить в корзину"
+        if not self.settings.value("behavior/delete_without_confirmation", False, bool):
+            names = "\n".join(f"• {path.name}" for path in targets[:8])
+            if len(targets) > 8:
+                names += f"\n• и ещё {len(targets) - 8}"
+            dialog = QMessageBox(self)
+            dialog.setIcon(QMessageBox.Icon.Warning)
+            dialog.setWindowTitle("Удаление")
+            dialog.setText(f"{action.capitalize()} {len(targets)} объект(а)?\n\n{names}")
+            dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            dialog.button(QMessageBox.StandardButton.Yes).setText("Удалить")
+            dialog.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+            if dialog.exec() != QMessageBox.StandardButton.Yes:
+                return
+
+        # A current-folder delete must first release the open cache and watcher.
+        deleting_current_folder = self.current_dir in targets
+        if deleting_current_folder:
+            self.load_directory(self.current_dir.parent)
+
+        # The watcher also reports changes made by this operation. The grid is
+        # reconciled below without clearing it, so a delayed full reload would
+        # only cause a second, distracting redraw.
+        self.folder_change_timer.stop()
+        self._ignore_folder_changes_until = max(
+            self._ignore_folder_changes_until,
+            monotonic() + FOLDER_CHANGE_DEBOUNCE_MS / 1_000 + 0.5,
+        )
+
+        deleted_files: list[Path] = []
+        deleted_folders: list[Path] = []
+        errors: list[str] = []
+        for path in targets:
+            is_folder = path.is_dir()
+            try:
+                if permanent:
+                    if is_folder:
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+                else:
+                    send2trash(str(path))
+            except OSError as exc:
+                errors.append(f"{path.name}: {exc}")
+                continue
+            if is_folder:
+                deleted_folders.append(path)
+            else:
+                deleted_files.append(path)
+
+        for folder in deleted_folders:
+            try:
+                remove_folder_cache(folder)
+            except OSError as exc:
+                errors.append(f"кэш {folder.name}: {exc}")
+
+        if deleted_files:
+            # Compact cache off the UI thread; it also removes rows for any
+            # sidecars or concurrent filesystem changes seen by the watcher.
+            self.cache_flush_executor.submit(prune_folder_cache, self.current_dir)
+
+        deleted = [*deleted_files, *deleted_folders]
+        if deleted and not deleting_current_folder:
+            self._remove_paths_from_grid(deleted)
+        if errors:
+            QMessageBox.warning(self, "Удаление", "Не удалось удалить:\n" + "\n".join(errors))
+
+    def _remove_paths_from_grid(self, deleted: list[Path]) -> None:
+        """Reconcile a local delete without clearing/repopulating the grid."""
+        removed = set(deleted)
+        old_paths = list(self.paths)
+        selected_rows = [
+            old_paths.index(path)
+            for path in removed
+            if path in old_paths
+        ]
+        anchor: Path | None = None
+        if selected_rows:
+            after = max(selected_rows) + 1
+            candidates = old_paths[after:] + list(reversed(old_paths[:min(selected_rows)]))
+            anchor = next((path for path in candidates if path not in removed), None)
+
+        self.all_paths = [path for path in self.all_paths if path not in removed]
+        self.view_paths = [path for path in self.view_paths if path not in removed]
+        self.paths = self._grid_paths_with_series(self.view_paths)
+        self.photo_details = {
+            name: detail for name, detail in self.photo_details.items()
+            if self.current_dir / name not in removed
+        }
+        self.image_embeddings = {
+            name: embedding for name, embedding in self.image_embeddings.items()
+            if self.current_dir / name not in removed
+        }
+        self.view_generation += 1
+        self.populate_timer.stop()
+        self.thumb_index = 0
+        self.thumb_priority.clear()
+        self.thumb_priority_set.clear()
+
+        visible = set(self.paths)
+        for path, item in list(self.items_by_path.items()):
+            if path not in visible:
+                self.grid.takeItem(self.grid.row(item))
+                self.items_by_path.pop(path, None)
+
+        # Deleting a collapsed-series leader can promote a previously hidden
+        # neighbour. Reuse the existing cards wherever possible and only add
+        # the promoted card; nothing visible is cleared in either case.
+        for row, path in enumerate(self.paths):
+            item = self.items_by_path.get(path)
+            if item is None:
+                item = self._grid_item_for_path(path)
+                self.grid.insertItem(row, item)
+                self.items_by_path[path] = item
+            elif self.grid.row(item) != row:
+                self.grid.takeItem(self.grid.row(item))
+                self.grid.insertItem(row, item)
+            item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
+            item.setData(SERIES_ROLE, self.series_cards.get(path, {}))
+
+        self.populate_index = len(self.paths)
+        self._update_analysis_controls()
+        self._refresh_status_panel()
+        self._schedule_visible_thumb_priority()
+        if self.cache_ready:
+            self.thumb_timer.start()
+        if anchor is not None and anchor in self.items_by_path:
+            item = self.items_by_path[anchor]
+            self.grid.clearSelection()
+            item.setSelected(True)
+            self.grid.setCurrentItem(item)
+            self.grid.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
+        self.grid.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _refresh_volume_buttons(self) -> None:
         """Synchronize the sidebar with volumes that are mounted and ready.
@@ -5744,6 +7033,7 @@ class Workspace(QMainWindow):
         self.shotsyncFolderChanged.emit(linked)
 
     def load_directory(self, directory: Path) -> None:
+        switching_directory = directory != self.current_dir
         if hasattr(self, "grid_content_stack"):
             self.grid_content_stack.setCurrentWidget(self.grid)
         if self._folder_context_active:
@@ -5757,6 +7047,15 @@ class Workspace(QMainWindow):
         for future in self.pending.values():
             future.cancel()
         self.pending.clear()
+        self.foreground_full_futures.clear()
+        self.visible_thumb_pending.clear()
+        self.full_request_timer.stop()
+        self.grid_full_request_timer.stop()
+        self.pending_full_request = None
+        self.pending_grid_full_request = None
+        if switching_directory:
+            self._abandon_preview_decode_work()
+        self.video_thumbnailer.cancel()
         self.memory_cache.clear()
         self.thumbnail_cache.clear()
         self.thumbnail_cache_bytes = 0
@@ -5954,18 +7253,7 @@ class Workspace(QMainWindow):
             return
         end = min(len(self.paths), self.populate_index + POPULATE_BATCH)
         for path in self.paths[self.populate_index : end]:
-            item = QListWidgetItem(path.name)
-            item.setData(Qt.ItemDataRole.UserRole, str(path))
-            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
-            item.setToolTip(str(path))
-            item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
-            item.setData(SERIES_ROLE, self.series_cards.get(path, {}))
-            preview = self._thumbnail_cache_get(path)
-            if preview is None:
-                cached = self._cache_get((path, THUMB_SIZE))
-                preview = cached.image if cached is not None else None
-            if preview is not None:
-                item.setData(PREVIEW_ROLE, preview)
+            item = self._grid_item_for_path(path)
             self.grid.addItem(item)
             self.items_by_path[path] = item
         self.populate_index = end
@@ -5975,6 +7263,22 @@ class Workspace(QMainWindow):
             self.populate_timer.stop()
             if self.cache_ready:
                 QTimer.singleShot(0, self._restore_folder_grid_context)
+
+    def _grid_item_for_path(self, path: Path) -> QListWidgetItem:
+        """Create one card while preserving any thumbnail already in RAM."""
+        item = QListWidgetItem(path.name)
+        item.setData(Qt.ItemDataRole.UserRole, str(path))
+        item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
+        item.setToolTip(str(path))
+        item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
+        item.setData(SERIES_ROLE, self.series_cards.get(path, {}))
+        preview = self._thumbnail_cache_get(path)
+        if preview is None:
+            cached = self._cache_get((path, THUMB_SIZE))
+            preview = cached.image if cached is not None else None
+        if preview is not None:
+            item.setData(PREVIEW_ROLE, preview)
+        return item
 
     def _submit_next_thumbs(self) -> None:
         if not self.workspace_active:
@@ -6433,10 +7737,25 @@ class Workspace(QMainWindow):
             return
         # Directory scanning already established these collections. Avoid
         # thousands of filesystem stat calls whenever progress is repainted.
-        total = self.preview_progress_total
-        filtered = sum(1 for path in self.view_paths if is_supported_media(path))
+        visible_files = [
+            path for path in self.view_paths
+            if is_supported_media(path)
+        ]
+        total_files = sum(
+            1 for path in self.all_paths
+            if is_supported_media(path)
+        )
+        filtered = len(visible_files)
+        position = visible_files.index(self.current_path) + 1 if self.current_path in visible_files else "-"
         selected = len(self._selected_paths())
-        text = f"{filtered}/{total}"
+        text = f"{position}/{filtered}"
+        if filtered != total_files:
+            text += f" (всего {total_files})"
+        if hasattr(self, "full_view"):
+            self.full_view.set_counter(
+                f"{position}/{filtered}",
+                self.settings.value("interface/show_full_view_counter", True, bool),
+            )
         if selected > 1:
             text += f" (выделено: {selected})"
         self._status_text = text
@@ -6638,6 +7957,7 @@ class Workspace(QMainWindow):
             rating = self.rating_filter.currentData()
             color = self.color_filter.currentData()
             media = self.media_filter.currentData()
+            file_type = self.file_type_filter.currentData()
             camera_key = self.camera_filter.currentData()
             needle = self.search_edit.text().strip().casefold()
             matching_paths: list[Path] = []
@@ -6647,6 +7967,13 @@ class Workspace(QMainWindow):
                 if media == "video" and not is_supported_video(path):
                     continue
                 if media == "image" and is_supported_video(path):
+                    continue
+                suffix = path.suffix.lower()
+                if file_type == "jpg" and suffix not in JPEG_EXTENSIONS:
+                    continue
+                if file_type == "raw" and suffix not in RAW_EXTENSIONS:
+                    continue
+                if file_type == "jpg_raw" and suffix not in (JPEG_EXTENSIONS | RAW_EXTENSIONS):
                     continue
                 detail = self.photo_details.get(path.name, {})
                 if camera_key is not None and self._camera_filter_key(detail) != camera_key:
@@ -6823,6 +8150,7 @@ class Workspace(QMainWindow):
         rating = self.rating_filter.currentData()
         color = self.color_filter.currentData()
         media = self.media_filter.currentData()
+        file_type = self.file_type_filter.currentData()
         camera_key = self.camera_filter.currentData()
         shot = self.shot_filter.currentData()
         needle = self.search_edit.text().strip().casefold()
@@ -6835,6 +8163,13 @@ class Workspace(QMainWindow):
             if media == "video" and not is_supported_video(path):
                 return False
             if media == "image" and is_supported_video(path):
+                return False
+            suffix = path.suffix.lower()
+            if file_type == "jpg" and suffix not in JPEG_EXTENSIONS:
+                return False
+            if file_type == "raw" and suffix not in RAW_EXTENSIONS:
+                return False
+            if file_type == "jpg_raw" and suffix not in (JPEG_EXTENSIONS | RAW_EXTENSIONS):
                 return False
             detail = self.photo_details.get(path.name, {})
             if camera_key is not None and self._camera_filter_key(detail) != camera_key:
@@ -7454,7 +8789,7 @@ class Workspace(QMainWindow):
         if self.pending.get(key) is future:
             self.pending.pop(key, None)
         self.visible_thumb_pending.discard(key)
-        if self.closing or future.cancelled():
+        if self.closing or future.cancelled() or path.parent != self.current_dir:
             return
         try:
             decoded = future.result()
@@ -7516,7 +8851,7 @@ class Workspace(QMainWindow):
         if self.pending.get(key) is future:
             self.pending.pop(key, None)
         self.visible_thumb_pending.discard(key)
-        if self.closing:
+        if self.closing or path.parent != self.current_dir:
             return
         if future.cancelled():
             return
@@ -7538,7 +8873,7 @@ class Workspace(QMainWindow):
         self.visible_thumb_pending.discard(key)
         if self.foreground_full_futures.get(key) is future:
             self.foreground_full_futures.pop(key, None)
-        if self.closing:
+        if self.closing or path.parent != self.current_dir:
             return
         if future.cancelled():
             return
@@ -7589,7 +8924,7 @@ class Workspace(QMainWindow):
             self._refresh_status_panel()
 
     def _on_video_preview(self, path: Path, preview: QImage) -> None:
-        if self.closing or not self.workspace_active or preview.isNull():
+        if self.closing or not self.workspace_active or preview.isNull() or path.parent != self.current_dir:
             return
         preview = preview.scaled(THUMB_SIZE, THUMB_SIZE, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         if self.folder_cache is not None and self.cache_ready:
@@ -7714,6 +9049,7 @@ class Workspace(QMainWindow):
         if current is None:
             self.pending_grid_full_request = None
             self.grid_full_request_timer.stop()
+            self._refresh_status_panel()
             return
         value = current.data(Qt.ItemDataRole.UserRole)
         if not value:
@@ -7721,6 +9057,7 @@ class Workspace(QMainWindow):
         path = Path(value)
         self.current_path = path
         self.workspace_state.current_photo = path
+        self._refresh_status_panel()
         if self.stack.currentWidget() is self.grid_page and hasattr(self, "meta_bar"):
             self.meta_bar.set_metadata(self.photo_details.get(path.name, {}))
         self.pending_grid_full_request = path
@@ -7738,6 +9075,7 @@ class Workspace(QMainWindow):
         if self.current_path != path:
             self.full_view.stop_audio()
         self.current_path = path
+        self._refresh_status_panel()
         self.full_view.cancel_zoom()
         self.workspace_state.current_photo = path
         self.workspace_state.thumbnail_size = self.grid.card_size
@@ -8159,6 +9497,25 @@ class Workspace(QMainWindow):
             self.visible_thumb_decode_executor = ProcessPoolExecutor(max_workers=VISIBLE_THUMB_DECODE_WORKERS)
         return self.visible_thumb_decode_executor
 
+    def _abandon_preview_decode_work(self) -> None:
+        """Let a newly opened folder start decoding without an old queue ahead.
+
+        ``Future.cancel`` cannot stop a RAW decode that is already executing.
+        Retiring the executors still cancels all queued work, while fresh
+        executors let the new folder's visible cards begin immediately.
+        Running old workers are allowed to finish and their results are
+        discarded by the folder checks in the completion callbacks.
+        """
+        for attribute in (
+            "current_decode_executor",
+            "background_decode_executor",
+            "visible_thumb_decode_executor",
+        ):
+            executor = getattr(self, attribute)
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+                setattr(self, attribute, None)
+
     def _flush_folder_cache(self, *, wait: bool, close: bool = False) -> None:
         cache = self.folder_cache
         if cache is None:
@@ -8181,9 +9538,11 @@ class Workspace(QMainWindow):
 class MainWindow(QMainWindow):
     """Application shell that owns independently stateful folder workspaces."""
 
-    def __init__(self) -> None:
+    def __init__(self, open_target: Path | None = None) -> None:
         super().__init__()
         self.settings = QSettings(APP_NAME, APP_NAME)
+        self._update_check_running = False
+        self._update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="update-check")
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(_application_icon())
         self.resize(1440, 920)
@@ -8196,15 +9555,15 @@ class MainWindow(QMainWindow):
         self.title_bar = ChromeTitleBar(self)
         self.title_bar.setObjectName("chromeTitleBar")
         title_layout = QHBoxLayout(self.title_bar)
-        title_layout.setContentsMargins(7, 0, 5, 0)
+        title_layout.setContentsMargins(3, 0, 3, 0)
         title_layout.setSpacing(3)
         app_icon = QLabel()
         app_icon.setObjectName("appIcon")
         app_icon.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         app_icon.setStyleSheet("background: transparent; border: 0;")
-        app_icon.setFixedSize(20, 20)
+        app_icon.setFixedSize(32, 32)
         app_icon.setToolTip(APP_NAME)
-        app_icon.setPixmap(_title_bar_icon().pixmap(16, 16))
+        app_icon.setPixmap(_title_bar_icon().pixmap(29, 29))
         title_layout.addWidget(app_icon, 0, Qt.AlignmentFlag.AlignVCenter)
         self.tabs = ChromeTabBar()
         self.tabs.setObjectName("workspaceTabs")
@@ -8217,6 +9576,7 @@ class MainWindow(QMainWindow):
         self.tabs.setFixedHeight(38)
         self.tabs.currentChanged.connect(self._select_workspace)
         self.tabs.closeRequested.connect(self._close_workspace)
+        self.tabs.pathsDropped.connect(self._drop_on_workspace_tab)
         title_layout.addWidget(self.tabs)
         add_tab = QToolButton()
         add_tab.setObjectName("titleAction")
@@ -8227,9 +9587,10 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(add_tab)
         title_layout.addStretch(1)
         settings_button = QToolButton()
-        settings_button.setObjectName("titleAction")
+        settings_button.setObjectName("settingsTitleAction")
         settings_button.setIcon(_fomantic_icon("cog", 18, "#c9c9c9"))
-        settings_button.setIconSize(QSize(18, 18))
+        settings_button.setIconSize(QSize(24, 24))
+        settings_button.setFixedSize(34, 34)
         settings_button.setToolTip("Настройки")
         settings_button.clicked.connect(self._show_settings)
         title_layout.addWidget(settings_button)
@@ -8251,10 +9612,90 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.workspace_stack, 1)
         self.setCentralWidget(root)
         self._create_actions()
-        self._restore_workspaces()
+        if open_target is not None and open_target.exists():
+            # An OS open request is a direct navigation, not a regular
+            # application restore.  Building restored tabs first would make a
+            # file launch flash the grid before Full View takes over.
+            self._open_launch_target(open_target)
+        else:
+            self._restore_workspaces()
+        if self.settings.value("updates/auto_check", True, bool):
+            QTimer.singleShot(10_000, lambda: self._check_for_updates(interactive=False))
 
-    def _add_workspace(self, directory: Path | None = None) -> None:
-        workspace = Workspace(directory)
+    def _check_for_updates(self, *, interactive: bool) -> None:
+        if self._update_check_running:
+            return
+        self._update_check_running = True
+        future = self._update_executor.submit(
+            fetch_release_info, APP_VERSION
+        )
+
+        def finish() -> None:
+            self._update_check_running = False
+            try:
+                payload = future.result()
+                release = payload["latest"]
+                version = str(release.get("version", ""))
+                if is_newer(version, APP_VERSION):
+                    self._show_update_dialog(release, payload.get("releases", []))
+                elif interactive:
+                    QMessageBox.information(self, "Обновления", "У вас установлена актуальная версия Контрольки.")
+            except Exception:
+                # A background check must never interrupt the photo workflow.
+                pass
+
+        def wait_for_finish() -> None:
+            if future.done():
+                finish()
+            else:
+                QTimer.singleShot(100, wait_for_finish)
+
+        QTimer.singleShot(0, wait_for_finish)
+
+    def _show_update_dialog(self, release: dict, releases: object) -> None:
+        version = str(release.get("version", ""))
+        changes: list[str] = []
+        if isinstance(releases, list):
+            for item in releases:
+                if not isinstance(item, dict):
+                    continue
+                item_version = str(item.get("version", ""))
+                if item_version and is_newer(item_version, APP_VERSION):
+                    changes.append(f"<h4>Версия {item_version}</h4>{item.get('changelog', '')}")
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Доступно обновление")
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setText(f"Доступна Контролька {version}")
+        dialog.setInformativeText("".join(changes) or "Откройте страницу загрузки, чтобы узнать об изменениях.")
+        dialog.setTextFormat(Qt.TextFormat.RichText)
+        download = dialog.addButton("Открыть страницу загрузки", QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton("Позже", QMessageBox.ButtonRole.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is download:
+            webbrowser.open(str(release.get("landing_url") or "https://shotsync.ru/ctrlka/"))
+
+    def _open_launch_target(self, target: Path) -> None:
+        """Open a folder in a workspace tab or a file directly in Full View."""
+        if target.is_dir():
+            self._open_folder_tab(target)
+            return
+        if not target.is_file():
+            return
+        self._open_folder_tab(target.parent, defer_initial_scan=True)
+        workspace = self.workspace_stack.currentWidget()
+        if isinstance(workspace, Workspace):
+            # Do this before the native window is shown.  The first presented
+            # frame is therefore Full View rather than a briefly visible grid.
+            workspace.open_full(target)
+
+    def _add_workspace(
+        self,
+        directory: Path | None = None,
+        *,
+        defer_initial_scan: bool = False,
+    ) -> None:
+        workspace = Workspace(directory, defer_initial_scan=defer_initial_scan)
+        workspace.destination_paths_provider = self._open_workspace_paths
         # A workspace is a regular widget inside the tab host, not a second
         # native top-level window.
         workspace.setWindowFlags(Qt.WindowType.Widget)
@@ -8274,7 +9715,14 @@ class MainWindow(QMainWindow):
         self._select_workspace(self.tabs.currentIndex())
         self._update_tab_geometry()
 
-    def _open_folder_tab(self, folder: Path) -> None:
+    def _open_workspace_paths(self) -> list[Path]:
+        return [
+            workspace.current_dir
+            for index in range(self.workspace_stack.count())
+            if isinstance(workspace := self.workspace_stack.widget(index), Workspace)
+        ]
+
+    def _open_folder_tab(self, folder: Path, *, defer_initial_scan: bool = False) -> None:
         """Focus an existing tab for ``folder`` or open a new one."""
         folder = Path(folder)
         for index in range(self.workspace_stack.count()):
@@ -8283,7 +9731,14 @@ class MainWindow(QMainWindow):
                 self.tabs.setCurrentIndex(index)
                 self._select_workspace(index)
                 return
-        self._add_workspace(folder)
+        self._add_workspace(folder, defer_initial_scan=defer_initial_scan)
+
+    def _drop_on_workspace_tab(self, paths: list[Path], index: int, action) -> None:
+        workspace = self.workspace_stack.widget(index)
+        if not isinstance(workspace, Workspace):
+            return
+        self.tabs.setCurrentIndex(index)
+        workspace._receive_dropped_paths(paths, workspace.current_dir, action)
 
     def _create_actions(self) -> None:
         next_tab = QAction("Next workspace", self)
@@ -8305,6 +9760,7 @@ class MainWindow(QMainWindow):
             workspace.shotsync_client,
             workspace._set_code_replacements,
             workspace._show_shotsync_login,
+            lambda: self._check_for_updates(interactive=True),
             self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -8312,6 +9768,7 @@ class MainWindow(QMainWindow):
                 candidate = self.workspace_stack.widget(workspace_index)
                 if isinstance(candidate, Workspace):
                     candidate._reload_hotkeys()
+                    candidate._refresh_status_panel()
         if workspace.shotsync_client.has_key():
             workspace._sync_code_replacements()
 
@@ -8436,6 +9893,11 @@ class MainWindow(QMainWindow):
         has_full_view = workspace.stack.currentWidget() is workspace.full_view
         if has_full_view:
             workspace.full_view.begin_fast_resize()
+        if not self.isVisible():
+            # ``main`` will show this native window fullscreen as its first
+            # presentation.  Scheduling a transition here would expose the
+            # normal window for one event-loop turn.
+            return
         # Let the hidden title bar lay out and present the first frame before
         # Windows performs the (unavoidable) native fullscreen transition.
         QTimer.singleShot(0, lambda view=workspace, full=has_full_view: self._commit_full_view(view, full))
@@ -8553,6 +10015,13 @@ def apply_theme(app: QApplication) -> None:
         QToolButton#titleAction:hover {
             background: #2b2b2b;
         }
+        QToolButton#settingsTitleAction {
+            color: #c9c9c9;
+            background: transparent;
+            border: 0;
+            border-radius: 6px;
+        }
+        QToolButton#settingsTitleAction:hover { background: #2b2b2b; }
         QToolButton#windowControl {
             border: 0;
             border-radius: 0;
@@ -8566,6 +10035,54 @@ def apply_theme(app: QApplication) -> None:
         QDialog#settingsDialog {
             background: #202020;
             border: 1px solid #4a4a4a;
+        }
+        QDialog#quickTransferDialog {
+            background: #1d2128;
+            border: 1px solid #4a6380;
+            border-radius: 10px;
+        }
+        QLabel#quickTransferTitle {
+            color: #f4f8ff;
+            font-size: 19px;
+            font-weight: 700;
+        }
+        QLabel#quickTransferHint {
+            color: #9eafc5;
+            font-size: 12px;
+            padding-bottom: 4px;
+        }
+        QListWidget#quickTransferDestinations {
+            background: #15191f;
+            border: 1px solid #334354;
+            border-radius: 7px;
+            color: #dce7f5;
+            outline: 0;
+            padding: 5px;
+            font-size: 13px;
+        }
+        QListWidget#quickTransferDestinations::item {
+            border-radius: 5px;
+            min-height: 28px;
+            padding: 4px 9px;
+        }
+        QListWidget#quickTransferDestinations::item:hover {
+            background: #263545;
+        }
+        QListWidget#quickTransferDestinations::item:selected {
+            background: #315e91;
+            color: #ffffff;
+        }
+        QDialog#quickTransferDialog QProgressBar {
+            background: #15191f;
+            border: 1px solid #334354;
+            border-radius: 5px;
+            color: #e6f0ff;
+            text-align: center;
+            min-height: 18px;
+        }
+        QDialog#quickTransferDialog QProgressBar::chunk {
+            background: #4b91d1;
+            border-radius: 4px;
         }
         QLabel#settingsDialogTitle {
             color: #f1f1f1;
@@ -8613,7 +10130,8 @@ def apply_theme(app: QApplication) -> None:
             background: transparent;
         }
         QRadioButton#editorChoice::indicator:checked {
-            border: 4px solid #79aaff;
+            background: #79aaff;
+            border: 4px solid #252525;
         }
         QWidget#behaviorTabPage QLineEdit#editorExecutable {
             background: transparent;
@@ -8630,13 +10148,16 @@ def apply_theme(app: QApplication) -> None:
             color: #666666;
             border-bottom-color: #3b3b3b;
         }
-        QWidget#behaviorTabPage QPushButton#editorBrowseButton {
+        QWidget#behaviorTabPage QToolButton#editorBrowseButton {
             background: transparent;
             border: 1px solid #4b4b4b;
             color: #dddddd;
+            border-radius: 4px;
+            min-width: 30px;
+            min-height: 28px;
         }
-        QWidget#behaviorTabPage QPushButton#editorBrowseButton:hover {
-            background: transparent;
+        QWidget#behaviorTabPage QToolButton#editorBrowseButton:hover {
+            background: #333333;
             border-color: #79aaff;
         }
         QTabWidget#settingsTabs QTabBar::tab {
@@ -8773,6 +10294,74 @@ def apply_theme(app: QApplication) -> None:
             background: #202020;
             border-color: #121212;
         }
+        QWidget#favoritesPanel {
+            background: #202020;
+            border-top: 1px solid #161616;
+        }
+        QLabel#favoritesTitle {
+            background: transparent;
+            color: #a9a9a9;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        QToolButton#favoritesAdd, QToolButton#favoritesTrash {
+            min-width: 22px;
+            max-width: 22px;
+            min-height: 20px;
+            max-height: 20px;
+            padding: 0;
+            border: 1px solid transparent;
+            border-radius: 3px;
+            background: transparent;
+        }
+        QToolButton#favoritesAdd:hover {
+            background: #363636;
+            border-color: #4b4b4b;
+        }
+        QToolButton#favoritesTrash:hover, QToolButton#favoritesTrash[dropActive="true"] {
+            background: #633536;
+            border-color: #a65c5d;
+        }
+        QListWidget#favoritesList {
+            background: transparent;
+            border: 0;
+            outline: 0;
+            padding: 0 2px;
+        }
+        QListWidget#favoritesList::item {
+            min-height: 22px;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
+        QListWidget#favoritesList::item:hover { background: #333333; }
+        QListWidget#favoritesList::item:selected { background: #3f6db5; }
+        QSplitter#favoritesSplitter::handle:vertical {
+            height: 9px;
+            background: #353535;
+            border-top: 1px solid #4b4b4b;
+            border-bottom: 1px solid #202020;
+        }
+        QSplitter#favoritesSplitter::handle:vertical:hover { background: #4b4b4b; }
+        QSplitter#panelSplitter::handle:horizontal {
+            width: 9px;
+            background: #353535;
+            border-left: 1px solid #4b4b4b;
+            border-right: 1px solid #202020;
+        }
+        QSplitter#panelSplitter::handle:horizontal:hover { background: #4b4b4b; }
+        QFrame#gridZoomControls {
+            background: rgba(34, 37, 42, 0.78);
+            border: 1px solid #4a4f56;
+            border-radius: 7px;
+        }
+        QToolButton#gridZoomButton {
+            background: rgba(67, 73, 81, 0.62);
+            border: 1px solid #626872;
+            border-radius: 5px;
+            padding: 0;
+        }
+        QToolButton#gridZoomButton:hover { background: rgba(91, 99, 109, 0.78); border-color: #89919c; }
+        QToolButton#gridZoomButton:pressed { background: rgba(45, 50, 57, 0.8); }
         QWidget#shotsyncPanel {
             background: transparent;
         }
@@ -9022,6 +10611,10 @@ def apply_theme(app: QApplication) -> None:
             background: #3f6db5;
             color: #ffffff;
         }
+        QTreeView[treeFocused="false"]::item:selected {
+            background: #30445d;
+            color: #d2d8e0;
+        }
         QListWidget::item:hover, QTreeView::item:hover {
             background: #333333;
         }
@@ -9126,12 +10719,6 @@ def apply_theme(app: QApplication) -> None:
             border: 0;
             padding: 0;
         }
-        QLabel#viewerSearchIcon {
-            min-width: 14px;
-            max-width: 14px;
-            min-height: 14px;
-            max-height: 14px;
-        }
         QWidget#viewerFiltersPanel QComboBox,
         QWidget#viewerFiltersPanel QLineEdit {
             min-height: 24px;
@@ -9203,6 +10790,14 @@ def apply_theme(app: QApplication) -> None:
             background: #303030;
             padding-left: 9px;
             padding-right: 9px;
+            padding-top: 0;
+            padding-bottom: 0;
+        }
+        QLineEdit#viewerSearchEdit QToolButton {
+            min-height: 18px;
+            max-height: 18px;
+            margin-top: 3px;
+            margin-bottom: -3px;
         }
         QWidget#viewerToolbar QComboBox:hover, QWidget#viewerToolbar QPushButton:hover,
         QWidget#viewerToolbar QToolButton:hover {
@@ -9571,6 +11166,14 @@ def apply_theme(app: QApplication) -> None:
             border: 0;
         }
         QFrame#fullView, QWidget#fullImageView { background: #1f1f1f; }
+        QLabel#fullViewCounter {
+            background: rgba(20, 22, 26, 0.78);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 4px;
+            color: #f0f2f5;
+            padding: 3px 7px;
+            font-size: 12px;
+        }
         QLabel#overlayLabel {
             background: #252525;
             border: 0;
@@ -10116,6 +11719,12 @@ def main() -> None:
     if qt_ru.load("qtbase_ru", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
         app.installTranslator(qt_ru)
     apply_theme(app)
-    window = MainWindow()
-    window.showMaximized()
+    window = MainWindow(target_from_argv())
+    if getattr(window, "_fast_full_view", False):
+        window.showFullScreen()
+        workspace = window.workspace_stack.currentWidget()
+        if isinstance(workspace, Workspace):
+            QTimer.singleShot(0, workspace.full_view.finish_fast_resize)
+    else:
+        window.showMaximized()
     sys.exit(app.exec())

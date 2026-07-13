@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS photo_selection (
     comment TEXT NOT NULL DEFAULT '',
     updated_ns INTEGER NOT NULL
 );
+-- Lets background maintenance map a hashed cache filename back to its folder.
+CREATE TABLE IF NOT EXISTS cache_info (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    folder_path TEXT NOT NULL
+);
 -- ShotSync "selection" session state (feature 2). A single row marks this
 -- folder as a synced copy of a server shooting.
 CREATE TABLE IF NOT EXISTS shotsync_session (
@@ -185,6 +190,46 @@ class FolderCache:
         with self._lock:
             if self._db is not None:
                 self._db.commit()
+
+    def prune_deleted_entries(self, *, vacuum: bool = False) -> None:
+        """Remove rows for files no longer present in the folder.
+
+        This is deliberately usable by a short-lived background cache object:
+        deleting source files should release their thumbnails and AI data even
+        when the folder is not opened again during this application session.
+        """
+        with self._lock:
+            db = self._db_or_raise()
+            self._remove_deleted_entries(db)
+            db.commit()
+            if vacuum:
+                db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                db.execute("VACUUM")
+
+    def has_deleted_entries(self) -> bool:
+        """Whether any cached record belongs to a file no longer on disk."""
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute("CREATE TEMP TABLE live_names (name TEXT PRIMARY KEY)")
+            try:
+                db.executemany("INSERT INTO live_names VALUES (?)", ((name,) for name in self.live_names))
+                row = db.execute(
+                    """
+                    SELECT 1 FROM (
+                        SELECT name FROM previews
+                        UNION SELECT name FROM image_embeddings
+                        UNION SELECT name FROM face_analysis
+                        UNION SELECT name FROM photo_metadata
+                        UNION SELECT name FROM photo_selection
+                        UNION SELECT name FROM shotsync_photos
+                    ) AS cached
+                    WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = cached.name)
+                    LIMIT 1
+                    """
+                ).fetchone()
+                return row is not None
+            finally:
+                db.execute("DROP TABLE live_names")
 
     def missing_ai_paths(self, paths: list[Path], table: str) -> list[Path]:
         if table not in {"image_embeddings", "face_analysis"}:
@@ -484,6 +529,10 @@ class FolderCache:
         try:
             _configure_database(db)
             db.executescript(SCHEMA)
+            db.execute(
+                "INSERT OR REPLACE INTO cache_info (id, folder_path) VALUES (1, ?)",
+                (_folder_identity(self.folder),),
+            )
             # Transcription was removed; discard its obsolete derived table
             # from caches created by older Контролька versions.
             db.execute("DROP TABLE IF EXISTS audio_transcripts")
@@ -503,6 +552,8 @@ class FolderCache:
             db.execute("DELETE FROM face_analysis WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = face_analysis.name)")
             db.execute("DELETE FROM photo_metadata WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_metadata.name)")
             db.execute("DELETE FROM photo_selection WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_selection.name)")
+            db.execute("DELETE FROM shotsync_photos WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = shotsync_photos.name)")
+            db.execute("DELETE FROM shotsync_pending WHERE photo_id NOT IN (SELECT photo_id FROM shotsync_photos)")
         finally:
             db.execute("DROP TABLE live_names")
 
@@ -531,12 +582,162 @@ def cache_root() -> Path:
 
 
 def cache_path(folder: Path, root: Path | None = None) -> Path:
-    try:
-        identity = str(folder.resolve(strict=False))
-    except OSError:
-        identity = str(folder.absolute())
-    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(_folder_identity(folder).encode("utf-8")).hexdigest()
     return (root or cache_root()) / f"{digest}.sqlite"
+
+
+def _folder_identity(folder: Path) -> str:
+    try:
+        return str(folder.resolve(strict=False))
+    except OSError:
+        return str(folder.absolute())
+
+
+def remove_folder_cache(folder: Path, *, cache_root: Path | None = None) -> None:
+    """Delete a folder's disposable cache database and its SQLite sidecars."""
+    path = cache_path(folder, cache_root)
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
+def relocate_folder_caches(old_folder: Path, new_folder: Path, *, cache_dir: Path | None = None) -> int:
+    """Move cache databases for a renamed folder and all cached descendants.
+
+    Cache filenames are hashes of absolute folder paths. Moving the database
+    to its new hash and updating ``cache_info`` preserves previews and AI data
+    instead of treating the renamed folder as completely new.
+    """
+    root = cache_dir or cache_root()
+    if not root.is_dir():
+        return 0
+    old_identity = Path(_folder_identity(old_folder))
+    new_identity = Path(_folder_identity(new_folder))
+    relocations: list[tuple[Path, Path, Path]] = []
+    for source in root.glob("*.sqlite"):
+        try:
+            db = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True, timeout=1)
+            try:
+                row = db.execute("SELECT folder_path FROM cache_info WHERE id = 1").fetchone()
+            finally:
+                db.close()
+        except sqlite3.DatabaseError:
+            continue
+        if not row or not row[0]:
+            continue
+        folder = Path(str(row[0]))
+        try:
+            relative = folder.relative_to(old_identity)
+        except ValueError:
+            continue
+        destination_folder = new_identity / relative
+        relocations.append((source, folder, destination_folder))
+
+    moved = 0
+    for source, _folder, destination_folder in relocations:
+        destination = cache_path(destination_folder, root)
+        if source == destination:
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # A cache at this identity can only be stale derived data. Prefer the
+        # cache just renamed from the real source folder.
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{destination}{suffix}").unlink(missing_ok=True)
+        for suffix in ("", "-wal", "-shm"):
+            source_sidecar = Path(f"{source}{suffix}")
+            if source_sidecar.exists():
+                source_sidecar.replace(Path(f"{destination}{suffix}"))
+        db = sqlite3.connect(destination, timeout=30)
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO cache_info (id, folder_path) VALUES (1, ?)",
+                (_folder_identity(destination_folder),),
+            )
+            db.commit()
+        finally:
+            db.close()
+        moved += 1
+    return moved
+
+
+def prune_folder_cache(folder: Path, *, cache_root: Path | None = None) -> None:
+    """Refresh and compact a cache after source files were removed."""
+    names = {
+        path.name
+        for path in folder.iterdir()
+        if path.is_file()
+    }
+    cache = FolderCache(folder, live_names=names, load_from_disk=True, cache_root=cache_root)
+    try:
+        cache.prune_deleted_entries(vacuum=True)
+    finally:
+        cache.close(flush=False)
+
+
+def maintain_folder_caches(root: Path | None = None) -> dict[str, int]:
+    """Remove orphaned caches and compact caches with deleted source files.
+
+    Caches predating ``cache_info`` are intentionally left alone: their hashed
+    filenames do not contain enough information to identify a source folder.
+    They gain that information naturally the next time the folder is opened.
+    """
+    root = root or cache_root()
+    result = {"removed": 0, "optimized": 0, "skipped": 0}
+    if not root.is_dir():
+        return result
+    for database_path in root.glob("*.sqlite"):
+        try:
+            db = sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True, timeout=1)
+            try:
+                has_info = db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cache_info'"
+                ).fetchone()
+                row = db.execute("SELECT folder_path FROM cache_info WHERE id = 1").fetchone() if has_info else None
+                cached_names = {
+                    name
+                    for (name,) in db.execute(
+                        """
+                        SELECT name FROM previews
+                        UNION SELECT name FROM image_embeddings
+                        UNION SELECT name FROM face_analysis
+                        UNION SELECT name FROM photo_metadata
+                        UNION SELECT name FROM photo_selection
+                        UNION SELECT name FROM shotsync_photos
+                        """
+                    )
+                } if row else set()
+            finally:
+                db.close()
+        except sqlite3.DatabaseError:
+            # It may simply be the cache currently used by an open workspace.
+            # Normal cache loading already rebuilds genuinely corrupt databases.
+            result["skipped"] += 1
+            continue
+        except OSError:
+            result["skipped"] += 1
+            continue
+        if not row or not row[0]:
+            result["skipped"] += 1
+            continue
+        folder = Path(str(row[0]))
+        if not folder.is_dir():
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{database_path}{suffix}").unlink(missing_ok=True)
+            result["removed"] += 1
+            continue
+        try:
+            names = {path.name for path in folder.iterdir() if path.is_file()}
+            if cached_names - names:
+                cache = FolderCache(folder, names, load_from_disk=True, cache_root=root)
+                try:
+                    cache.prune_deleted_entries(vacuum=True)
+                    result["optimized"] += 1
+                finally:
+                    cache.close(flush=False)
+        except (OSError, sqlite3.DatabaseError):
+            # A currently busy cache or a transient filesystem error can wait
+            # for the next launch; maintenance must never affect startup.
+            result["skipped"] += 1
+    return result
 
 
 def _configure_database(db: sqlite3.Connection) -> None:

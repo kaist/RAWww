@@ -10,10 +10,19 @@ from PySide6.QtGui import QImage, QImageReader
 
 from .worker_priority import lower_background_priority
 
-try:
-    import rawpy
-except ImportError:  # pragma: no cover
-    rawpy = None
+rawpy = None
+
+
+def _rawpy():
+    """Import the native RAW decoder only when a RAW file is actually read."""
+    global rawpy
+    if rawpy is None:
+        try:
+            import rawpy as module
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("rawpy is not installed") from exc
+        rawpy = module
+    return rawpy
 
 
 JPEG_EXTENSIONS = {".jpg", ".jpeg", ".jpe"}
@@ -120,22 +129,21 @@ def pixel_to_decoded(pixel: PixelImage) -> DecodedImage:
 
 
 def _decode_raw_preview(path: Path, max_size: int | None) -> PixelImage:
-    if rawpy is None:
-        raise RuntimeError("rawpy is not installed")
+    decoder = _rawpy()
 
-    with rawpy.imread(str(path)) as raw:
+    with decoder.imread(str(path)) as raw:
         try:
             thumb = raw.extract_thumb()
-        except rawpy.LibRawNoThumbnailError:
+        except decoder.LibRawNoThumbnailError:
             rgb = raw.postprocess(use_camera_wb=True, no_auto_bright=True, output_bps=8)
             image = Image.fromarray(rgb)
             return _pillow_to_pixels(path, image, max_size, sharpen=max_size is not None)
 
-    if thumb.format == rawpy.ThumbFormat.JPEG:
+    if thumb.format == decoder.ThumbFormat.JPEG:
         if max_size is None:
             return _decode_pillow(path, None, data=thumb.data, use_draft=False, sharpen=False)
         return _decode_qt_jpeg_bytes(path, thumb.data, max_size)
-    if thumb.format == rawpy.ThumbFormat.BITMAP:
+    if thumb.format == decoder.ThumbFormat.BITMAP:
         return _pillow_to_pixels(path, Image.fromarray(thumb.data), max_size, sharpen=max_size is not None)
     raise RuntimeError(f"Unsupported RAW thumbnail format: {thumb.format}")
 

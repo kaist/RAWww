@@ -133,13 +133,22 @@ def _compress_binaries(directory: Path) -> None:
           f"{before / 1024 / 1024:.1f} -> {after / 1024 / 1024:.1f} MiB")
 
 
+def _clean_previous_build() -> None:
+    """Remove the previous target and work directory before collecting files."""
+    for directory in (DIST, ROOT / "build" / "pyinstaller"):
+        if directory.exists():
+            shutil.rmtree(directory)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--upx", action="store_true", help="compress DLL/EXE/PYD files with UPX --brute")
+    parser.add_argument("--console", action="store_true", help="keep a console for diagnosing startup errors")
     args = parser.parse_args()
+    _clean_previous_build()
     command = [
         sys.executable, "-m", "PyInstaller",
-        "--noconfirm", "--clean", "--onedir", "--windowed", "--name", "ctrlka",
+        "--noconfirm", "--clean", "--onedir", "--name", "ctrlka",
         "--icon", str(ROOT / "src" / "rawww" / "assets" / "ctrlka-icon.ico"),
         "--contents-directory", "bin",
         "--paths", str(ROOT / "src"),
@@ -152,6 +161,7 @@ def main() -> None:
         "--collect-binaries", "onnxruntime",
         "--hidden-import", "rawpy",
     ]
+    command.append("--console" if args.console else "--windowed")
     for module in EXCLUDED_QT_MODULES:
         command.extend(("--exclude-module", module))
     if args.upx:
