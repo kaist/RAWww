@@ -10,7 +10,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QSettings
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
 
 from rawww.app import FullView, MainWindow, Workspace, _application_settings
@@ -146,6 +146,21 @@ class AppStateTests(unittest.TestCase):
             self.assertEqual(
                 combo.view().verticalScrollBar().maximum(),
                 0,
+                combo.currentText(),
+            )
+            self.assertEqual(
+                combo.view().font().pixelSize(),
+                combo.font().pixelSize(),
+                combo.currentText(),
+            )
+            self.assertEqual(
+                combo.view().palette().color(QPalette.ColorRole.Text),
+                combo.palette().color(QPalette.ColorRole.Text),
+                combo.currentText(),
+            )
+            self.assertEqual(
+                combo.view().palette().color(QPalette.ColorRole.Highlight).name(),
+                "#606060",
                 combo.currentText(),
             )
             combo.hidePopup()
