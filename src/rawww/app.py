@@ -270,6 +270,14 @@ def _write_xmp_task(path: Path, detail: dict, face_sets: list[dict], replacement
     write_sidecar(path, build_xmp(detail, face_sets, replacements))
 
 
+def _load_cache_and_check_ai(cache: FolderCache, paths: list[Path]) -> set[Path]:
+    """Open a folder cache and calculate AI availability off the UI thread."""
+    cache.load_from_disk()
+    embedding_missing = cache.missing_ai_paths(paths, "image_embeddings")
+    face_missing = cache.missing_ai_paths(paths, "face_analysis")
+    return set(embedding_missing) | set(face_missing)
+
+
 class VideoThumbnailer(QObject):
     """Decode one representative video frame at a time through Qt Multimedia."""
 
@@ -1588,7 +1596,7 @@ class FullView(QFrame):
         self.image_view.zoomPressed.connect(self._request_mouse_zoom)
         self.image_view.zoomReleased.connect(self._release_mouse_zoom)
         self.image_view.wheelScrolled.connect(self._navigate_wheel)
-        self.video_widget = QVideoWidget()
+        self.video_widget = QVideoWidget(self)
         self.video_widget.setObjectName("fullVideoView")
         self.media_stack = QStackedWidget()
         self.media_stack.addWidget(self.image_view)
@@ -3074,6 +3082,7 @@ class Workspace(QMainWindow):
     gridRequested = Signal()
     openFolderRequested = Signal(object)   # Path: open (or focus) a folder tab
     shotsyncFolderChanged = Signal(bool)   # current folder is linked to ShotSync
+    seriesModeChanged = Signal(bool)
     _cache_maintenance_started = False
 
     def __init__(
@@ -3139,6 +3148,8 @@ class Workspace(QMainWindow):
         )
         self.items_by_path: dict[Path, QListWidgetItem] = {}
         self.all_paths: list[Path] = []
+        self.preview_paths: set[Path] = set()
+        self.preview_finished_paths: set[Path] = set()
         # ``view_paths`` is the complete filtered order. ``paths`` is only
         # the grid representation and may collapse adjacent AI series.
         self.view_paths: list[Path] = []
@@ -3242,6 +3253,9 @@ class Workspace(QMainWindow):
         self.ai_progress_total = 0
         self.preview_progress_total = 0
         self._auto_ai_generation = -1
+        self._ai_requested_generation = -1
+        self._cache_ai_waiting = False
+        self._cache_ai_paths: set[Path] = set()
         # ShotSync upload progress, shown in the shared top status bar.
         self._upload_progress: tuple[int, int] | None = None
         self._receive_progress: tuple[int, int, int] | None = None
@@ -5857,9 +5871,15 @@ class Workspace(QMainWindow):
         self.decode_cache.clear()
         self.populate_timer.stop()
         self.thumb_timer.stop()
-        self.ai_progress_timer.stop()
+        if self._ai_pipeline is None or self._ai_pipeline.pending_count() == 0:
+            self.ai_progress_timer.stop()
         self.ai_progress_total = 0
         self.preview_progress_total = 0
+        self.preview_paths.clear()
+        self.preview_finished_paths.clear()
+        self._ai_requested_generation = -1
+        self._cache_ai_waiting = False
+        self._cache_ai_paths.clear()
         if hasattr(self, "ai_button"):
             # The toolbar button opens an explanatory menu, so it must remain
             # available while the folder cache is loading as well.
@@ -5914,10 +5934,6 @@ class Workspace(QMainWindow):
         normalized = str(directory.expanduser().resolve()).casefold()
         return f"folder_settings/{sha1(normalized.encode()).hexdigest()}"
 
-    @classmethod
-    def _series_mode_setting_key(cls, directory: Path) -> str:
-        return f"{cls._folder_settings_prefix(directory)}/series_enabled"
-
     def _load_folder_grid_context(self, directory: Path) -> tuple[list[str], int] | None:
         prefix = self._folder_settings_prefix(directory)
         if not self.settings.contains(f"{prefix}/grid_scroll"):
@@ -5960,14 +5976,26 @@ class Workspace(QMainWindow):
         self.grid.scrollToTop()
 
     def _restore_series_mode(self, directory: Path) -> None:
-        enabled = self.settings.value(self._series_mode_setting_key(directory), True, bool)
+        setting_key = "view/series_enabled"
+        if self.settings.contains(setting_key):
+            enabled = self.settings.value(setting_key, True, bool)
+        else:
+            legacy_key = f"{self._folder_settings_prefix(directory)}/series_enabled"
+            enabled = self.settings.value(legacy_key, True, bool)
+            self.settings.setValue(setting_key, enabled)
+        self.set_series_mode(enabled, apply_view=False)
+
+    def set_series_mode(self, enabled: bool, *, apply_view: bool = True) -> None:
         self.series_toggle.blockSignals(True)
         self.series_toggle.setChecked(enabled)
         self.series_toggle.blockSignals(False)
+        if apply_view:
+            self._apply_view()
 
     def _series_toggle_changed(self, enabled: bool) -> None:
-        self.settings.setValue(self._series_mode_setting_key(self.current_dir), enabled)
+        self.settings.setValue("view/series_enabled", enabled)
         self._apply_view()
+        self.seriesModeChanged.emit(enabled)
         self._show_viewer_toast(
             "Группировка по сериям включена" if enabled else "Группировка по сериям выключена"
         )
@@ -6017,6 +6045,8 @@ class Workspace(QMainWindow):
             self.paths = sorted_subfolders + sorted_images
             self.view_paths = list(self.paths)
             self.preview_progress_total = len(images)
+            self.preview_paths = set(images)
+            self.preview_finished_paths.clear()
             self.view_generation += 1
         except Exception as exc:
             self.bridge.failed.emit(str(directory), str(exc))
@@ -6024,6 +6054,8 @@ class Workspace(QMainWindow):
             self.view_paths = []
             self.paths = []
             self.preview_progress_total = 0
+            self.preview_paths.clear()
+            self.preview_finished_paths.clear()
         scannable_paths = [path for path in self.paths if path.is_file()]
         if scannable_paths:
             self.folder_cache = FolderCache(
@@ -6035,7 +6067,12 @@ class Workspace(QMainWindow):
             self.cache_ready = False
             generation = self.cache_load_generation
             cache = self.folder_cache
-            future = self.cache_load_executor.submit(cache.load_from_disk)
+            analysis_paths = [path for path in scannable_paths if is_supported_image(path)]
+            future = self.cache_load_executor.submit(
+                _load_cache_and_check_ai,
+                cache,
+                analysis_paths,
+            )
             future.add_done_callback(lambda done, g=generation: self._cache_loaded(g, done))
         else:
             self.folder_cache = None
@@ -6070,6 +6107,7 @@ class Workspace(QMainWindow):
             self.populate_timer.stop()
             if self.cache_ready:
                 QTimer.singleShot(0, self._restore_folder_grid_context)
+            self._refresh_status_panel()
 
     def _grid_item_for_path(self, path: Path) -> QListWidgetItem:
         """Create one card while preserving any thumbnail already in RAM."""
@@ -6128,17 +6166,35 @@ class Workspace(QMainWindow):
     def _start_ai_analysis(self) -> None:
         if self.closing or not self.cache_ready or self.folder_cache is None:
             return
-        analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
-        embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
-        face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
-        self.ai_progress_total = len(set(embedding_missing) | set(face_missing))
-        if not self.ai_progress_total:
+        if not self._previews_ready_for_ai():
+            self._ai_requested_generation = self.view_generation
+            self.ai_analysis_available = False
             self._refresh_status_panel()
             return
+        self._launch_ai_analysis()
+
+    def _launch_ai_analysis(self) -> bool:
+        analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
+        self._ai_requested_generation = -1
+        if not analysis_paths or not self.ai_pipeline.scan(analysis_paths):
+            return False
+        self.ai_progress_total = 0
         self.ai_analysis_available = False
-        self.ai_pipeline.scan(analysis_paths, self.folder_cache, self._background_decode_executor())
         self.ai_progress_timer.start()
         self._refresh_status_panel()
+        return True
+
+    def _previews_ready_for_ai(self) -> bool:
+        analysis_paths = self._cache_ai_paths.intersection(self.view_paths)
+        return bool(
+            self.workspace_active
+            and self.cache_ready
+            and self.folder_cache is not None
+            and analysis_paths
+            and self.populate_index >= len(self.paths)
+            and self.preview_paths
+            and self.preview_paths.issubset(self.preview_finished_paths)
+        )
 
     def _maybe_auto_start_ai_after_previews(self) -> bool:
         """Auto-run AI once a view's previews are ready, when the option is on.
@@ -6151,28 +6207,14 @@ class Workspace(QMainWindow):
             return False
         if not self.settings.value("ai/auto_after_previews", False, bool):
             return False
-        if (
-            not self.workspace_active
-            or not self.cache_ready
-            or self.folder_cache is None
-            or self.preview_progress_total <= 0
-            or self.thumb_timer.isActive()
-            or any(size == THUMB_SIZE for _, size in self.pending)
-        ):
+        if not self._previews_ready_for_ai():
             return False
-        if self._ai_pipeline is not None and self._ai_pipeline.pending_count() != 0:
+        if self._ai_pipeline is not None and self._ai_pipeline.pending_count(self.current_dir) != 0:
             return False
-        # Previews for this view are complete; only attempt the auto-run once.
-        self._auto_ai_generation = self.view_generation
-        analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
-        if not analysis_paths:
-            return False
-        embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
-        face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
-        if not (set(embedding_missing) | set(face_missing)):
-            return False
-        self._start_ai_analysis()
-        return self.ai_pipeline.pending_count() > 0
+        started = self._launch_ai_analysis()
+        if started:
+            self._auto_ai_generation = self.view_generation
+        return started
 
     def _show_ai_menu(self) -> None:
         """Show the entry point for the AI analysis already available in the workspace."""
@@ -6202,7 +6244,7 @@ class Workspace(QMainWindow):
             start.setIconSize(QSize(16, 16))
             start.clicked.connect(lambda: (menu.close(), self._start_ai_analysis()))
             layout.addWidget(start)
-        elif self.ai_pipeline.pending_count() == 0:
+        elif self.ai_pipeline.pending_count(self.current_dir) == 0:
             complete = QLabel("В текущей папке все фото уже обработаны.")
             complete.setObjectName("toolbarPopupHint")
             complete.setWordWrap(True)
@@ -6587,20 +6629,28 @@ class Workspace(QMainWindow):
             raise
 
     def _update_ai_progress(self) -> None:
-        if self.folder_cache is None or not self.cache_ready:
+        if self._ai_pipeline is None:
             self.ai_progress_timer.stop()
             return
-        analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
-        embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
-        face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
-        remaining = len(set(embedding_missing) | set(face_missing))
+        completed_folders = self.ai_pipeline.take_completed_folders()
+        if (
+            self.current_dir in completed_folders
+            and self.folder_cache is not None
+            and self.cache_ready
+        ):
+            completed, total, _running = self.ai_pipeline.progress(self.current_dir)
+            self._reload_photo_details()
+            if self._xmp_auto_enabled():
+                self._queue_xmp_paths(
+                    path for path in self.view_paths if is_supported_image(path)
+                )
+            self.ai_analysis_available = completed < total
+            if completed >= total:
+                self._cache_ai_paths.clear()
+                self._cache_ai_waiting = False
         if self.ai_pipeline.pending_count() == 0:
             self.ai_progress_timer.stop()
             self.ai_pipeline.release_analysis_workers()
-            self._reload_photo_details()
-            if self._xmp_auto_enabled():
-                self._queue_xmp_paths(analysis_paths)
-            self.ai_analysis_available = remaining > 0
         self._refresh_status_panel()
 
     def _folder_changed(self, path: str) -> None:
@@ -6621,11 +6671,11 @@ class Workspace(QMainWindow):
         if self.folder_cache is None or not self.cache_ready:
             self._reset_ai_status()
             return
-        analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
-        embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
-        face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
-        waiting = len(set(embedding_missing) | set(face_missing))
-        self.ai_analysis_available = waiting > 0 and self.ai_pipeline.pending_count() == 0
+        running = (
+            self._ai_pipeline is not None
+            and self._ai_pipeline.pending_count(self.current_dir) > 0
+        )
+        self.ai_analysis_available = self._cache_ai_waiting and not running
         self._refresh_status_panel()
 
     def _reset_ai_status(self) -> None:
@@ -6721,29 +6771,29 @@ class Workspace(QMainWindow):
             self._set_taskbar_progress(0, 0)
             return
 
-        if self.ai_pipeline.pending_count() > 0:
-            analysis_paths = [path for path in self.view_paths if is_supported_image(path)]
-            remaining = 0
-            if self.folder_cache is not None and self.cache_ready:
-                embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
-                face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
-                remaining = len(set(embedding_missing) | set(face_missing))
-            completed = max(0, self.ai_progress_total - remaining)
-            self.status_progress.setRange(0, max(1, self.ai_progress_total))
-            self.status_progress.setValue(completed)
-            self.status_progress.setFormat(f"Анализ: {completed}/{self.ai_progress_total}")
+        ai_completed, ai_total, ai_running = (
+            self._ai_pipeline.progress(self.current_dir)
+            if self._ai_pipeline is not None
+            else (0, 0, False)
+        )
+        if ai_running:
+            if ai_total <= 0:
+                self.status_progress.setRange(0, 0)
+                self.status_progress.setFormat("Подготовка AI…")
+                self.status_progress.setToolTip(self.status_progress.format())
+                self.status_progress.show()
+                self._set_taskbar_progress(0, 0)
+                return
+            self.status_progress.setRange(0, ai_total)
+            self.status_progress.setValue(ai_completed)
+            self.status_progress.setFormat(f"Анализ: {ai_completed}/{ai_total}")
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
-            self._set_taskbar_progress(completed, self.ai_progress_total)
+            self._set_taskbar_progress(ai_completed, ai_total)
             return
 
-        thumbnail_pending = any(size == THUMB_SIZE for _, size in self.pending)
-        if self.preview_progress_total and (self.thumb_timer.isActive() or thumbnail_pending):
-            loaded = sum(
-                1 for path in self.paths
-                if is_supported_media(path) and self.items_by_path.get(path) is not None
-                and isinstance(self.items_by_path[path].data(PREVIEW_ROLE), QImage)
-            )
+        loaded = len(self.preview_finished_paths & self.preview_paths)
+        if self.preview_progress_total and loaded < self.preview_progress_total:
             self.status_progress.setRange(0, self.preview_progress_total)
             self.status_progress.setValue(loaded)
             self.status_progress.setFormat(f"Превью: {loaded}/{self.preview_progress_total}")
@@ -6752,6 +6802,12 @@ class Workspace(QMainWindow):
             self._set_taskbar_progress(loaded, self.preview_progress_total)
             return
 
+        if (
+            self._ai_requested_generation == self.view_generation
+            and self._previews_ready_for_ai()
+            and self._launch_ai_analysis()
+        ):
+            return
         if self._maybe_auto_start_ai_after_previews():
             return
         self.status_progress.hide()
@@ -7004,9 +7060,12 @@ class Workspace(QMainWindow):
         if self.closing or generation != self.cache_load_generation:
             return
         try:
-            future.result()
+            self._cache_ai_paths = set(future.result())
+            self._cache_ai_waiting = bool(self._cache_ai_paths)
         except Exception as exc:
             self.bridge.failed.emit(str(self.current_dir), str(exc))
+            self._cache_ai_paths.clear()
+            self._cache_ai_waiting = False
         self.cache_ready = True
         if self.folder_cache is not None:
             self.photo_details = self.folder_cache.load_photo_details(
@@ -7133,6 +7192,8 @@ class Workspace(QMainWindow):
             reverse = order == "name_desc"
         self.view_paths = _build_photo_view(self.all_paths, predicate=visible, sort_key=key, reverse=reverse)
         self.paths = self._grid_paths_with_series(self.view_paths)
+        self.preview_paths = {path for path in self.paths if path.is_file()}
+        self.preview_progress_total = len(self.preview_paths)
         self.view_generation += 1
         self.populate_timer.stop()
         self.grid.clear()
@@ -7681,6 +7742,7 @@ class Workspace(QMainWindow):
             return
         item = self.items_by_path.get(decoded.path)
         if max_size == THUMB_SIZE:
+            self.preview_finished_paths.add(decoded.path)
             self._thumbnail_cache_put(decoded.path, decoded.image)
             if item is not None:
                 item.setData(PREVIEW_ROLE, decoded.image)
@@ -7700,7 +7762,7 @@ class Workspace(QMainWindow):
         # Full-size frames and their preloaded neighbours do not change
         # thumbnail progress. Updating it here used to scan the whole folder
         # and call the OS taskbar API after every full-view decode.
-        if max_size == THUMB_SIZE and self.stack.currentWidget() is not self.full_view:
+        if max_size == THUMB_SIZE:
             self._refresh_status_panel()
 
     def _on_video_preview(self, path: Path, preview: QImage) -> None:
@@ -7720,18 +7782,19 @@ class Workspace(QMainWindow):
             self.grid.update(self.grid.visualItemRect(item))
         self.full_view.update_preview(path, preview)
         self.full_view.set_video_preview(path, preview)
-        if self.stack.currentWidget() is not self.full_view:
-            self._refresh_status_panel()
+        self.preview_finished_paths.add(path)
+        self._refresh_status_panel()
 
     def _on_decode_failed(self, path: str, message: str) -> None:
-        self.visible_thumb_pending.discard((Path(path), THUMB_SIZE))
-        item = self.items_by_path.get(Path(path))
+        failed_path = Path(path)
+        self.visible_thumb_pending.discard((failed_path, THUMB_SIZE))
+        self.preview_finished_paths.add(failed_path)
+        item = self.items_by_path.get(failed_path)
         if item is not None:
-            item.setText(f"{Path(path).name}\n{message}")
-        if Path(path) == self.current_path:
+            item.setText(f"{failed_path.name}\n{message}")
+        if failed_path == self.current_path:
             self.thumb_timer.start()
-        if self.stack.currentWidget() is not self.full_view:
-            self._refresh_status_panel()
+        self._refresh_status_panel()
 
     def _open_selected(self) -> None:
         item = self.grid.currentItem()
@@ -8453,9 +8516,17 @@ class MainWindow(QMainWindow):
         workspace.shotsyncFolderChanged.connect(
             lambda linked, view=workspace: self._set_workspace_shotsync_icon(view, linked)
         )
+        workspace.seriesModeChanged.connect(self._set_global_series_mode)
         self.tabs.setCurrentIndex(index)
         self._select_workspace(self.tabs.currentIndex())
         self._update_tab_geometry()
+
+    def _set_global_series_mode(self, enabled: bool) -> None:
+        self.settings.setValue("view/series_enabled", enabled)
+        for index in range(self.workspace_stack.count()):
+            workspace = self.workspace_stack.widget(index)
+            if isinstance(workspace, Workspace) and workspace.series_toggle.isChecked() != enabled:
+                workspace.set_series_mode(enabled)
 
     def _open_workspace_paths(self) -> list[Path]:
         return [
