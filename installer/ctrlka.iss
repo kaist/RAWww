@@ -34,4 +34,4 @@ Root: HKCU; Subkey: "Software\ctrlka\ctrlka"; Flags: uninsdeletekeyifempty
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\work"
 Type: filesandordirs; Name: "{localappdata}\ctrlka"
-Type: filesandordirs; Name: "{appdata}\ctrlka"
+Type: filesandordirs; Name: "{userappdata}\ctrlka"

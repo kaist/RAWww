@@ -79,6 +79,8 @@ jobs:
           Icon=ctrlka
           Categories=Graphics;Photography;
           DESKTOP
+          cp AppDir/usr/share/applications/ctrlka.desktop AppDir/ctrlka.desktop
+          cp src/rawww/assets/ctrlka-icon.png AppDir/ctrlka.png
           cat > AppDir/AppRun <<'APPRUN'
           #!/bin/sh
           exec "$(dirname "$0")/usr/bin/ctrlka" "$@"
