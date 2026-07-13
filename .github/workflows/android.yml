@@ -76,6 +76,12 @@ jobs:
           yes | "${mgr}" --sdk_root="${SDK}" --licenses > /dev/null 2>&1 || true
           "${mgr}" --sdk_root="${SDK}" \
             "platform-tools" "platforms;android-34" "build-tools;33.0.2" > /dev/null
+          # buildozer's bundled p4a hardcodes the legacy tools/bin/sdkmanager
+          # path. That obsolete binary crashes on JDK 17 (JAXB removed), so point
+          # the legacy path at the modern cmdline-tools sdkmanager instead.
+          mkdir -p "${SDK}/tools/bin"
+          ln -sf "${SDK}/cmdline-tools/latest/bin/sdkmanager" "${SDK}/tools/bin/sdkmanager"
+          ln -sf "${SDK}/cmdline-tools/latest/bin/avdmanager" "${SDK}/tools/bin/avdmanager"
           echo "SDK_PATH=${SDK}" >> "$GITHUB_ENV"
 
       - name: Assemble mobile project
