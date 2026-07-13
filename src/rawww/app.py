@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLineEdit,
+    QKeySequenceEdit,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -42,6 +43,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QButtonGroup,
+    QRadioButton,
     QToolButton,
     QStyledItemDelegate,
     QStyle,
@@ -69,6 +71,7 @@ from PySide6.QtWidgets import (
 
 from .cache import FolderCache
 from .shotsync_client import ShotSyncClient
+from .shotsync_login import ShotSyncLoginDialog
 from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
 from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection_root
@@ -876,16 +879,15 @@ class ColorLabelButton(QToolButton):
         painter.drawRect(self.rect().adjusted(1, 1, -2, -2))
 
 
-class CodeReplacementsDialog(QDialog):
-    """Desktop editor for the same code sets used by the ShotSync web app."""
+class CodeReplacementsEditor(QWidget):
+    """Replacement-code editor embedded in the application settings."""
 
-    def __init__(self, client: ShotSyncClient, settings: QSettings, changed: Callable[[list[dict]], None], parent=None) -> None:
+    def __init__(self, client: ShotSyncClient, settings: QSettings, changed: Callable[[list[dict]], None], login_requested: Callable[[], bool], parent=None) -> None:
         super().__init__(parent)
         self.client, self.settings, self._changed = client, settings, changed
-        self.setWindowTitle("Коды замены")
-        self.resize(620, 460)
-        self.setModal(True)
-        self.setObjectName("codeReplacementsDialog")
+        self._login_requested = login_requested
+        self.client.loginSucceeded.connect(self._authentication_succeeded)
+        self.setObjectName("codeReplacementsEditor")
         self.sets: list[dict] = []
         layout = QVBoxLayout(self)
         toolbar = QHBoxLayout()
@@ -916,9 +918,20 @@ class CodeReplacementsDialog(QDialog):
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        close = QPushButton("Закрыть")
-        close.clicked.connect(self.accept)
-        layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+        self.login_hint = QLabel("Для синхронизации кодов замен, авторизуйтесь на shotsync.")
+        self.login_hint.setObjectName("shotsyncHint")
+        self.login_hint.setWordWrap(True)
+        self.login_button = QPushButton("Войти")
+        self.login_button.setObjectName("settingsPrimaryButton")
+        self.login_button.setFixedSize(66, 28)
+        self.login_button.setToolTip("Войти в ShotSync")
+        self.login_button.clicked.connect(self._login)
+        login_row = QHBoxLayout()
+        login_row.setSpacing(8)
+        login_row.addWidget(self.login_hint)
+        login_row.addWidget(self.login_button)
+        login_row.addStretch(1)
+        layout.addLayout(login_row)
         self._load()
 
     def _active_set(self) -> dict | None:
@@ -926,28 +939,70 @@ class CodeReplacementsDialog(QDialog):
         return self.sets[index] if 0 <= index < len(self.sets) else None
 
     def _load(self, *, select_id: int | None = None, focus_new: bool = False) -> None:
+        if not self.client.has_key():
+            self.sets = self._local_sets()
+            self._ensure_default_local_set()
+            self._apply_loaded_sets(select_id=select_id, focus_new=focus_new)
+            self.status.clear()
+            self.login_hint.show()
+            self.login_button.show()
+            return
         self.status.setText("Синхронизация с ShotSync…")
         def done(ok: bool, data: dict, error: str) -> None:
             if not ok:
                 self.status.setText(error)
                 return
             self.sets = [item for item in data.get("sets", []) if isinstance(item, dict)]
-            wanted = select_id or self.settings.value("code_replacements/active_set_id", 0, int)
-            self.set_combo.blockSignals(True)
-            self.set_combo.clear()
-            chosen = 0
-            for index, item in enumerate(self.sets):
-                self.set_combo.addItem(str(item.get("name") or "Без названия"))
-                if item.get("id") == wanted:
-                    chosen = index
-            self.set_combo.setCurrentIndex(chosen if self.sets else -1)
-            self.set_combo.blockSignals(False)
-            self._set_changed()
+            if not self.sets:
+                self.client.request_json(
+                    "/api/users/code-replacements/",
+                    lambda ok, data, error: self._load(select_id=data.get("set", {}).get("id")) if ok else self.status.setText(error),
+                    method="POST",
+                    payload={"name": "По умолчанию"},
+                )
+                return
+            self._apply_loaded_sets(select_id=select_id, focus_new=focus_new)
             self.status.setText("Синхронизировано")
-            self._changed(self.sets)
-            if focus_new:
-                QTimer.singleShot(0, self._focus_new_code)
+            self.login_hint.hide()
+            self.login_button.hide()
         self.client.request_json("/api/users/code-replacements/", done)
+
+    def _apply_loaded_sets(self, *, select_id: int | None, focus_new: bool) -> None:
+        wanted = select_id if select_id is not None else self.settings.value("code_replacements/active_set_id", 0, int)
+        self.set_combo.blockSignals(True)
+        self.set_combo.clear()
+        chosen = 0
+        for index, item in enumerate(self.sets):
+            self.set_combo.addItem(str(item.get("name") or "Без названия"))
+            if item.get("id") == wanted:
+                chosen = index
+        self.set_combo.setCurrentIndex(chosen if self.sets else -1)
+        self.set_combo.blockSignals(False)
+        self._set_changed()
+        if focus_new:
+            QTimer.singleShot(0, self._focus_new_code)
+
+    def _local_sets(self) -> list[dict]:
+        return [item for item in self.settings.value("code_replacements/local_sets", [], list) if isinstance(item, dict)]
+
+    def _save_local_sets(self) -> None:
+        self.settings.setValue("code_replacements/local_sets", self.sets)
+        self._changed(self.sets)
+
+    def _ensure_default_local_set(self) -> None:
+        """A new offline editor is immediately ready for its first code."""
+        if self.sets:
+            return
+        self.sets = [{"id": -1, "name": "По умолчанию", "codes": []}]
+        self._save_local_sets()
+
+    def _login(self) -> None:
+        self._login_requested()
+
+    def _authentication_succeeded(self, _user: dict, _key: str) -> None:
+        """Refresh this open dialog as soon as the shared login succeeds."""
+        if self.isVisible():
+            self._load()
 
     def _set_changed(self) -> None:
         active = self._active_set()
@@ -1005,6 +1060,13 @@ class CodeReplacementsDialog(QDialog):
     def _create_set(self) -> None:
         name, ok = QInputDialog.getText(self, "Новый набор", "Название:")
         if not ok or not name.strip(): return
+        if not self.client.has_key():
+            local_ids = [int(item.get("id") or 0) for item in self.sets]
+            new_set = {"id": min([0, *local_ids]) - 1, "name": name.strip(), "codes": []}
+            self.sets.append(new_set)
+            self._save_local_sets()
+            self._apply_loaded_sets(select_id=new_set["id"], focus_new=True)
+            return
         self.client.request_json("/api/users/code-replacements/", lambda ok, data, error: self._load(select_id=data.get("set", {}).get("id") if ok else None), method="POST", payload={"name": name.strip()})
 
     def _rename_set(self) -> None:
@@ -1012,6 +1074,11 @@ class CodeReplacementsDialog(QDialog):
         if not active: return
         name, ok = QInputDialog.getText(self, "Переименовать набор", "Название:", text=str(active.get("name") or ""))
         if not ok or not name.strip(): return
+        if not self.client.has_key():
+            active["name"] = name.strip()
+            self._save_local_sets()
+            self._render_table()
+            return
         self.client.request_json(f"/api/users/code-replacements/{active['id']}/", lambda ok, _data, error: self._load(select_id=active["id"]) if ok else self.status.setText(error), method="POST", payload={"name": name.strip()})
 
     def _delete_set(self) -> None:
@@ -1025,11 +1092,25 @@ class CodeReplacementsDialog(QDialog):
         confirm.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
         if confirm.exec() != QMessageBox.StandardButton.Yes:
             return
+        if not self.client.has_key():
+            if len(self.sets) == 1:
+                self.status.setText("Нужен хотя бы один набор кодов.")
+                return
+            self.sets.remove(active)
+            self._save_local_sets()
+            self._apply_loaded_sets(select_id=None, focus_new=False)
+            return
         self.client.request_json(f"/api/users/code-replacements/{active['id']}/delete/", lambda ok, _data, error: self._load() if ok else self.status.setText(error), method="POST")
 
     def _add_code(self, code: str, value: str) -> None:
         active = self._active_set(); code, value = code.strip(), value.strip()
         if not active or not code or not value: return
+        if not self.client.has_key():
+            active.setdefault("codes", []).append({"id": uuid4().hex, "code": code, "value": value})
+            self._save_local_sets()
+            self._render_table()
+            self._focus_new_code()
+            return
         def done(ok: bool, _data: dict, error: str) -> None:
             if ok:
                 self._load(select_id=active["id"], focus_new=True)
@@ -1039,6 +1120,11 @@ class CodeReplacementsDialog(QDialog):
     def _delete_code(self, code_id: object) -> None:
         active = self._active_set()
         if not active or not code_id: return
+        if not self.client.has_key():
+            active["codes"] = [entry for entry in active.get("codes", []) if entry.get("id") != code_id]
+            self._save_local_sets()
+            self._render_table()
+            return
         self.client.request_json(f"/api/users/code-replacements/{active['id']}/codes/{code_id}/delete/", lambda ok, _data, error: self._load(select_id=active["id"]) if ok else self.status.setText(error), method="POST")
 
     def _update_code(self, item: QTableWidgetItem) -> None:
@@ -1050,6 +1136,10 @@ class CodeReplacementsDialog(QDialog):
         code = self.table.item(item.row(), 0).text().strip()
         value = self.table.item(item.row(), 1).text().strip()
         if not code or not value or (code == entry.get("code") and value == entry.get("value")): return
+        if not self.client.has_key():
+            entry["code"], entry["value"] = code, value
+            self._save_local_sets()
+            return
         self.client.request_json(
             f"/api/users/code-replacements/{active['id']}/codes/{entry['id']}/",
             lambda ok, _data, error: self._load(select_id=active["id"]) if ok else self.status.setText(error),
@@ -1502,7 +1592,6 @@ class ViewerMetaBar(QWidget):
     quickMarkConfigured = Signal(str, object)
     autoAdvanceChanged = Signal(bool)
     commentSubmitted = Signal(str)
-    codesRequested = Signal()
 
     def __init__(self, *, settings: QSettings | None = None) -> None:
         super().__init__()
@@ -1581,13 +1670,6 @@ class ViewerMetaBar(QWidget):
             button.move(rating * 25, 0)
             self.rating_buttons[rating] = button
         layout.addWidget(self.rating_group)
-
-        self.codes_button = QToolButton()
-        self.codes_button.setIcon(_fomantic_icon("keyboard", 13))
-        self.codes_button.setToolTip("Коды замены")
-        self.codes_button.setFixedSize(28, 24)
-        self.codes_button.clicked.connect(self.codesRequested)
-        layout.addWidget(self.codes_button)
 
         self.comment_edit = RichCodeCommentEdit()
         self.comment_edit.setObjectName("fullComment")
@@ -2699,16 +2781,46 @@ class SettingsCheckBox(QCheckBox):
         painter.drawLine(indicator.left() + 7, indicator.bottom() - 4, indicator.right() - 3, indicator.top() + 4)
         painter.end()
 
+
+# These shortcuts are deliberately kept in one place: SettingsDialog uses the
+# same ids to edit them that Workspace uses to install them.
+HOTKEY_DEFAULTS: dict[str, tuple[str, str]] = {
+    "full_view": ("Полный просмотр", "F"),
+    "open_in_editor": ("Открыть в редакторе", "E"),
+    "grid": ("Сетка", "G"),
+    "refresh": ("Обновить", "Ctrl+R"),
+    "fullscreen": ("Полный экран", "F11"),
+    "quick_mark": ("Быстрая метка", "M"),
+    "comment": ("Комментарий", "C"),
+    **{f"rating_{rating}": (f"Рейтинг {rating}" if rating else "Сбросить рейтинг", str(rating)) for rating in range(6)},
+    **{f"color_{index}": (label, f"Shift+{index}") for index, label in enumerate(("Сбросить цветовую метку", "Красная метка", "Жёлтая метка", "Зелёная метка", "Синяя метка", "Фиолетовая метка"))},
+}
+
+
+def _hotkey_sequence(settings: QSettings, identifier: str) -> QKeySequence:
+    """Return a saved shortcut; an explicitly blank value disables it."""
+    default = HOTKEY_DEFAULTS[identifier][1]
+    key = f"hotkeys/{identifier}"
+    if not settings.contains(key):
+        return QKeySequence(default)
+    return QKeySequence(settings.value(key, "", str))
+
+
+def _uses_reserved_navigation_key(sequence: QKeySequence) -> bool:
+    """Arrows, Enter and Escape always retain their navigation behaviour."""
+    reserved = {Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape}
+    return any((sequence[index].toCombined() & 0x01FFFFFF) in {int(key) for key in reserved} for index in range(sequence.count()))
+
 class SettingsDialog(QDialog):
     """Application settings presented in the same visual language as the shell."""
 
-    def __init__(self, settings: QSettings, parent=None) -> None:
+    def __init__(self, settings: QSettings, client: ShotSyncClient, changed: Callable[[list[dict]], None], login_requested: Callable[[], bool], parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
         self.setObjectName("settingsDialog")
         self.setWindowTitle("Настройки")
         self.setModal(True)
-        self.resize(560, 410)
+        self.resize(700, 540)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 18)
@@ -2721,6 +2833,9 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         tabs.setObjectName("settingsTabs")
         tabs.addTab(self._behavior_tab(), "Поведение")
+        tabs.addTab(self._hotkeys_tab(), "Горячие клавиши")
+        self.code_replacements_editor = CodeReplacementsEditor(client, settings, changed, login_requested)
+        tabs.addTab(self.code_replacements_editor, "Коды замен")
         tabs.addTab(self._placeholder_tab("Интерфейс", "Параметры внешнего вида появятся здесь."), "Интерфейс")
         tabs.addTab(self._placeholder_tab("О приложении", "Контролька — рабочее пространство для просмотра и отбора материалов."), "О приложении")
         layout.addWidget(tabs, 1)
@@ -2739,7 +2854,7 @@ class SettingsDialog(QDialog):
 
     def _behavior_tab(self) -> QWidget:
         tab = QWidget()
-        tab.setObjectName("settingsTabPage")
+        tab.setObjectName("behaviorTabPage")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(18, 20, 18, 18)
         layout.setSpacing(8)
@@ -2758,9 +2873,130 @@ class SettingsDialog(QDialog):
         self.restore_active_workspace = SettingsCheckBox("Возвращаться к активной вкладке")
         self.restore_active_workspace.setChecked(self.settings.value("restore_active_workspace", True, bool))
         layout.addWidget(self.restore_active_workspace)
+
+        editor_card = QFrame()
+        editor_card.setObjectName("externalEditorCard")
+        editor_layout = QVBoxLayout(editor_card)
+        editor_layout.setContentsMargins(14, 13, 14, 14)
+        editor_layout.setSpacing(7)
+        editor_heading = QLabel("Внешний редактор")
+        editor_heading.setObjectName("externalEditorTitle")
+        editor_layout.addWidget(editor_heading)
+        editor_hint = QLabel("Выберите приложение, в котором открываются файлы по клавише E.")
+        editor_hint.setObjectName("externalEditorHint")
+        editor_hint.setWordWrap(True)
+        editor_layout.addWidget(editor_hint)
+
+        self.photoshop_editor = QRadioButton("Adobe Photoshop")
+        self.photoshop_editor.setObjectName("editorChoice")
+        self.custom_editor = QRadioButton("Другой редактор")
+        self.custom_editor.setObjectName("editorChoice")
+        self.editor_choices = QButtonGroup(self)
+        self.editor_choices.addButton(self.photoshop_editor)
+        self.editor_choices.addButton(self.custom_editor)
+        has_custom_path = bool(self.settings.value("editor/executable", "", str).strip())
+        use_custom = self.settings.value("editor/use_custom_executable", has_custom_path, bool)
+        (self.custom_editor if use_custom else self.photoshop_editor).setChecked(True)
+        self.custom_editor.toggled.connect(self._update_editor_choice_state)
+        choices_row = QHBoxLayout()
+        choices_row.setSpacing(24)
+        choices_row.addWidget(self.photoshop_editor)
+        choices_row.addWidget(self.custom_editor)
+        choices_row.addStretch(1)
+        editor_layout.addLayout(choices_row)
+
+        self.custom_editor_controls = QWidget()
+        self.custom_editor_controls.setObjectName("customEditorControls")
+        editor_row = QHBoxLayout()
+        editor_row.setContentsMargins(24, 0, 0, 0)
+        editor_row.setSpacing(8)
+        self.editor_executable = QLineEdit(self.settings.value("editor/executable", "", str))
+        self.editor_executable.setObjectName("editorExecutable")
+        self.editor_executable.setPlaceholderText("Путь к исполняемому файлу")
+        self.editor_executable.setClearButtonEnabled(True)
+        editor_row.addWidget(self.editor_executable, 1)
+        self.choose_editor = QToolButton()
+        self.choose_editor.setObjectName("editorBrowseButton")
+        self.choose_editor.setIcon(_fomantic_icon("folder", 15, "#c9c9c9"))
+        self.choose_editor.setIconSize(QSize(15, 15))
+        self.choose_editor.setToolTip("Выбрать исполняемый файл")
+        self.choose_editor.clicked.connect(self._choose_editor_executable)
+        editor_row.addWidget(self.choose_editor)
+        self.custom_editor_controls.setLayout(editor_row)
+        editor_layout.addWidget(self.custom_editor_controls)
+        layout.addWidget(editor_card)
         layout.addStretch(1)
         self._update_behavior_state(self.restore_workspaces.isChecked())
+        self._update_editor_choice_state(self.custom_editor.isChecked())
         return tab
+
+    def _update_editor_choice_state(self, use_custom: bool) -> None:
+        self.custom_editor_controls.setVisible(use_custom)
+
+    def _choose_editor_executable(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите редактор",
+            self.editor_executable.text().strip(),
+            "Программы (*.exe);;Все файлы (*)",
+        )
+        if path:
+            self.editor_executable.setText(path)
+
+    def _hotkeys_tab(self) -> QWidget:
+        tab = QWidget()
+        tab.setObjectName("settingsTabPage")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(18, 20, 18, 18)
+        layout.setSpacing(10)
+        heading = QLabel("Горячие клавиши")
+        heading.setObjectName("settingsSectionTitle")
+        layout.addWidget(heading)
+        hint = QLabel("Нажмите новое сочетание в поле. Стрелки, Enter и Esc зарезервированы для навигации.")
+        hint.setObjectName("settingsHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.swap_rating_color = SettingsCheckBox("Цветовые метки — цифры без Shift")
+        self.swap_rating_color.blockSignals(True)
+        self.swap_rating_color.setChecked(self.settings.value("hotkeys/swap_rating_and_color", False, bool))
+        self.swap_rating_color.blockSignals(False)
+        self.swap_rating_color.toggled.connect(self._set_rating_color_scheme)
+        layout.addWidget(self.swap_rating_color)
+
+        table = QTableWidget(len(HOTKEY_DEFAULTS), 2)
+        table.setObjectName("hotkeysTable")
+        table.setHorizontalHeaderLabels(("Действие", "Сочетание"))
+        table.verticalHeader().hide()
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setColumnWidth(0, 260)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.hotkey_edits: dict[str, QKeySequenceEdit] = {}
+        for row, (identifier, (label, _default)) in enumerate(HOTKEY_DEFAULTS.items()):
+            table.setItem(row, 0, QTableWidgetItem(label))
+            editor = QKeySequenceEdit(_hotkey_sequence(self.settings, identifier))
+            editor.setMaximumSequenceLength(1)
+            table.setCellWidget(row, 1, editor)
+            self.hotkey_edits[identifier] = editor
+        layout.addWidget(table, 1)
+        restore = QPushButton("Вернуть сочетания по умолчанию")
+        restore.setObjectName("settingsSecondaryButton")
+        restore.clicked.connect(self._restore_default_hotkeys)
+        layout.addWidget(restore, 0, Qt.AlignmentFlag.AlignLeft)
+        return tab
+
+    def _restore_default_hotkeys(self) -> None:
+        self.swap_rating_color.setChecked(False)
+        for identifier, editor in self.hotkey_edits.items():
+            editor.setKeySequence(QKeySequence(HOTKEY_DEFAULTS[identifier][1]))
+
+    def _set_rating_color_scheme(self, color_on_plain_digits: bool) -> None:
+        """Switch all number pairs together, leaving other custom keys alone."""
+        for number in range(6):
+            rating = f"rating_{number}"
+            color = f"color_{number}"
+            self.hotkey_edits[rating].setKeySequence(QKeySequence(f"Shift+{number}" if color_on_plain_digits else str(number)))
+            self.hotkey_edits[color].setKeySequence(QKeySequence(str(number) if color_on_plain_digits else f"Shift+{number}"))
 
     @staticmethod
     def _placeholder_tab(title_text: str, description: str) -> QWidget:
@@ -2783,8 +3019,25 @@ class SettingsDialog(QDialog):
         self.restore_active_workspace.setEnabled(enabled)
 
     def _save(self) -> None:
+        sequences = {identifier: editor.keySequence() for identifier, editor in self.hotkey_edits.items()}
+        if any(_uses_reserved_navigation_key(sequence) for sequence in sequences.values()):
+            QMessageBox.warning(self, "Горячие клавиши", "Стрелки, Enter и Esc нельзя назначать на другие действия.")
+            return
+        assigned: dict[str, str] = {}
+        for identifier, sequence in sequences.items():
+            text = sequence.toString(QKeySequence.SequenceFormat.PortableText)
+            if text and text in assigned:
+                QMessageBox.warning(self, "Горячие клавиши", f"Сочетание {text} уже назначено действию «{HOTKEY_DEFAULTS[assigned[text]][0]}».")
+                return
+            if text:
+                assigned[text] = identifier
         self.settings.setValue("restore_workspaces", self.restore_workspaces.isChecked())
         self.settings.setValue("restore_active_workspace", self.restore_active_workspace.isChecked())
+        self.settings.setValue("editor/use_custom_executable", self.custom_editor.isChecked())
+        self.settings.setValue("editor/executable", self.editor_executable.text().strip())
+        self.settings.setValue("hotkeys/swap_rating_and_color", self.swap_rating_color.isChecked())
+        for identifier, sequence in sequences.items():
+            self.settings.setValue(f"hotkeys/{identifier}", sequence.toString(QKeySequence.SequenceFormat.PortableText))
         self.accept()
 
 
@@ -3548,7 +3801,9 @@ class Workspace(QMainWindow):
         self._resuming_shotsync_selections: set[int] = set()
         self._deleting_shotsync_folders: dict[int, Path] = {}
         self.shotsync_client = ShotSyncClient(SHOTSYNC_BASE_URL, self)
-        self.code_replacement_sets: list[dict] = []
+        self.code_replacement_sets: list[dict] = self._local_code_replacement_sets()
+        self.shotsync_login_dialog = ShotSyncLoginDialog(self)
+        self.shotsync_login_dialog.loginSubmitted.connect(self._shotsync_login)
         self.shotsync_client.set_api_key(self.settings.value("shotsync/api_key", "", str))
         self.shotsync_client.loginSucceeded.connect(self._shotsync_login_succeeded)
         self.shotsync_client.loginFailed.connect(self._shotsync_login_failed)
@@ -3659,7 +3914,6 @@ class Workspace(QMainWindow):
         self.full_view.set_quick_mark(*self.quick_mark)
         self.full_view.set_auto_advance(self.auto_advance)
         self.full_view.commentSubmitted.connect(self._save_full_comment)
-        self.full_view.meta_bar.codesRequested.connect(self._show_code_replacements)
         self.stack.addWidget(self.grid_page)
         self.stack.addWidget(self.full_view)
         self.shotsync_action_page = self._build_shotsync_action_page()
@@ -3667,6 +3921,7 @@ class Workspace(QMainWindow):
         self.shotsync_upload_page = self._build_shotsync_upload_page()
         self.grid_content_stack.addWidget(self.shotsync_upload_page)
         self.setCentralWidget(self.stack)
+        self._set_code_replacements(self.code_replacement_sets)
         self._install_grid_page_key_filters()
 
         # Qt exposes mounted volumes on all supported platforms. Polling is
@@ -3948,7 +4203,7 @@ class Workspace(QMainWindow):
         local_layout.addWidget(self.dir_tree, 1)
 
         self.shotsync_panel = ShotSyncPanel(icon_provider=_fomantic_icon)
-        self.shotsync_panel.loginSubmitted.connect(self._shotsync_login)
+        self.shotsync_panel.loginRequested.connect(self._show_shotsync_login)
         self.shotsync_panel.logoutRequested.connect(self._shotsync_logout)
         self.shotsync_panel.refreshRequested.connect(self._shotsync_refresh_requested)
         self.shotsync_panel.receiveRequested.connect(self._shotsync_receive_requested)
@@ -4145,6 +4400,8 @@ class Workspace(QMainWindow):
         self.series_toggle.setObjectName("aiFilter")
         self.series_toggle.setIcon(_fomantic_icon("images", 13))
         self.series_toggle.setText("Серии")
+        self.series_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.series_toggle.setToolTip("Включить или выключить группировку по сериям")
         self.series_toggle.setCheckable(True)
         self.series_toggle.setChecked(True)
         self.series_toggle.toggled.connect(self._series_toggle_changed)
@@ -4153,6 +4410,8 @@ class Workspace(QMainWindow):
         self.faces_panel_button.setObjectName("aiFilter")
         self.faces_panel_button.setIcon(_fomantic_icon("user", 13))
         self.faces_panel_button.setText("Лица")
+        self.faces_panel_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.faces_panel_button.setToolTip("Открыть наборы лиц")
         self.faces_panel_button.clicked.connect(self._show_face_sets)
         series_faces_layout.addWidget(self.faces_panel_button)
         ai_layout.addWidget(self.series_faces_group)
@@ -4174,8 +4433,8 @@ class Workspace(QMainWindow):
             button.clicked.connect(lambda _checked=False, target=value: self._set_shot_filter(target))
             self.shot_buttons[value] = button
             shot_layout.addWidget(button)
-        ai_layout.addWidget(self.shot_group)
         ai_layout.addStretch(1)
+        ai_layout.addWidget(self.shot_group)
         self.ai_panel.hide()
 
         self.meta_bar = ViewerMetaBar(settings=self.settings)
@@ -4185,7 +4444,6 @@ class Workspace(QMainWindow):
         self.meta_bar.quickMarkConfigured.connect(self._configure_quick_mark)
         self.meta_bar.autoAdvanceChanged.connect(self._set_auto_advance)
         self.meta_bar.commentSubmitted.connect(self._save_comment)
-        self.meta_bar.codesRequested.connect(self._show_code_replacements)
         self.comment_edit = self.meta_bar.comment_edit
         self.meta_bar.set_quick_mark(*self.quick_mark)
         self.meta_bar.set_auto_advance(self.auto_advance)
@@ -4251,46 +4509,40 @@ class Workspace(QMainWindow):
         return page
 
     def _create_actions(self) -> None:
-        full = QAction("Full View", self)
-        full.setShortcut(QKeySequence(Qt.Key.Key_F))
-        full.triggered.connect(self._open_selected)
-        self.addAction(full)
+        self._hotkey_actions: dict[str, QAction] = {}
 
-        grid = QAction("Grid", self)
-        grid.setShortcut(QKeySequence(Qt.Key.Key_G))
-        grid.triggered.connect(self.show_grid)
-        self.addAction(grid)
+        def add_hotkey(identifier: str, callback: Callable) -> None:
+            action = QAction(HOTKEY_DEFAULTS[identifier][0], self)
+            action.triggered.connect(callback)
+            self.addAction(action)
+            self._hotkey_actions[identifier] = action
 
+        add_hotkey("full_view", self._open_selected)
+        add_hotkey("open_in_editor", self._open_in_editor)
+        add_hotkey("grid", self.show_grid)
+
+        # Navigation keys are intentionally not exposed in the preferences.
         escape = QAction("Back", self)
         escape.setShortcut(QKeySequence(Qt.Key.Key_Escape))
         escape.triggered.connect(self._handle_escape)
         self.addAction(escape)
 
-        refresh = QAction("Refresh", self)
-        refresh.setShortcut(QKeySequence.Refresh)
-        refresh.triggered.connect(lambda: self.load_directory(self.current_dir))
-        self.addAction(refresh)
-
-        fullscreen = QAction("Toggle Fullscreen", self)
-        fullscreen.setShortcut(QKeySequence(Qt.Key.Key_F11))
-        fullscreen.triggered.connect(self.toggle_fullscreen)
-        self.addAction(fullscreen)
-
-        quick = QAction("Quick mark", self)
-        quick.setShortcut(QKeySequence(Qt.Key.Key_M))
-        quick.triggered.connect(self._apply_quick_mark)
-        self.addAction(quick)
-
-        comment = QAction("Comment", self)
-        comment.setShortcut(QKeySequence(Qt.Key.Key_C))
-        comment.triggered.connect(self._show_comment_dialog)
-        self.addAction(comment)
+        add_hotkey("refresh", lambda: self.load_directory(self.current_dir))
+        add_hotkey("fullscreen", self.toggle_fullscreen)
+        add_hotkey("quick_mark", self._apply_quick_mark)
+        add_hotkey("comment", self._show_comment_dialog)
 
         for rating in range(0, 6):
-            action = QAction(f"Rating {rating}", self)
-            action.setShortcut(QKeySequence(str(rating)))
-            action.triggered.connect(lambda _checked=False, value=rating: self._set_selected_rating(value or None))
-            self.addAction(action)
+            add_hotkey(f"rating_{rating}", lambda _checked=False, value=rating: self._set_selected_rating(value or None))
+
+        for index, color in enumerate(("", "red", "yellow", "green", "blue", "purple")):
+            add_hotkey(f"color_{index}", lambda _checked=False, value=color: self._set_selected_color(value))
+
+        self._reload_hotkeys()
+
+    def _reload_hotkeys(self) -> None:
+        for identifier, action in self._hotkey_actions.items():
+            action.setShortcut(_hotkey_sequence(self.settings, identifier))
 
     def _install_grid_page_key_filters(self) -> None:
         self._register_grid_page_focus_widget(self.grid_page)
@@ -4649,11 +4901,19 @@ class Workspace(QMainWindow):
     def _shotsync_login(self, login: str, password: str) -> None:
         self.shotsync_client.login(login, password)
 
+    def _show_shotsync_login(self) -> bool:
+        """Open the shared sign-in form and return whether it completed."""
+        if self.shotsync_client.has_key():
+            return True
+        self.shotsync_login_dialog.reset()
+        return self.shotsync_login_dialog.exec() == QDialog.DialogCode.Accepted
+
     def _shotsync_logout(self) -> None:
         self.shotsync_client.logout()
         self._shotsync_checked = False
         self.settings.remove("shotsync/api_key")
         self.shotsync.set_api_key("")
+        self._set_code_replacements(self._local_code_replacement_sets())
         self.shotsync_panel.show_login()
         self._refresh_shotsync_shortcuts()
 
@@ -4661,6 +4921,7 @@ class Workspace(QMainWindow):
         self._shotsync_checked = True
         self.settings.setValue("shotsync/api_key", key)
         self.shotsync.set_api_key(key)
+        self.shotsync_login_dialog.login_succeeded()
         self.shotsync_panel.show_logged_in(user)
         avatar_url = user.get("avatar_url")
         if avatar_url:
@@ -4671,7 +4932,9 @@ class Workspace(QMainWindow):
         self._refresh_shotsync_shortcuts()
 
     def _shotsync_login_failed(self, error: str) -> None:
-        self.shotsync_panel.show_login_error(error)
+        self.shotsync_login_dialog.show_error(error)
+        if self.shotsync_active:
+            self.shotsync_panel.show_login_error(error)
 
     def _shotsync_session_verified(self, user: dict) -> None:
         self._shotsync_checked = True
@@ -4689,6 +4952,7 @@ class Workspace(QMainWindow):
         self._shotsync_checked = False
         self.settings.remove("shotsync/api_key")
         self.shotsync.set_api_key("")
+        self._set_code_replacements(self._local_code_replacement_sets())
         if self.shotsync_active:
             self.shotsync_panel.show_login()
         self._refresh_shotsync_shortcuts()
@@ -4702,23 +4966,21 @@ class Workspace(QMainWindow):
             lambda ok, data, _error: self._set_code_replacements(data.get("sets", [])) if ok else None,
         )
 
+    def _local_code_replacement_sets(self) -> list[dict]:
+        """Read the offline replacement library kept in the app settings."""
+        sets = self.settings.value("code_replacements/local_sets", [], list)
+        return [entry for entry in sets if isinstance(entry, dict)]
+
     def _set_code_replacements(self, sets: list[dict]) -> None:
         self.code_replacement_sets = [entry for entry in sets if isinstance(entry, dict)]
         if self._xmp_auto_enabled():
             self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
         active_id = self.settings.value("code_replacements/active_set_id", 0, int)
-        if not active_id and self.code_replacement_sets:
+        if self.code_replacement_sets and not any(group.get("id") == active_id for group in self.code_replacement_sets):
             active_id = int(self.code_replacement_sets[0].get("id") or 0)
             self.settings.setValue("code_replacements/active_set_id", active_id)
         for editor in (self.comment_edit, self.full_view.full_comment_edit):
             editor.set_codes(self.code_replacement_sets, active_id)
-
-    def _show_code_replacements(self) -> None:
-        if not self.shotsync_client.has_key():
-            QMessageBox.information(self, "Коды замены", "Войдите в ShotSync, чтобы синхронизировать коды замены.")
-            return
-        CodeReplacementsDialog(self.shotsync_client, self.settings, self._set_code_replacements, self).exec()
-        self._sync_code_replacements()
 
     def _shotsync_shootings_loaded(self, shootings: list) -> None:
         self._shotsync_shootings = [shooting for shooting in shootings if isinstance(shooting, dict)]
@@ -5600,6 +5862,33 @@ class Workspace(QMainWindow):
     def _series_toggle_changed(self, enabled: bool) -> None:
         self.settings.setValue(self._series_mode_setting_key(self.current_dir), enabled)
         self._apply_view()
+        self._show_viewer_toast(
+            "Группировка по сериям включена" if enabled else "Группировка по сериям выключена"
+        )
+
+    def _show_viewer_toast(self, message: str) -> None:
+        """Show a brief confirmation over the viewer page."""
+        parent = self.centralWidget() or self
+        previous = getattr(self, "_viewer_toast", None)
+        if previous is not None:
+            previous.deleteLater()
+
+        toast = QLabel(message, parent)
+        toast.setObjectName("viewerToast")
+        toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        toast.adjustSize()
+        toast.move(
+            max(8, (parent.width() - toast.width()) // 2),
+            max(8, parent.height() // 2 - toast.height() // 2),
+        )
+        toast.raise_()
+        toast.show()
+        self._viewer_toast = toast
+
+        timer = QTimer(toast)
+        timer.setSingleShot(True)
+        timer.timeout.connect(toast.deleteLater)
+        timer.start(1_800)
 
     def _directory_scanned(self, request: WorkspaceRequest, directory: Path, future: Future) -> None:
         if self.closing:
@@ -6966,7 +7255,10 @@ class Workspace(QMainWindow):
                 toast.show()
 
             QTimer.singleShot(0, place_toast)
-            QTimer.singleShot(3_000, toast.deleteLater)
+            dismiss_toast = QTimer(toast)
+            dismiss_toast.setSingleShot(True)
+            dismiss_toast.timeout.connect(toast.deleteLater)
+            dismiss_toast.start(3_000)
         dialog.exec()
 
     def _rename_face_set(self, face_id: str, name: str) -> None:
@@ -7330,6 +7622,74 @@ class Workspace(QMainWindow):
         item = self.grid.currentItem()
         if item:
             self.open_full(Path(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _open_in_editor(self) -> None:
+        """Open the active image in the configured external editor."""
+        path = self.current_path if self.stack.currentWidget() is self.full_view else None
+        if path is None:
+            item = self.grid.currentItem()
+            path = Path(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
+        if path is None or not path.is_file():
+            return
+
+        executable = self.settings.value("editor/executable", "", str).strip()
+        use_custom = self.settings.value("editor/use_custom_executable", bool(executable), bool)
+        if use_custom:
+            editor = Path(executable)
+            if not editor.is_file():
+                QMessageBox.warning(
+                    self,
+                    "Внешний редактор",
+                    f"Не найден исполняемый файл редактора:\n{editor}",
+                )
+                return
+            command = [str(editor), str(path)]
+        else:
+            command = self._photoshop_command(path)
+            if command is None:
+                QMessageBox.warning(
+                    self,
+                    "Adobe Photoshop не найден",
+                    "Установите Adobe Photoshop или укажите исполняемый файл другого редактора "
+                    "в Настройки → Поведение.",
+                )
+                return
+        try:
+            subprocess.Popen(command)
+        except OSError as error:
+            QMessageBox.warning(self, "Не удалось открыть редактор", str(error))
+
+    @staticmethod
+    def _photoshop_command(path: Path) -> list[str] | None:
+        """Build a launch command for the default Adobe Photoshop installation."""
+        if sys.platform == "darwin":
+            return ["open", "-a", "Adobe Photoshop", str(path)]
+        if sys.platform != "win32":
+            executable = shutil.which("photoshop")
+            return [executable, str(path)] if executable else None
+
+        # Photoshop commonly registers this application path; the directory
+        # fallback also covers installations that do not add it to PATH.
+        try:
+            import winreg
+
+            for hive, key_path in (
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Photoshop.exe"),
+                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Photoshop.exe"),
+            ):
+                with winreg.OpenKey(hive, key_path) as key:
+                    executable, _ = winreg.QueryValueEx(key, None)
+                    if Path(executable).is_file():
+                        return [executable, str(path)]
+        except OSError:
+            pass
+
+        adobe_dir = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Adobe"
+        candidates = sorted(adobe_dir.glob("Adobe Photoshop*/Photoshop.exe"), reverse=True)
+        if candidates:
+            return [str(candidates[0]), str(path)]
+        executable = shutil.which("Photoshop.exe")
+        return [executable, str(path)] if executable else None
 
     def _open_grid_audio(self, path: Path) -> None:
         """The grid microphone follows the web viewer: open and play at once."""
@@ -7937,7 +8297,23 @@ class MainWindow(QMainWindow):
         self.addAction(previous_tab)
 
     def _show_settings(self) -> None:
-        SettingsDialog(self.settings, self).exec()
+        workspace = self.workspace_stack.currentWidget()
+        if not isinstance(workspace, Workspace):
+            return
+        dialog = SettingsDialog(
+            self.settings,
+            workspace.shotsync_client,
+            workspace._set_code_replacements,
+            workspace._show_shotsync_login,
+            self,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            for workspace_index in range(self.workspace_stack.count()):
+                candidate = self.workspace_stack.widget(workspace_index)
+                if isinstance(candidate, Workspace):
+                    candidate._reload_hotkeys()
+        if workspace.shotsync_client.has_key():
+            workspace._sync_code_replacements()
 
     def _select_relative_workspace(self, step: int) -> None:
         count = self.tabs.count()
@@ -8197,16 +8573,71 @@ def apply_theme(app: QApplication) -> None:
             font-weight: 700;
         }
         QTabWidget#settingsTabs::pane {
-            background: #292929;
-            border: 1px solid #3d3d3d;
-            border-top-left-radius: 0;
-            border-top-right-radius: 7px;
-            border-bottom-left-radius: 7px;
-            border-bottom-right-radius: 7px;
-            top: -1px;
+            background: transparent;
+            border: 0;
         }
         QWidget#settingsTabPage {
-            background: #292929;
+            background: transparent;
+        }
+        QWidget#behaviorTabPage,
+        QWidget#behaviorTabPage QLabel,
+        QWidget#behaviorTabPage QCheckBox {
+            background: transparent;
+        }
+        QFrame#externalEditorCard {
+            background: #252525;
+            border: 1px solid #3c3c3c;
+            border-radius: 7px;
+        }
+        QLabel#externalEditorTitle {
+            color: #eeeeee;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        QLabel#externalEditorHint {
+            color: #9d9d9d;
+            font-size: 12px;
+            padding-bottom: 2px;
+        }
+        QRadioButton#editorChoice {
+            background: transparent;
+            color: #dddddd;
+            spacing: 8px;
+            min-height: 22px;
+        }
+        QRadioButton#editorChoice::indicator {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #676767;
+            border-radius: 7px;
+            background: transparent;
+        }
+        QRadioButton#editorChoice::indicator:checked {
+            border: 4px solid #79aaff;
+        }
+        QWidget#behaviorTabPage QLineEdit#editorExecutable {
+            background: transparent;
+            border: 0;
+            border-bottom: 1px solid #555555;
+            border-radius: 0;
+            color: #dddddd;
+            padding: 5px 2px;
+        }
+        QWidget#behaviorTabPage QLineEdit#editorExecutable:focus {
+            border-bottom-color: #79aaff;
+        }
+        QWidget#behaviorTabPage QLineEdit#editorExecutable:disabled {
+            color: #666666;
+            border-bottom-color: #3b3b3b;
+        }
+        QWidget#behaviorTabPage QPushButton#editorBrowseButton {
+            background: transparent;
+            border: 1px solid #4b4b4b;
+            color: #dddddd;
+        }
+        QWidget#behaviorTabPage QPushButton#editorBrowseButton:hover {
+            background: transparent;
+            border-color: #79aaff;
         }
         QTabWidget#settingsTabs QTabBar::tab {
             background: #252525;
@@ -8219,9 +8650,9 @@ def apply_theme(app: QApplication) -> None:
             padding: 8px 13px;
         }
         QTabWidget#settingsTabs QTabBar::tab:selected {
-            background: #292929;
+            background: #202020;
             border-color: #4b4b4b;
-            border-bottom-color: #292929;
+            border-bottom-color: #202020;
             color: #f1f1f1;
             margin-bottom: -1px;
         }
@@ -8655,6 +9086,14 @@ def apply_theme(app: QApplication) -> None:
             font-size: 11px;
             padding: 0;
         }
+        QLabel#viewerToast {
+            background: #34573b;
+            color: #f3fff3;
+            border: 1px solid #5c9464;
+            border-radius: 6px;
+            padding: 8px 14px;
+            font-weight: 600;
+        }
         QProgressBar#viewerStatusProgress {
             min-height: 14px;
             max-height: 14px;
@@ -8747,6 +9186,14 @@ def apply_theme(app: QApplication) -> None:
         QToolButton#faceActionButton:hover { background: #3d3d3d; }
         QDialog#faceSetsDialog { background: #292929; }
         QLabel#faceSetsTitle { font-size: 16px; font-weight: 600; }
+        QLabel#faceSetsToast {
+            background: #34573b;
+            color: #f3fff3;
+            border: 1px solid #5c9464;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-weight: 600;
+        }
         QFrame#faceSetRow { background: transparent; border: none; }
         QWidget#viewerFiltersPanel QComboBox {
             padding-left: 7px;

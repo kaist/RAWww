@@ -7,7 +7,7 @@ The panel lives in the left navigation column and swaps between three states:
 * the signed-in view with the profile header and the list of shootings.
 
 All networking happens in :mod:`rawww.shotsync_client`; this widget only emits
-intent signals (``loginSubmitted``, ``logoutRequested``, ``refreshRequested``)
+intent signals (``loginRequested``, ``logoutRequested``, ``refreshRequested``)
 and renders whatever state the app hands back to it.
 """
 
@@ -20,7 +20,6 @@ from PySide6.QtGui import QIcon, QImage, QPainter, QPainterPath, QPixmap, QTrans
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -60,7 +59,7 @@ def _rounded_avatar(image: QImage, size: int = 40) -> QPixmap:
 class ShotSyncPanel(QWidget):
     """ShotSync navigation panel shown in place of the folder tree."""
 
-    loginSubmitted = Signal(str, str)   # login, password
+    loginRequested = Signal()
     logoutRequested = Signal()
     refreshRequested = Signal()
     shootingActivated = Signal(dict)    # emitted when a shooting card is opened
@@ -138,28 +137,15 @@ class ShotSyncPanel(QWidget):
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
-        self.login_edit = QLineEdit()
-        self.login_edit.setObjectName("shotsyncField")
-        self.login_edit.setPlaceholderText("Логин или email")
-        self.login_edit.returnPressed.connect(self._submit)
-        layout.addWidget(self.login_edit)
-
-        self.password_edit = QLineEdit()
-        self.password_edit.setObjectName("shotsyncField")
-        self.password_edit.setPlaceholderText("Пароль")
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_edit.returnPressed.connect(self._submit)
-        layout.addWidget(self.password_edit)
-
         self.login_error = QLabel()
         self.login_error.setObjectName("shotsyncError")
         self.login_error.setWordWrap(True)
         self.login_error.hide()
         layout.addWidget(self.login_error)
 
-        self.submit_button = QPushButton("Войти")
+        self.submit_button = QPushButton("Войти в ShotSync")
         self.submit_button.setObjectName("shotsyncPrimaryButton")
-        self.submit_button.clicked.connect(self._submit)
+        self.submit_button.clicked.connect(self.loginRequested)
         layout.addWidget(self.submit_button)
 
         layout.addStretch(1)
@@ -254,17 +240,6 @@ class ShotSyncPanel(QWidget):
             self.send_folder_button.setEnabled(can_send)
 
     # ----- interaction ---------------------------------------------------
-    def _submit(self) -> None:
-        if not self.submit_button.isEnabled():
-            return
-        login = self.login_edit.text().strip()
-        password = self.password_edit.text()
-        if not login or not password:
-            self.show_login_error("Введите логин и пароль.")
-            return
-        self.set_submitting(True)
-        self.loginSubmitted.emit(login, password)
-
     def _confirm_logout(self) -> None:
         msg = QMessageBox(self)
         msg.setWindowTitle("Выход из ShotSync")
@@ -289,13 +264,11 @@ class ShotSyncPanel(QWidget):
 
     def show_login(self, error: str = "") -> None:
         self.set_submitting(False)
-        self.password_edit.clear()
         if error:
             self.show_login_error(error)
         else:
             self.login_error.hide()
         self.stack.setCurrentIndex(1)
-        self.login_edit.setFocus()
 
     def show_login_error(self, message: str) -> None:
         self.set_submitting(False)
@@ -304,9 +277,7 @@ class ShotSyncPanel(QWidget):
 
     def set_submitting(self, submitting: bool) -> None:
         self.submit_button.setEnabled(not submitting)
-        self.submit_button.setText("Входим…" if submitting else "Войти")
-        self.login_edit.setEnabled(not submitting)
-        self.password_edit.setEnabled(not submitting)
+        self.submit_button.setText("Входим…" if submitting else "Войти в ShotSync")
 
     def show_logged_in(self, user: dict) -> None:
         name = user.get("display_name") or user.get("name") or user.get("login") or "Профиль"
