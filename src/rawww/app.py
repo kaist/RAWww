@@ -10,10 +10,11 @@ import ctypes
 import re
 from datetime import datetime
 from hashlib import sha1
+from uuid import uuid4
 import plistlib
 import subprocess
 from collections import OrderedDict, deque
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Callable
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QCompleter,
     QCheckBox,
     QDialog,
+    QDoubleSpinBox,
     QFileSystemModel,
     QFileIconProvider,
     QFrame,
@@ -47,6 +49,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QSizePolicy,
     QStackedWidget,
     QTabBar,
@@ -72,7 +75,7 @@ from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection
 from .ai import AiPipeline
 from .audio import AudioTranscriptionPipeline
 from .exif import MetadataPipeline
-from .imaging import DecodedImage, PixelImage, decode_original_pixels, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
+from .imaging import RAW_EXTENSIONS, DecodedImage, PixelImage, decode_original_pixels, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
 from .workspace import WorkspaceRequest, WorkspaceState
 
 
@@ -122,9 +125,70 @@ FOMANTIC_ICON_CODES = {
     "expand": "\uf065", "zoom": "\uf00e", "zoom-out": "\uf010", "play": "\uf04b", "pause": "\uf04c", "film": "\uf008",
     "cloud": "\uf0c2", "sign-out": "\uf08b", "lock": "\uf023", "sync": "\uf021",
     "download": "\uf56d", "eye": "\uf06e", "stop": "\uf04d",
-    "cog": "\uf013",
+    "cog": "\uf013", "magic": "\uf0d0", "wrench": "\uf0ad",
+    "edit": "\uf044", "calendar": "\uf133", "clock": "\uf017", "camera": "\uf030",
+    "file": "\uf15b", "arrow-right": "\uf061",
 }
 FOMANTIC_ICON_FAMILY = ""
+
+
+def _resize_export_worker(job: tuple[str, str, int, bool, int, bool, float, int, int, bool, int]) -> tuple[str, str, str | None]:
+    """Process-isolated JPEG export; RAW files prefer their embedded preview."""
+    source_text, output_text, max_side, sharpen, sharpen_amount, unsharp, unsharp_radius, unsharp_amount, unsharp_threshold, keep_exif, raw_orientation = job
+    source, output = Path(source_text), Path(output_text)
+    temporary = output.with_name(f".{output.stem}.{uuid4().hex}.tmp")
+    try:
+        from io import BytesIO
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
+        is_raw = source.suffix.lower() in RAW_EXTENSIONS
+        if is_raw:
+            import rawpy
+            with rawpy.imread(str(source)) as raw:
+                try:
+                    thumb = raw.extract_thumb()
+                    if thumb.format == rawpy.ThumbFormat.JPEG:
+                        image = Image.open(BytesIO(thumb.data))
+                    else:
+                        image = Image.fromarray(thumb.data)
+                except rawpy.LibRawNoThumbnailError:
+                    image = Image.fromarray(raw.postprocess(use_camera_wb=True, no_auto_bright=True, output_bps=8))
+        else:
+            image = Image.open(source)
+        embedded_orientation = image.getexif().get(274)
+        image = ImageOps.exif_transpose(image)
+        # Embedded RAW previews often lack their camera file's orientation
+        # tag. The regular preview pipeline uses EXIF transpose; apply the
+        # cached RAW orientation only when it was absent from that preview.
+        if is_raw and not embedded_orientation:
+            transforms = {
+                2: Image.Transpose.FLIP_LEFT_RIGHT,
+                3: Image.Transpose.ROTATE_180,
+                4: Image.Transpose.FLIP_TOP_BOTTOM,
+                5: Image.Transpose.TRANSPOSE,
+                6: Image.Transpose.ROTATE_270,
+                7: Image.Transpose.TRANSVERSE,
+                8: Image.Transpose.ROTATE_90,
+            }
+            transform = transforms.get(int(raw_orientation or 1))
+            if transform is not None:
+                image = image.transpose(transform)
+        exif = image.getexif().tobytes() if keep_exif else b""
+        image.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        if sharpen:
+            image = ImageEnhance.Sharpness(image).enhance(sharpen_amount / 100)
+        if unsharp:
+            image = image.filter(ImageFilter.UnsharpMask(radius=unsharp_radius, percent=unsharp_amount, threshold=unsharp_threshold))
+        image = image.convert("RGB")
+        options = {"format": "JPEG", "quality": 95, "subsampling": 0}
+        if exif:
+            options["exif"] = exif
+        image.save(temporary, **options)
+        os.replace(temporary, output)
+        return source_text, output_text, None
+    except Exception as exc:
+        temporary.unlink(missing_ok=True)
+        return source_text, output_text, str(exc)
 
 
 class DecodeBridge(QObject):
@@ -1142,6 +1206,40 @@ class CodeCompletingLineEdit(QLineEdit):
         insertion = f"{self._opener}{code}{closer}"
         self.setText(self.text()[:self._start] + insertion + self.text()[end:])
         self.setCursorPosition(self._start + len(insertion))
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        """Treat visible replacement chips as atomic when editing."""
+        key = event.key()
+        if key not in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
+            super().keyPressEvent(event)
+            return
+        raw = self.text()
+        start = self.selectionStart()
+        end = self.cursorPosition()
+        if start >= 0:
+            end = start + len(self.selectedText())
+        else:
+            start = end
+        if start == end:
+            for match in re.finditer(r"\{[^}]+\}|\\[^\\]+\\|=[^=]+=|@[\w]+|#[\w]+", raw):
+                if key == Qt.Key.Key_Backspace and match.start() < start <= match.end():
+                    start, end = match.start(), match.end()
+                    break
+                if key == Qt.Key.Key_Delete and match.start() <= start < match.end():
+                    start, end = match.start(), match.end()
+                    break
+            else:
+                super().keyPressEvent(event)
+                return
+        else:
+            for match in re.finditer(r"\{[^}]+\}|\\[^\\]+\\|=[^=]+=|@[\w]+|#[\w]+", raw):
+                if match.start() < end and match.end() > start:
+                    start, end = min(start, match.start()), max(end, match.end())
+        updated = raw[:start] + raw[end:]
+        self.setText(updated)
+        self.setCursorPosition(start)
+        self.textEdited.emit(updated)
+        event.accept()
 
 
 _CODE_TOKEN_OBJECT = int(QTextFormat.ObjectTypes.UserObject) + 1
@@ -2724,6 +2822,491 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
+class BatchRenameDialog(QDialog):
+    """Preview a filename template against the current, already sorted photo view."""
+
+    renameRequested = Signal(object)
+    _token_pattern = re.compile(
+        r"\{counter(?::(\d+))?\}|\{(year|month|day|hour|minute|second|date|time|datetime)\}"
+    )
+
+    def __init__(self, paths: list[Path], details: dict[str, dict], settings: QSettings, parent=None) -> None:
+        super().__init__(parent)
+        self.paths = paths
+        self.details = details
+        self.settings = settings
+        self._renaming = False
+        self.setObjectName("batchRenameDialog")
+        self.setWindowTitle("Групповое переименование")
+        self.setModal(True)
+        self.resize(880, 620)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(12)
+        title = QLabel("Групповое переименование")
+        title.setObjectName("batchRenameTitle")
+        layout.addWidget(title)
+        hint = QLabel("Файлы идут в том же порядке, что и текущий список. Расширение каждого файла сохраняется.")
+        hint.setObjectName("batchRenameHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        template_row = QHBoxLayout()
+        template_icon = QLabel()
+        template_icon.setPixmap(_fomantic_icon("edit", 16, "#a8b0bd").pixmap(QSize(16, 16)))
+        template_row.addWidget(template_icon)
+        template_label = QLabel("Шаблон")
+        template_label.setObjectName("batchRenameLabel")
+        template_row.addWidget(template_label)
+        self.template_edit = CodeCompletingLineEdit()
+        self.template_edit.setObjectName("batchRenameTemplate")
+        self.template_edit.setText(self.settings.value("batch_rename/template", "IMG_{counter:04}", str))
+        self.template_edit.set_codes([{"codes": [
+            {"code": "year", "value": "Год"}, {"code": "month", "value": "Месяц"},
+            {"code": "day", "value": "День"}, {"code": "hour", "value": "Час"},
+            {"code": "minute", "value": "Минута"}, {"code": "second", "value": "Секунда"},
+            {"code": "counter:04", "value": "Счётчик (0001)"},
+        ]}], 0)
+        self.template_edit.setPlaceholderText("Например: свадьба_{counter:04}")
+        self.template_edit.textEdited.connect(lambda _text: self._update_preview())
+        template_row.addWidget(self.template_edit, 1)
+        layout.addLayout(template_row)
+
+        constructor = QFrame()
+        constructor.setObjectName("batchRenameConstructor")
+        constructor_layout = QVBoxLayout(constructor)
+        constructor_layout.setContentsMargins(10, 7, 10, 7)
+        constructor_layout.setSpacing(6)
+        counter_row = QHBoxLayout()
+        counter_row.setSpacing(6)
+        counter_icon = QLabel()
+        counter_icon.setPixmap(_fomantic_icon("sort", 14, "#a8b0bd").pixmap(QSize(14, 14)))
+        counter_row.addWidget(counter_icon)
+        counter_row.addWidget(QLabel("Счётчик"))
+        self.counter_start = QSpinBox()
+        self.counter_start.setObjectName("batchRenameSpin")
+        self.counter_start.setRange(0, 999_999_999)
+        self.counter_start.setValue(self.settings.value("batch_rename/counter_start", 1, int))
+        self.counter_start.setPrefix("с ")
+        self.counter_start.valueChanged.connect(self._update_preview)
+        counter_row.addWidget(self.counter_start)
+        self.counter_digits = QSpinBox()
+        self.counter_digits.setObjectName("batchRenameSpin")
+        self.counter_digits.setRange(1, 9)
+        self.counter_digits.setValue(self.settings.value("batch_rename/counter_digits", 4, int))
+        self.counter_digits.setSuffix(" цифры")
+        self.counter_digits.valueChanged.connect(self._update_preview)
+        counter_row.addWidget(self.counter_digits)
+        add_counter = self._token_button("sort", "Счётчик", self._insert_counter)
+        counter_row.addWidget(add_counter)
+        counter_row.addStretch(1)
+        constructor_layout.addLayout(counter_row)
+        date_time_row = QHBoxLayout()
+        date_time_row.setSpacing(6)
+        for icon, label, token in (
+            ("calendar", "Год", "{year}"), ("calendar", "Месяц", "{month}"), ("calendar", "День", "{day}"),
+        ):
+            date_time_row.addWidget(self._token_button(icon, label, lambda _checked=False, value=token: self._insert_token(value)))
+        date_time_row.addSpacing(8)
+        for icon, label, token in (
+            ("clock", "Час", "{hour}"), ("clock", "Минута", "{minute}"), ("clock", "Секунда", "{second}"),
+        ):
+            date_time_row.addWidget(self._token_button(icon, label, lambda _checked=False, value=token: self._insert_token(value)))
+        date_time_row.addStretch(1)
+        constructor_layout.addLayout(date_time_row)
+        layout.addWidget(constructor)
+
+        tokens = QLabel("Введите { в поле шаблона, чтобы выбрать подстановку. Дата и время берутся из EXIF, а при его отсутствии — из файла.")
+        tokens.setObjectName("batchRenameTokens")
+        layout.addWidget(tokens)
+
+        lists = QSplitter(Qt.Orientation.Horizontal)
+        self._before_list = QListWidget()
+        self._after_list = QListWidget()
+        self._before_list.verticalScrollBar().valueChanged.connect(
+            self._after_list.verticalScrollBar().setValue
+        )
+        self._after_list.verticalScrollBar().valueChanged.connect(
+            self._before_list.verticalScrollBar().setValue
+        )
+        before_box = self._preview_box("До переименования", "file", self._before_list)
+        after_box = self._preview_box("Станет", "arrow-right", self._after_list)
+        lists.addWidget(before_box)
+        lists.addWidget(after_box)
+        lists.setSizes([420, 420])
+        layout.addWidget(lists, 1)
+        self.validation_label = QLabel()
+        self.validation_label.setObjectName("batchRenameValidation")
+        self.validation_label.setWordWrap(True)
+        layout.addWidget(self.validation_label)
+        self.rename_progress = QProgressBar()
+        self.rename_progress.setObjectName("batchRenameProgress")
+        self.rename_progress.setTextVisible(True)
+        self.rename_progress.hide()
+        layout.addWidget(self.rename_progress)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.cancel_button = QPushButton("Отмена")
+        self.cancel_button.setObjectName("batchRenameSecondaryButton")
+        self.cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(self.cancel_button)
+        self.rename_button = QPushButton("Переименовать")
+        self.rename_button.setObjectName("batchRenamePrimaryButton")
+        self.rename_button.setIcon(_fomantic_icon("edit", 14, "#ffffff"))
+        self.rename_button.clicked.connect(self._request_rename)
+        buttons.addWidget(self.rename_button)
+        layout.addLayout(buttons)
+        self._names: dict[str, str] = {}
+        self._update_preview()
+
+    def _preview_box(self, title_text: str, icon: str, target: QListWidget) -> QWidget:
+        box = QFrame()
+        box.setObjectName("batchRenamePreview")
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(2, 0, 2, 0)
+        header_layout.setSpacing(5)
+        icon_label = QLabel()
+        icon_label.setPixmap(_fomantic_icon(icon, 14, "#a8b0bd").pixmap(QSize(14, 14)))
+        header_layout.addWidget(icon_label)
+        title = QLabel(title_text)
+        title.setObjectName("batchRenamePreviewTitle")
+        header_layout.addWidget(title)
+        header_layout.addStretch(1)
+        layout.addWidget(header)
+        target.setObjectName("batchRenameList")
+        target.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        layout.addWidget(target, 1)
+        return box
+
+    def _token_button(self, icon: str, text: str, callback: Callable) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("batchRenameToken")
+        button.setIcon(_fomantic_icon(icon, 13, "#d6dce4"))
+        button.setText(text)
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        button.clicked.connect(callback)
+        return button
+
+    def _insert_counter(self) -> None:
+        self._insert_token(f"{{counter:0{self.counter_digits.value()}}}")
+
+    def _insert_token(self, token: str) -> None:
+        raw = self.template_edit.text()
+        position = self.template_edit.cursorPosition()
+        self.template_edit.setText(raw[:position] + token + raw[position:])
+        self.template_edit.setCursorPosition(position + len(token))
+        self._update_preview()
+        self.template_edit.setFocus()
+
+    def names(self) -> dict[str, str]:
+        return dict(self._names)
+
+    def _request_rename(self) -> None:
+        if self._names:
+            self.renameRequested.emit(dict(self._names))
+
+    def set_renaming(self, total: int) -> None:
+        self._renaming = True
+        self.template_edit.setEnabled(False)
+        self.counter_start.setEnabled(False)
+        self.counter_digits.setEnabled(False)
+        self.rename_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        self.rename_progress.setRange(0, max(1, total))
+        self.rename_progress.setValue(0)
+        self.rename_progress.setFormat("Переименование: 0/%m")
+        self.rename_progress.show()
+
+    def update_rename_progress(self, completed: int, total: int) -> None:
+        self.rename_progress.setRange(0, max(1, total))
+        self.rename_progress.setValue(completed)
+        self.rename_progress.setFormat(f"Переименование: {completed}/{total}")
+        QApplication.processEvents()
+
+    def rename_failed(self, message: str) -> None:
+        self._renaming = False
+        self.rename_progress.hide()
+        self.template_edit.setEnabled(True)
+        self.counter_start.setEnabled(True)
+        self.counter_digits.setEnabled(True)
+        self.cancel_button.setEnabled(True)
+        self._update_preview()
+        self.validation_label.setText(message)
+        self.validation_label.setProperty("invalid", True)
+        self.validation_label.style().unpolish(self.validation_label)
+        self.validation_label.style().polish(self.validation_label)
+
+    def reject(self) -> None:
+        if not self._renaming:
+            super().reject()
+
+    def accept(self) -> None:
+        self.settings.setValue("batch_rename/template", self.template_edit.text())
+        self.settings.setValue("batch_rename/counter_start", self.counter_start.value())
+        self.settings.setValue("batch_rename/counter_digits", self.counter_digits.value())
+        super().accept()
+
+    def _update_preview(self) -> None:
+        self._before_list.clear()
+        self._after_list.clear()
+        template = self.template_edit.text()
+        candidates: dict[str, str] = {}
+        errors: list[str] = []
+        for index, path in enumerate(self.paths):
+            self._before_list.addItem(path.name)
+            try:
+                stem = self._render_stem(template, path, index)
+                name = f"{stem}{path.suffix}"
+                self._validate_name(name)
+            except ValueError as exc:
+                name = "—"
+                errors.append(str(exc))
+            candidates[path.name] = name
+            self._after_list.addItem(name)
+        target_keys = [name.casefold() for name in candidates.values() if name != "—"]
+        if len(target_keys) != len(set(target_keys)):
+            errors.append("Шаблон создаёт одинаковые имена файлов.")
+        for name in candidates.values():
+            if name == "—":
+                continue
+            target = self.paths[0].parent / name
+            if target.exists() and not any(target.samefile(source) for source in self.paths):
+                errors.append(f"Файл «{name}» уже существует в папке.")
+                break
+        self._names = candidates if not errors else {}
+        self.rename_button.setEnabled(bool(self._names) and any(old != new for old, new in self._names.items()))
+        self.validation_label.setText(errors[0] if errors else f"Будет переименовано: {sum(old != new for old, new in candidates.items())} из {len(candidates)}")
+        self.validation_label.setProperty("invalid", bool(errors))
+        self.validation_label.style().unpolish(self.validation_label)
+        self.validation_label.style().polish(self.validation_label)
+
+    def _render_stem(self, template: str, path: Path, index: int) -> str:
+        detail = self.details.get(path.name, {})
+        raw_datetime = detail.get("original_datetime")
+        try:
+            captured = datetime.fromisoformat(str(raw_datetime)) if raw_datetime else None
+        except (TypeError, ValueError):
+            captured = None
+        def replace(match: re.Match) -> str:
+            width, token = match.groups()
+            if width is not None:
+                return f"{self.counter_start.value() + index:0{int(width)}d}"
+            if match.group(0) == "{counter}":
+                return str(self.counter_start.value() + index)
+            if captured is None:
+                raise ValueError(f"У файла «{path.name}» нет даты и времени съёмки в EXIF.")
+            return {
+                "year": captured.strftime("%Y"),
+                "month": captured.strftime("%m"),
+                "day": captured.strftime("%d"),
+                "hour": captured.strftime("%H"),
+                "minute": captured.strftime("%M"),
+                "second": captured.strftime("%S"),
+                "date": captured.strftime("%Y-%m-%d"),
+                "time": captured.strftime("%H-%M-%S"),
+                "datetime": captured.strftime("%Y-%m-%d_%H-%M-%S"),
+            }[token]
+
+        return self._safe_stem(self._token_pattern.sub(replace, template))
+
+    @staticmethod
+    def _safe_stem(value: str) -> str:
+        cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip().rstrip(". ")
+        return cleaned
+
+    @staticmethod
+    def _validate_name(name: str) -> None:
+        if not name or name in {".", ".."} or name.rstrip(". ") != name:
+            raise ValueError("Шаблон не создаёт корректное имя файла.")
+        stem = Path(name).stem.upper()
+        if stem in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+            raise ValueError("Шаблон создаёт зарезервированное имя Windows.")
+
+
+class BatchResizeDialog(QDialog):
+    startRequested = Signal(object)
+
+    def __init__(self, source_dir: Path, settings: QSettings, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.setObjectName("batchResizeDialog")
+        self.setWindowTitle("Групповой резайс")
+        self.setModal(True)
+        self.resize(570, 370)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(12)
+        title = QLabel("Групповой резайс")
+        title.setObjectName("batchRenameTitle")
+        layout.addWidget(title)
+        hint = QLabel("Экспортирует текущий отсортированный список в JPEG. RAW-файлы используют встроенное превью, если оно есть.")
+        hint.setObjectName("batchRenameHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        folder_row = QHBoxLayout()
+        folder_label = QLabel("Папка экспорта")
+        folder_label.setObjectName("batchResizeFieldLabel")
+        folder_row.addWidget(folder_label)
+        self.output_edit = QLineEdit(str(source_dir / "resized"))
+        self.output_edit.setObjectName("batchResizeOutput")
+        folder_row.addWidget(self.output_edit, 1)
+        browse = QToolButton()
+        browse.setObjectName("batchResizeBrowse")
+        browse.setIcon(_fomantic_icon("folder", 15))
+        browse.setToolTip("Выбрать папку")
+        browse.clicked.connect(self._choose_output_folder)
+        folder_row.addWidget(browse)
+        layout.addLayout(folder_row)
+
+        size_row = QHBoxLayout()
+        size_label = QLabel("Большая сторона")
+        size_label.setObjectName("batchResizeFieldLabel")
+        size_row.addWidget(size_label)
+        self.max_side = QSpinBox()
+        self.max_side.setObjectName("batchResizeSpin")
+        self.max_side.setRange(64, 20_000)
+        self.max_side.setValue(self.settings.value("batch_resize/max_side", 1920, int))
+        self.max_side.setSuffix(" px")
+        size_row.addWidget(self.max_side)
+        size_row.addStretch(1)
+        layout.addLayout(size_row)
+
+        options = QFrame()
+        options.setObjectName("batchResizeOptions")
+        options_layout = QVBoxLayout(options)
+        options_layout.setContentsMargins(2, 3, 2, 3)
+        self.sharpen = SettingsCheckBox("Шарп")
+        self.unsharp = SettingsCheckBox("Unsharp Mask")
+        self.keep_exif = SettingsCheckBox("Сохранить EXIF")
+        for option in (self.sharpen, self.unsharp, self.keep_exif):
+            option.setObjectName("batchResizeOption")
+        self.sharpen.setChecked(self.settings.value("batch_resize/sharpen", False, bool))
+        self.unsharp.setChecked(self.settings.value("batch_resize/unsharp", True, bool))
+        self.keep_exif.setChecked(self.settings.value("batch_resize/keep_exif", True, bool))
+        options_layout.addWidget(self.sharpen)
+        sharpen_settings = QHBoxLayout()
+        sharpen_settings.setContentsMargins(24, 0, 0, 0)
+        sharpen_strength_label = QLabel("Сила")
+        sharpen_strength_label.setObjectName("batchResizeSettingLabel")
+        sharpen_settings.addWidget(sharpen_strength_label)
+        self.sharpen_amount = QSpinBox()
+        self.sharpen_amount.setObjectName("batchResizeSpin")
+        self.sharpen_amount.setRange(0, 500)
+        self.sharpen_amount.setValue(self.settings.value("batch_resize/sharpen_amount", 125, int))
+        self.sharpen_amount.setSuffix(" %")
+        sharpen_settings.addWidget(self.sharpen_amount)
+        sharpen_settings.addStretch(1)
+        options_layout.addLayout(sharpen_settings)
+        options_layout.addWidget(self.unsharp)
+        unsharp_settings = QHBoxLayout()
+        unsharp_settings.setContentsMargins(24, 0, 0, 0)
+        unsharp_radius_label = QLabel("Радиус")
+        unsharp_radius_label.setObjectName("batchResizeSettingLabel")
+        unsharp_settings.addWidget(unsharp_radius_label)
+        self.unsharp_radius = QDoubleSpinBox()
+        self.unsharp_radius.setObjectName("batchResizeSpin")
+        self.unsharp_radius.setRange(0.1, 10.0)
+        self.unsharp_radius.setSingleStep(0.1)
+        self.unsharp_radius.setValue(self.settings.value("batch_resize/unsharp_radius", 0.3, float))
+        unsharp_settings.addWidget(self.unsharp_radius)
+        unsharp_strength_label = QLabel("Сила")
+        unsharp_strength_label.setObjectName("batchResizeSettingLabel")
+        unsharp_settings.addWidget(unsharp_strength_label)
+        self.unsharp_amount = QSpinBox()
+        self.unsharp_amount.setObjectName("batchResizeSpin")
+        self.unsharp_amount.setRange(1, 500)
+        self.unsharp_amount.setValue(self.settings.value("batch_resize/unsharp_amount", 220, int))
+        self.unsharp_amount.setSuffix(" %")
+        unsharp_settings.addWidget(self.unsharp_amount)
+        unsharp_threshold_label = QLabel("Порог")
+        unsharp_threshold_label.setObjectName("batchResizeSettingLabel")
+        unsharp_settings.addWidget(unsharp_threshold_label)
+        self.unsharp_threshold = QSpinBox()
+        self.unsharp_threshold.setObjectName("batchResizeSpin")
+        self.unsharp_threshold.setRange(0, 255)
+        self.unsharp_threshold.setValue(self.settings.value("batch_resize/unsharp_threshold", 4, int))
+        unsharp_settings.addWidget(self.unsharp_threshold)
+        unsharp_settings.addStretch(1)
+        options_layout.addLayout(unsharp_settings)
+        options_layout.addWidget(self.keep_exif)
+        self.sharpen.toggled.connect(self.sharpen_amount.setEnabled)
+        self.unsharp.toggled.connect(self.unsharp_radius.setEnabled)
+        self.unsharp.toggled.connect(self.unsharp_amount.setEnabled)
+        self.unsharp.toggled.connect(self.unsharp_threshold.setEnabled)
+        self.sharpen_amount.setEnabled(self.sharpen.isChecked())
+        self.unsharp_radius.setEnabled(self.unsharp.isChecked())
+        self.unsharp_amount.setEnabled(self.unsharp.isChecked())
+        self.unsharp_threshold.setEnabled(self.unsharp.isChecked())
+        layout.addWidget(options)
+        layout.addStretch(1)
+        self.status = QLabel()
+        self.status.setObjectName("batchResizeStatus")
+        layout.addWidget(self.status)
+        self.progress = QProgressBar()
+        self.progress.setObjectName("batchResizeProgress")
+        self.progress.setFixedHeight(0)
+        self.progress.hide()
+        layout.addWidget(self.progress)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.cancel_button = QPushButton("Отмена")
+        self.cancel_button.setObjectName("batchResizeSecondaryButton")
+        self.cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(self.cancel_button)
+        self.start_button = QPushButton("Старт")
+        self.start_button.setObjectName("batchResizePrimaryButton")
+        self.start_button.setIcon(_fomantic_icon("play", 13, "#ffffff"))
+        self.start_button.clicked.connect(self._start)
+        buttons.addWidget(self.start_button)
+        layout.addLayout(buttons)
+
+    def _choose_output_folder(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(self, "Папка для экспорта", self.output_edit.text())
+        if chosen:
+            self.output_edit.setText(chosen)
+
+    def _start(self) -> None:
+        output_text = self.output_edit.text().strip()
+        if not output_text:
+            self.status.setText("Укажите папку для экспорта.")
+            return
+        output = Path(output_text).expanduser()
+        for key, value in {
+            "max_side": self.max_side.value(), "sharpen": self.sharpen.isChecked(),
+            "sharpen_amount": self.sharpen_amount.value(), "unsharp": self.unsharp.isChecked(),
+            "unsharp_radius": self.unsharp_radius.value(), "unsharp_amount": self.unsharp_amount.value(),
+            "unsharp_threshold": self.unsharp_threshold.value(), "keep_exif": self.keep_exif.isChecked(),
+        }.items():
+            self.settings.setValue(f"batch_resize/{key}", value)
+        self.startRequested.emit({
+            "output_dir": output, "max_side": self.max_side.value(), "sharpen": self.sharpen.isChecked(),
+            "sharpen_amount": self.sharpen_amount.value(), "unsharp": self.unsharp.isChecked(),
+            "unsharp_radius": self.unsharp_radius.value(), "unsharp_amount": self.unsharp_amount.value(),
+            "unsharp_threshold": self.unsharp_threshold.value(), "keep_exif": self.keep_exif.isChecked(),
+        })
+
+    def set_running(self, total: int) -> None:
+        for widget in (self.output_edit, self.max_side, self.sharpen, self.sharpen_amount, self.unsharp, self.unsharp_radius, self.unsharp_amount, self.unsharp_threshold, self.keep_exif, self.start_button, self.cancel_button):
+            widget.setEnabled(False)
+        self.progress.setRange(0, total)
+        self.progress.setValue(0)
+        self.progress.setFixedHeight(20)
+        self.progress.show()
+
+    def update_progress(self, value: int, total: int) -> None:
+        self.progress.setRange(0, total)
+        self.progress.setValue(value)
+        self.progress.setFormat(f"Экспорт: {value}/{total}")
+        QApplication.processEvents()
+
+
 class ChromeTabBar(QTabBar):
     """Chrome-like tab widths instead of Qt's full-row expansion."""
     closeRequested = Signal(int)
@@ -3527,9 +4110,26 @@ class Workspace(QMainWindow):
         self.face_filter_chip.hide()
         filter_layout.addWidget(self.face_filter_chip)
 
-        self.ai_button = QPushButton("Обработать новые фото")
-        self.ai_button.clicked.connect(self._start_ai_analysis)
+        self.ai_button = QToolButton()
+        self.ai_button.setObjectName("toolbarAction")
+        self.ai_button.setText("AI")
+        self.ai_button.setIcon(_fomantic_icon("magic", 20, "#c9ddff"))
+        self.ai_button.setIconSize(QSize(20, 20))
+        self.ai_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.ai_button.setToolTip("AI: серии и лица")
+        self.ai_button.clicked.connect(self._show_ai_menu)
+        self.ai_analysis_available = False
         toolbar_layout.addWidget(self.ai_button)
+
+        self.utilities_button = QToolButton()
+        self.utilities_button.setObjectName("toolbarAction")
+        self.utilities_button.setText("Утилиты")
+        self.utilities_button.setIcon(_fomantic_icon("wrench", 20, "#d6d6d6"))
+        self.utilities_button.setIconSize(QSize(20, 20))
+        self.utilities_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.utilities_button.setToolTip("Утилиты")
+        self.utilities_button.clicked.connect(self._show_utilities_menu)
+        toolbar_layout.addWidget(self.utilities_button)
         for icon, delta in (("zoom-out", -1), ("zoom", 1)):
             button = QToolButton()
             button.setIcon(_fomantic_icon(icon, 13))
@@ -4931,7 +5531,9 @@ class Workspace(QMainWindow):
         self.ai_progress_total = 0
         self.preview_progress_total = 0
         if hasattr(self, "ai_button"):
-            self.ai_button.setEnabled(False)
+            # The toolbar button opens an explanatory menu, so it must remain
+            # available while the folder cache is loading as well.
+            self.ai_button.setEnabled(True)
             self._refresh_status_panel()
         self.cache_load_generation += 1
         self.directory_generation += 1
@@ -5160,10 +5762,260 @@ class Workspace(QMainWindow):
         if not self.ai_progress_total:
             self._refresh_status_panel()
             return
-        self.ai_button.setEnabled(False)
+        self.ai_analysis_available = False
         self.ai_pipeline.scan(analysis_paths, self.folder_cache, self._background_decode_executor())
         self.ai_progress_timer.start()
         self._refresh_status_panel()
+
+    def _show_ai_menu(self) -> None:
+        """Show the entry point for the AI analysis already available in the workspace."""
+        menu = QMenu(self.ai_button)
+        menu.setObjectName("toolbarPopup")
+        content = QWidget(menu)
+        content.setObjectName("toolbarPopupContent")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(8)
+
+        title = QLabel("AI: серии и лица")
+        title.setObjectName("toolbarPopupTitle")
+        layout.addWidget(title)
+        hint = QLabel(
+            "Находит похожие кадры и лица среди фотографий, "
+            "которые ещё не были обработаны."
+        )
+        hint.setObjectName("toolbarPopupHint")
+        hint.setWordWrap(True)
+        hint.setFixedWidth(270)
+        layout.addWidget(hint)
+        start = QPushButton("Обработать серии и лица")
+        start.setObjectName("toolbarPopupPrimaryButton")
+        start.setEnabled(self.ai_analysis_available)
+        start.clicked.connect(lambda: (menu.close(), self._start_ai_analysis()))
+        layout.addWidget(start)
+
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(content)
+        menu.addAction(action)
+        menu.exec(self.ai_button.mapToGlobal(QPoint(0, self.ai_button.height())))
+
+    def _show_utilities_menu(self) -> None:
+        """Show the reserved place for batch tools without implying availability."""
+        menu = QMenu(self.utilities_button)
+        menu.setObjectName("toolbarPopup")
+        content = QWidget(menu)
+        content.setObjectName("toolbarPopupContent")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(8)
+
+        title = QLabel("Утилиты")
+        title.setObjectName("toolbarPopupTitle")
+        layout.addWidget(title)
+        hint = QLabel("Инструменты для пакетной работы с файлами.")
+        hint.setObjectName("toolbarPopupHint")
+        hint.setWordWrap(True)
+        hint.setFixedWidth(270)
+        layout.addWidget(hint)
+        for label, callback in (
+            ("Групповое переименование", self._show_batch_rename_dialog),
+            ("Групповой резайс", self._show_batch_resize_dialog),
+        ):
+            button = QPushButton(label)
+            button.setObjectName("toolbarPopupUtilityButton")
+            if callback is None:
+                button.setEnabled(False)
+                button.setToolTip("Пока не реализовано")
+            else:
+                # Let QMenu complete its close cycle before a modal dialog is
+                # created; otherwise Qt can warn that its transient window is
+                # not a top-level window.
+                button.clicked.connect(lambda _checked=False, target=callback: (menu.close(), QTimer.singleShot(0, target)))
+            layout.addWidget(button)
+
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(content)
+        menu.addAction(action)
+        menu.exec(self.utilities_button.mapToGlobal(QPoint(0, self.utilities_button.height())))
+
+    def _show_batch_rename_dialog(self) -> None:
+        if self._is_shotsync_rename_blocked():
+            QMessageBox.information(
+                self,
+                "Групповое переименование",
+                "Переименование недоступно для папок, связанных со съёмками ShotSync.",
+            )
+            return
+        if not self.cache_ready:
+            QMessageBox.information(self, "Групповое переименование", "Подождите, пока загрузится папка.")
+            return
+        paths = [path for path in self.view_paths if path.is_file() and is_supported_image(path)]
+        if not paths:
+            QMessageBox.information(self, "Групповое переименование", "В текущем списке нет фотографий.")
+            return
+        dialog = BatchRenameDialog(paths, self.photo_details, self.settings, self)
+        dialog.renameRequested.connect(lambda names, view=dialog: self._rename_from_dialog(view, names))
+        dialog.exec()
+
+    def _rename_from_dialog(self, dialog: BatchRenameDialog, names: dict[str, str]) -> None:
+        changes = sum(old != new for old, new in names.items())
+        if not changes:
+            return
+        dialog.set_renaming(changes * 2)
+        try:
+            self._rename_files_safely(names, dialog.update_rename_progress)
+            if self.folder_cache is not None:
+                self.folder_cache.rename_photo_names(names)
+        except OSError as exc:
+            dialog.rename_failed(f"Не удалось переименовать файлы: {exc}")
+            return
+        except Exception as exc:
+            QMessageBox.warning(dialog, "Групповое переименование", f"Файлы переименованы, но кэш не обновлён:\n{exc}")
+            self.folder_change_timer.stop()
+            self.load_directory(self.current_dir)
+            dialog.accept()
+            return
+        self.folder_change_timer.stop()
+        self.load_directory(self.current_dir)
+        dialog.accept()
+
+    def _is_shotsync_rename_blocked(self) -> bool:
+        if self.folder_cache is not None and self.cache_ready and self.folder_cache.shotsync_session() is not None:
+            return True
+        if any(Path(folder) == self.current_dir for folder in self._shotsync_folder_map().values()):
+            return True
+        return any(self.shotsync.folder_for(shooting_id) == self.current_dir for shooting_id in self.shotsync.receiving_ids())
+
+    def _show_batch_resize_dialog(self) -> None:
+        paths = [path for path in self.view_paths if path.is_file() and is_supported_image(path)]
+        if not paths:
+            QMessageBox.information(self, "Групповой резайс", "В текущем списке нет фотографий.")
+            return
+        dialog = BatchResizeDialog(self.current_dir, self.settings, self)
+        dialog.startRequested.connect(lambda options, view=dialog, items=paths: self._start_batch_resize(view, items, options))
+        dialog.exec()
+
+    def _start_batch_resize(self, dialog: BatchResizeDialog, paths: list[Path], options: dict) -> None:
+        output_dir = Path(options["output_dir"])
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            dialog.status.setText(f"Не удалось создать папку: {exc}")
+            return
+        targets = self._resolve_resize_targets(paths, output_dir)
+        if targets is None:
+            return
+        dialog.set_running(len(targets))
+        jobs = [
+            (
+                str(source), str(target), int(options["max_side"]), bool(options["sharpen"]),
+                int(options["sharpen_amount"]), bool(options["unsharp"]), float(options["unsharp_radius"]),
+                int(options["unsharp_amount"]), int(options["unsharp_threshold"]), bool(options["keep_exif"]),
+                int(self.photo_details.get(source.name, {}).get("orientation") or 1),
+            )
+            for source, target in targets
+        ]
+        errors: list[str] = []
+        workers = min(8, max(1, os.cpu_count() or 1), len(jobs))
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_resize_export_worker, job) for job in jobs]
+            for completed, future in enumerate(as_completed(futures), 1):
+                source, _output, error = future.result()
+                if error:
+                    errors.append(f"{Path(source).name}: {error}")
+                dialog.update_progress(completed, len(jobs))
+        if errors:
+            dialog.status.setText(f"Готово с ошибками ({len(errors)}): {errors[0]}")
+            dialog.cancel_button.setEnabled(True)
+            dialog.cancel_button.setText("Закрыть")
+            return
+        dialog.accept()
+
+    def _resolve_resize_targets(self, paths: list[Path], output_dir: Path) -> list[tuple[Path, Path]] | None:
+        """Pick non-destructive output paths and ask once per existing collision."""
+        targets: list[tuple[Path, Path]] = []
+        planned: set[str] = set()
+        overwrite_all = False
+        for source in paths:
+            target = output_dir / f"{source.stem}.jpg"
+            if target.name.casefold() in planned:
+                target = self._next_resize_name(target, planned)
+            if target.exists() and not overwrite_all:
+                choice = QMessageBox(self)
+                choice.setWindowTitle("Файл уже существует")
+                choice.setText(f"В папке экспорта уже есть «{target.name}».")
+                overwrite = choice.addButton("Перезаписать", QMessageBox.ButtonRole.AcceptRole)
+                overwrite_all_button = choice.addButton("Перезаписать все", QMessageBox.ButtonRole.YesRole)
+                rename = choice.addButton("Переименовать", QMessageBox.ButtonRole.ActionRole)
+                cancel = choice.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+                choice.exec()
+                clicked = choice.clickedButton()
+                if clicked == cancel or clicked is None:
+                    return None
+                if clicked == overwrite_all_button:
+                    overwrite_all = True
+                elif clicked == rename:
+                    target = self._next_resize_name(target, planned)
+                elif clicked != overwrite:
+                    return None
+            planned.add(target.name.casefold())
+            targets.append((source, target))
+        return targets
+
+    @staticmethod
+    def _next_resize_name(target: Path, planned: set[str]) -> Path:
+        for index in range(2, 100_000):
+            candidate = target.with_name(f"{target.stem} ({index}){target.suffix}")
+            if candidate.name.casefold() not in planned and not candidate.exists():
+                return candidate
+        raise OSError("Не удалось подобрать свободное имя")
+
+    def _rename_files_safely(
+        self, names: dict[str, str], progress: Callable[[int, int], None] | None = None
+    ) -> None:
+        """Use temporary sibling names so swaps and occupied targets are lossless."""
+        changes = {old: new for old, new in names.items() if old != new}
+        if not changes:
+            return
+        directory = self.current_dir
+        if len({name.casefold() for name in changes.values()}) != len(changes):
+            raise OSError("Шаблон создаёт одинаковые имена")
+        for old, new in changes.items():
+            source, target = directory / old, directory / new
+            if not source.is_file():
+                raise OSError(f"Файл «{old}» больше не существует")
+            if target.exists() and not any(target.samefile(directory / source_name) for source_name in changes):
+                raise OSError(f"Файл «{new}» уже существует")
+
+        token = uuid4().hex
+        temporary = {old: directory / f".__rawww_rename_{token}_{index}" for index, old in enumerate(changes)}
+        moved: list[str] = []
+        completed: list[str] = []
+        total_steps = len(changes) * 2
+        step = 0
+        try:
+            for old, temporary_path in temporary.items():
+                (directory / old).rename(temporary_path)
+                moved.append(old)
+                step += 1
+                if progress is not None:
+                    progress(step, total_steps)
+            for old, temporary_path in temporary.items():
+                temporary_path.rename(directory / changes[old])
+                completed.append(old)
+                step += 1
+                if progress is not None:
+                    progress(step, total_steps)
+        except OSError:
+            for old in reversed(completed):
+                target, temporary_path = directory / changes[old], temporary[old]
+                if target.exists():
+                    target.rename(temporary_path)
+            for old in reversed(moved):
+                temporary_path, source = temporary[old], directory / old
+                if temporary_path.exists():
+                    temporary_path.rename(source)
+            raise
 
     def _update_ai_progress(self) -> None:
         if self.folder_cache is None or not self.cache_ready:
@@ -5177,7 +6029,7 @@ class Workspace(QMainWindow):
             self.ai_progress_timer.stop()
             self.ai_pipeline.release_analysis_workers()
             self._reload_photo_details()
-            self.ai_button.setEnabled(remaining > 0)
+            self.ai_analysis_available = remaining > 0
         self._refresh_status_panel()
 
     def _folder_changed(self, path: str) -> None:
@@ -5200,13 +6052,13 @@ class Workspace(QMainWindow):
         embedding_missing = self.folder_cache.missing_ai_paths(analysis_paths, "image_embeddings")
         face_missing = self.folder_cache.missing_ai_paths(analysis_paths, "face_analysis")
         waiting = len(set(embedding_missing) | set(face_missing))
-        self.ai_button.setEnabled(waiting > 0 and self.ai_pipeline.pending_count() == 0)
+        self.ai_analysis_available = waiting > 0 and self.ai_pipeline.pending_count() == 0
         self._refresh_status_panel()
 
     def _reset_ai_status(self) -> None:
         if not hasattr(self, "ai_button"):
             return
-        self.ai_button.setEnabled(False)
+        self.ai_analysis_available = False
         self._refresh_status_panel()
 
     def _refresh_status_panel(self) -> None:
@@ -7835,6 +8687,247 @@ def apply_theme(app: QApplication) -> None:
                 stop:0 #606060, stop:1 #4b4b4b);
             border-color: #707070;
         }
+        QToolButton#toolbarAction {
+            min-width: 52px;
+            min-height: 40px;
+            padding: 1px 4px;
+            border: 1px solid #3b3b3b;
+            border-radius: 4px;
+            background: #303030;
+            color: #e5e5e5;
+            font-size: 10px;
+        }
+        QToolButton#toolbarAction:hover {
+            background: #454545;
+            border-color: #707070;
+        }
+        QToolButton#toolbarAction:disabled {
+            color: #777777;
+            background: #272727;
+            border-color: #343434;
+        }
+        QMenu#toolbarPopup {
+            background: #292929;
+            border: 1px solid #5a5a5a;
+            border-radius: 8px;
+            padding: 0;
+        }
+        QWidget#toolbarPopupContent { background: transparent; }
+        QLabel#toolbarPopupTitle {
+            background: transparent;
+            color: #f2f2f2;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        QLabel#toolbarPopupHint {
+            background: transparent;
+            color: #b8c0ca;
+            font-size: 11px;
+        }
+        QPushButton#toolbarPopupPrimaryButton, QPushButton#toolbarPopupUtilityButton {
+            min-height: 30px;
+            padding: 4px 10px;
+            border: 1px solid #4c4c4c;
+            border-radius: 5px;
+            background: #3a3a3a;
+            color: #ededed;
+            text-align: left;
+        }
+        QPushButton#toolbarPopupPrimaryButton {
+            background: #315b80;
+            border-color: #79aaff;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        QPushButton#toolbarPopupPrimaryButton:hover { background: #3d6f9d; }
+        QPushButton#toolbarPopupUtilityButton:disabled {
+            color: #777d84;
+            background: #303030;
+            border-color: #414141;
+        }
+        QDialog#batchRenameDialog {
+            background: #242424;
+            color: #e8e8e8;
+        }
+        QLabel#batchRenameTitle {
+            background: transparent;
+            color: #f4f4f4;
+            font-size: 19px;
+            font-weight: 700;
+        }
+        QLabel#batchRenameHint, QLabel#batchRenameTokens {
+            color: #aeb8c4;
+            font-size: 11px;
+            background: transparent;
+        }
+        QLabel#batchRenameLabel { color: #d9dfe6; font-weight: 600; }
+        QLineEdit#batchRenameTemplate {
+            min-height: 31px;
+            background: #181818;
+            border: 1px solid #4c5967;
+            border-radius: 5px;
+            color: #f1f4f7;
+            padding: 2px 9px;
+            font-family: Consolas, monospace;
+        }
+        QLineEdit#batchRenameTemplate:focus { border-color: #79aaff; }
+        QFrame#batchRenameConstructor {
+            background: transparent;
+            border: 0;
+        }
+        QFrame#batchRenameConstructor QLabel { background: transparent; color: #d5dce5; }
+        QSpinBox#batchRenameSpin {
+            min-height: 25px;
+            background: #1d1f22;
+            border: 1px solid #4b5662;
+            border-radius: 4px;
+            color: #e7edf4;
+            padding: 0 5px;
+        }
+        QToolButton#batchRenameToken {
+            min-height: 25px;
+            padding: 0 6px;
+            border: 1px solid #4a5662;
+            border-radius: 4px;
+            background: #353c44;
+            color: #e2e8ef;
+            font-size: 11px;
+        }
+        QToolButton#batchRenameToken:hover { background: #46515d; border-color: #718294; }
+        QFrame#batchRenamePreview {
+            background: transparent;
+            border: 0;
+        }
+        QLabel#batchRenamePreviewTitle { color: #c3d3e4; font-weight: 700; background: transparent; }
+        QListWidget#batchRenameList {
+            background: #181818;
+            border: 1px solid #30353a;
+            border-radius: 4px;
+            color: #d9dfe6;
+            padding: 3px;
+            font-family: Consolas, monospace;
+        }
+        QListWidget#batchRenameList::item { padding: 3px 5px; }
+        QLabel#batchRenameValidation { background: transparent; color: #9eb7ce; min-height: 18px; }
+        QLabel#batchRenameValidation[invalid="true"] { color: #f08b8b; }
+        QProgressBar#batchRenameProgress {
+            min-height: 20px;
+            border: 1px solid #46576a;
+            border-radius: 5px;
+            background: #181818;
+            color: #e7f0fb;
+            text-align: center;
+        }
+        QProgressBar#batchRenameProgress::chunk { background: #386f9e; border-radius: 4px; }
+        QPushButton#batchRenameSecondaryButton, QPushButton#batchRenamePrimaryButton {
+            min-height: 31px;
+            padding: 3px 13px;
+            border-radius: 5px;
+        }
+        QPushButton#batchRenameSecondaryButton {
+            background: #383838;
+            border: 1px solid #565656;
+            color: #e0e0e0;
+        }
+        QPushButton#batchRenameSecondaryButton:hover { background: #484848; }
+        QPushButton#batchRenamePrimaryButton {
+            background: #315b80;
+            border: 1px solid #79aaff;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        QPushButton#batchRenamePrimaryButton:hover { background: #3d6f9d; }
+        QPushButton#batchRenamePrimaryButton:disabled { background: #303030; border-color: #464646; color: #777d84; }
+        QDialog#batchResizeDialog { background: #242424; color: #e8e8e8; }
+        QDialog#batchResizeDialog QLabel { background: transparent; }
+        QLabel#batchResizeFieldLabel {
+            min-width: 118px;
+            color: #c9d3de;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        QLineEdit#batchResizeOutput {
+            min-height: 30px;
+            background: #181818;
+            border: 1px solid #4c5967;
+            border-radius: 5px;
+            color: #f1f4f7;
+            padding: 2px 9px;
+        }
+        QLineEdit#batchResizeOutput:focus { border-color: #79aaff; }
+        QToolButton#batchResizeBrowse {
+            min-width: 30px;
+            min-height: 30px;
+            border: 1px solid #4a5662;
+            border-radius: 5px;
+            background: #353c44;
+        }
+        QToolButton#batchResizeBrowse:hover { background: #46515d; border-color: #718294; }
+        QSpinBox#batchResizeSpin, QDoubleSpinBox#batchResizeSpin {
+            min-height: 27px;
+            background: #1d1f22;
+            border: 1px solid #4b5662;
+            border-radius: 4px;
+            color: #e7edf4;
+            padding: 0 5px;
+        }
+        QFrame#batchResizeOptions { background: transparent; border: 0; }
+        QCheckBox#batchResizeOption {
+            min-height: 28px;
+            background: transparent;
+            color: #e8edf2;
+            font-size: 12px;
+            font-weight: 600;
+            spacing: 8px;
+            font-family: Lato;
+        }
+        QCheckBox#batchResizeOption::indicator {
+            width: 18px;
+            height: 18px;
+            background: #292929;
+            border: 1px solid #777777;
+            border-radius: 4px;
+        }
+        QCheckBox#batchResizeOption::indicator:hover { border-color: #bdbdbd; }
+        QCheckBox#batchResizeOption::indicator:checked {
+            background: #3f6db5;
+            border-color: #79aaff;
+        }
+        QCheckBox#batchResizeOption::indicator:disabled {
+            background: #242424;
+            border-color: #454545;
+        }
+        QCheckBox#batchResizeOption:disabled, QLabel#batchResizeSettingLabel:disabled { background: transparent; color: #727982; }
+        QLabel#batchResizeSettingLabel { color: #9fabb8; font-size: 11px; }
+        QLabel#batchResizeStatus { min-height: 18px; color: #9eb7ce; font-size: 11px; }
+        QProgressBar#batchResizeProgress {
+            min-height: 20px;
+            border: 1px solid #46576a;
+            border-radius: 5px;
+            background: #181818;
+            color: #e7f0fb;
+            text-align: center;
+        }
+        QProgressBar#batchResizeProgress::chunk { background: #386f9e; border-radius: 4px; }
+        QPushButton#batchResizeSecondaryButton, QPushButton#batchResizePrimaryButton {
+            min-height: 31px;
+            padding: 3px 13px;
+            border-radius: 5px;
+        }
+        QPushButton#batchResizeSecondaryButton {
+            background: #383838;
+            border: 1px solid #565656;
+            color: #e0e0e0;
+        }
+        QPushButton#batchResizeSecondaryButton:hover { background: #484848; }
+        QPushButton#batchResizePrimaryButton {
+            background: #315b80;
+            border: 1px solid #79aaff;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        QPushButton#batchResizePrimaryButton:hover { background: #3d6f9d; }
+        QPushButton#batchResizePrimaryButton:disabled { background: #303030; border-color: #464646; color: #777d84; }
         QWidget#viewerAiPanel {
             min-height: 36px;
             background: transparent;

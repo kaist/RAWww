@@ -4,6 +4,7 @@ import hashlib
 import sqlite3
 import threading
 import time
+from uuid import uuid4
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -314,6 +315,48 @@ class FolderCache:
                 (name, rating, color_label, comment, time.time_ns()),
             )
             db.commit()
+
+    def rename_photo_names(self, names: dict[str, str]) -> None:
+        """Move cached data to renamed files without losing a name swap/cycle.
+
+        The database keys are filenames, so updating ``a.jpg`` directly to
+        ``b.jpg`` would violate a primary key when both files participate in a
+        batch rename.  A transaction with private temporary names makes the
+        update safe for swaps and arbitrary cycles.
+        """
+        changes = {str(old): str(new) for old, new in names.items() if old != new}
+        if not changes:
+            return
+        if len(set(changes.values())) != len(changes):
+            raise ValueError("Renamed filenames must be unique")
+
+        temporary = {
+            old: f".__rawww_rename_{uuid4().hex}_{index}"
+            for index, old in enumerate(changes)
+        }
+        tables = (
+            "previews", "image_embeddings", "face_analysis", "photo_metadata",
+            "photo_selection", "audio_transcripts",
+        )
+        with self._lock:
+            db = self._db_or_raise()
+            try:
+                db.execute("BEGIN")
+                for table in tables:
+                    db.executemany(
+                        f"UPDATE {table} SET name = ? WHERE name = ?",
+                        ((temporary[old], old) for old in changes),
+                    )
+                for table in tables:
+                    db.executemany(
+                        f"UPDATE {table} SET name = ? WHERE name = ?",
+                        ((changes[old], temporary[old]) for old in changes),
+                    )
+                self.live_names = {changes.get(name, name) for name in self.live_names}
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
 
     # ----- ShotSync selection session (feature 2) ------------------------
     def set_shotsync_session(self, shooting_id: int, title: str) -> None:

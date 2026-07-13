@@ -197,6 +197,26 @@ class CacheTests(unittest.TestCase):
             self.assertNotIn(path.name, cache.load_photo_details(include_metadata=False))
             cache.close(flush=False)
 
+    def test_rename_photo_names_preserves_cache_data_for_a_name_swap(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            first, second = folder / "first.jpg", folder / "second.jpg"
+            Image.new("RGB", (32, 32), (10, 20, 30)).save(first)
+            Image.new("RGB", (32, 32), (40, 50, 60)).save(second)
+            cache = FolderCache(folder, {first.name, second.name}, cache_root=folder / "cache")
+            cache.store_photo_metadata([(str(first), '{"camera":{"model":"First"}}')])
+            cache.store_photo_metadata([(str(second), '{"camera":{"model":"Second"}}')])
+            cache.store_photo_selection(first.name, rating=5, color_label="red", comment="keep")
+
+            cache.rename_photo_names({first.name: second.name, second.name: first.name})
+
+            details = cache.load_photo_details()
+            self.assertEqual(details[second.name]["camera"]["model"], "First")
+            self.assertEqual(details[first.name]["camera"]["model"], "Second")
+            self.assertEqual(details[second.name]["comment"], "keep")
+            self.assertEqual(cache.live_names, {first.name, second.name})
+            cache.close(flush=False)
+
 
 if __name__ == "__main__":
     unittest.main()
