@@ -1,4 +1,4 @@
-# rawww
+# Контролька
 
 Python project managed with `uv`.
 
@@ -23,13 +23,13 @@ uv run rawww
 - Use Ctrl/Shift to select multiple cards, then assign a 0-5 rating, color label, comment, or the 5-star quick mark. Selection metadata is stored in the central folder cache and survives restarts.
 - Select a processed photo and press **Find face** to show photos containing a matching face; the × button clears face search. **No faces** is available in the shot-size filter.
 - Hotkeys: `1`-`5` assign a rating, `0` clears it, `M` toggles the quick mark, and `C` opens the comment editor.
-- **Коды замены** are available from the keyboard button beside a comment. They are shared with the signed-in ShotSync account: create sets, edit codes, or import CSV/TSV/XLSX. In every comment field type `{`, `\`, `=` or `@` to open and filter code suggestions; RAWww stores the marker (for example `{name}`) and shows its expanded value directly in the field when it is not being edited.
+- **Коды замены** are available from the keyboard button beside a comment. They are shared with the signed-in ShotSync account: create sets, edit codes, or import CSV/TSV/XLSX. In every comment field type `{`, `\`, `=` or `@` to open and filter code suggestions; Контролька stores the marker (for example `{name}`) and shows its expanded value directly in the field when it is not being edited.
 - Full view: double-click a photo or press `F`. Hold the left mouse button for a temporary 100% inspection and drag to pan; press `Z` to toggle it. The inspector decodes and caches the full JPEG or the embedded RAW preview (falling back to RAW decoding only when needed), focusing the largest recognized face when available (otherwise the cursor position or image centre); arrow keys pan by 5% while it is active.
 - Back to grid: `Esc`, `Enter`, or `G`.
 - Toggle fullscreen: `F11`.
 - Navigate in full view: arrow keys or space.
 - Video files (`.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`) show a captured frame and video badge in the grid. In full view, use Play/Pause and the seek bar; playback uses Qt Multimedia and the system media codecs.
-- Camera WAV notes matching a photo's filename are recognised locally when a folder opens. The microphone badge opens playback and the full-view panel shows the cached transcript; **В комментарий** appends it to the photo comment. Recognition uses bundled Vosk and Qt Multimedia only, with no server or external ffmpeg dependency.
+- Camera WAV notes matching a photo's filename are available for playback when a folder opens. The microphone badge opens the audio player in full view, and hovering the microphone badge in the grid plays the matching WAV without a transcript popup.
 
 JPEG files are decoded with draft downsampling for fast previews. RAW files use the embedded preview when available. Embedded ICC profiles are converted to sRGB before display.
 
@@ -37,7 +37,7 @@ The last opened folder is restored on startup.
 
 The grid keeps its fast 256px JPEG cache. The currently open folder is watched for added, removed, renamed, and changed files and is refreshed after a short debounce. Unchanged cache and AI records are retained. EXIF uses one dedicated process with one bundled stay-open ExifTool subprocess, so metadata never occupies thumbnail or full-preview decode workers. CLIP embeddings and face detection/recognition start only when **Process new photos** is pressed and report progress in the toolbar status panel, Windows taskbar, and as a percentage badge in the macOS Dock. The button queues only new, changed, or previously unfinished photos. A 640px JPEG is prepared and shared by the two independent AI workers entirely in memory, then discarded; SQLite stores only the final embeddings and face data. The CLIP and InsightFace processes are created lazily for each manual run and terminated when its queue finishes, releasing their models from memory. ONNX models and the complete Windows ExifTool distribution live inside the application package, so no system installation or `PATH` configuration is required. Set `RAWWW_DISABLE_AI=1` before starting the app to disable background analysis.
 
-Preview caches are kept centrally in the operating system's application-data directory, under `RAWww/cache/folder-caches`, with one SQLite file per browsed folder. The application writes only small JPEG grid previews, and entries are invalidated by file size and modification time. Existing larger preview variants are left untouched. SQLite is accessed directly on disk in WAL mode, so opening a folder does not duplicate its complete cache in application memory. Full-view images are decoded from their source files on demand and kept only in a bounded RAM LRU; up to ten neighbours in each direction are preloaded in the background.
+Preview caches are kept centrally in the operating system's application-data directory, under `Контролька/cache/folder-caches`, with one SQLite file per browsed folder. The application writes only small JPEG grid previews, and entries are invalidated by file size and modification time. Existing larger preview variants are left untouched. SQLite is accessed directly on disk in WAL mode, so opening a folder does not duplicate its complete cache in application memory. Full-view images are decoded from their source files on demand and kept only in a bounded RAM LRU; up to ten neighbours in each direction are preloaded in the background.
 
 Cache databases use a throughput-oriented SQLite profile: 32 KiB pages for large thumbnail records, WAL, a 128 MiB page cache, memory-mapped reads, and batched writes. Because the database is disposable, synchronous durability is disabled. Recent entries are regenerated after an abnormal shutdown; if a cache database itself is corrupt, it is deleted and rebuilt automatically from the source photos, including embeddings and face data.
 
@@ -51,9 +51,32 @@ Folder opening is staged: the file list is populated in UI batches while the cac
 uv run python -m unittest discover -s tests -v
 ```
 
+## Windows build
+
+Create a diagnostic `onedir` build and print its largest bundled files:
+
+```powershell
+uv run python scripts/build_pyinstaller.py
+```
+
+For an experimental smaller build, additionally compress native binaries with
+UPX:
+
+```powershell
+uv run python scripts/build_pyinstaller.py --upx
+```
+
+The executable is created at `dist/ctrlka/ctrlka.exe`. Keep the complete
+directory when distributing it. Supporting libraries are in `bin`; application
+models, assets, and ExifTool are in `data`. The build script prints the largest files and
+automatically removes unused Qt QML/Quick/PDF/OpenGL DLLs and keeps only the
+Russian Qt base translation after every build; `onedir`
+is also the format used to inspect and safely reduce bundled data before making
+an optional `onefile` release.
+
 ## Processing benchmark
 
-Run per-stage preview, EXIF, CLIP, face-analysis, and SQLite measurements on the last folder opened in RAWww:
+Run per-stage preview, EXIF, CLIP, face-analysis, and SQLite measurements on the last folder opened in Контролька:
 
 ```powershell
 uv run python -m rawww.ai_benchmark --limit 32

@@ -4,39 +4,27 @@ import json
 import math
 import os
 import threading
-import warnings
 from io import BytesIO
 from concurrent.futures import Future, ProcessPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
-from io import StringIO
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageOps
 
 from .cache import FolderCache
+from .face_analysis import recognize
 from .imaging import RAW_EXTENSIONS
+from .runtime_paths import data_path
 from .worker_priority import lower_background_priority
 
-
-warnings.filterwarnings(
-    "ignore",
-    message=r"`estimate` is deprecated.*",
-    category=FutureWarning,
-)
-
-
-MODEL_ROOT = Path(__file__).with_name("models")
+MODEL_ROOT = data_path("models")
 CLIP_MODEL = MODEL_ROOT / "clip" / "patch32_v1.onnx"
-INSIGHTFACE_ROOT = MODEL_ROOT / "insightface"
-INSIGHTFACE_NAME = "buffalo_s_shotsync"
 EMBEDDING_BATCH_SIZE = 16
 FACE_BATCH_SIZE = 4
 FACE_LONG_SIDE = 640
 ANALYSIS_SOURCE_BATCH_SIZE = 8
 
 _clip_session = None
-_face_app = None
 
 
 def _load_rgb(source: str | tuple[str, bytes]) -> Image.Image:
@@ -143,23 +131,7 @@ def extract_embedding_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[
     return [(path, _quantize(embedding)) for path, embedding in zip(good_paths, embeddings)]
 
 
-def _faces():
-    global _face_app
-    if _face_app is None:
-        from insightface.app import FaceAnalysis
-
-        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            _face_app = FaceAnalysis(
-                name=INSIGHTFACE_NAME, root=str(INSIGHTFACE_ROOT),
-                providers=["CPUExecutionProvider"], allowed_modules=["detection", "recognition"],
-            )
-            _face_app.prepare(ctx_id=-1, det_size=(640, 640))
-    return _face_app
-
-
 def recognize_face_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[str, str]]:
-    import cv2
-
     lower_background_priority()
     results = []
     for item in paths:
@@ -168,12 +140,9 @@ def recognize_face_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[str
             with _load_rgb(item) as image:
                 image.thumbnail((FACE_LONG_SIDE, FACE_LONG_SIDE), Image.Resampling.LANCZOS)
                 width, height = image.size
-                faces = _faces().get(cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR))
+                faces = recognize(image)
             records = []
             for face in faces:
-                embedding = getattr(face, "embedding", None)
-                if embedding is None:
-                    continue
                 left, top, right, bottom = (float(value) for value in face.bbox)
                 records.append({
                     "bbox": {"x": max(0.0, left / width), "y": max(0.0, top / height),

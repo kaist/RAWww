@@ -73,9 +73,9 @@ from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
 from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection_root
 from .ai import AiPipeline
-from .audio import AudioTranscriptionPipeline
 from .exif import MetadataPipeline
 from .imaging import RAW_EXTENSIONS, DecodedImage, PixelImage, decode_original_pixels, decode_pixels, decode_thumbnail_pixels, is_supported_image, is_supported_media, is_supported_video, pixel_to_decoded
+from .runtime_paths import data_path
 from .workspace import WorkspaceRequest, WorkspaceState
 
 
@@ -114,6 +114,7 @@ VOLUME_REFRESH_INTERVAL_MS = 2_000
 SHOTSYNC_BASE_URL = "https://shotsync.ru"
 SHOTSYNC_VOLUME_KEY = "__shotsync__"
 ENABLE_EXIF_METADATA = True
+APP_NAME = "Контролька"
 
 FOMANTIC_ICON_CODES = {
     "images": "\uf302", "user": "\uf007", "brush": "\uf1fc", "media": "\uf87c",
@@ -197,7 +198,6 @@ class DecodeBridge(QObject):
     cacheLoaded = Signal(int, object)
     directoryScanned = Signal(object, Path, object)
     metadataUpdated = Signal(object)
-    audioUpdated = Signal(object)
 
 
 class VideoThumbnailer(QObject):
@@ -1500,7 +1500,7 @@ class ViewerMetaBar(QWidget):
     def __init__(self, *, settings: QSettings | None = None) -> None:
         super().__init__()
         self.setObjectName("viewerMeta")
-        self.settings = settings or QSettings("RAWww", "RAWww")
+        self.settings = settings or QSettings(APP_NAME, APP_NAME)
         self._quick_mark = ("rating", 5)
         layout = QHBoxLayout(self)
         # The bar is 30px tall including its top/bottom borders. Leave an
@@ -1853,7 +1853,7 @@ class FullView(QFrame):
         self.face_filter_chip.hide()
 
         # Mirrors the web viewer: a round microphone control opens a compact
-        # transcript/player panel over the lower-left corner of the photo.
+        # Compact audio player panel over the lower-left corner of the photo.
         self.audio_player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(1.0)
@@ -1869,44 +1869,6 @@ class FullView(QFrame):
         self.audio_toggle.setToolTip("Аудиокомментарий")
         self.audio_toggle.clicked.connect(self._toggle_audio)
         self.audio_toggle.hide()
-        self.audio_panel = QFrame(self.media_panel)
-        self.audio_panel.setObjectName("audioPanel")
-        audio_layout = QVBoxLayout(self.audio_panel)
-        audio_layout.setContentsMargins(10, 3, 10, 4)
-        audio_layout.setSpacing(3)
-        audio_header = QWidget()
-        audio_header.setObjectName("audioHeader")
-        audio_header.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        audio_header.setFixedHeight(20)
-        audio_header_layout = QHBoxLayout(audio_header)
-        audio_header_layout.setContentsMargins(0, 0, 0, 0)
-        audio_header_layout.setSpacing(8)
-        audio_title = QLabel("АУДИОКОММЕНТАРИЙ")
-        audio_title.setObjectName("audioPanelTitle")
-        self.audio_time = QLabel("0:00 / 0:00")
-        self.audio_time.setObjectName("audioTime")
-        audio_header_layout.addWidget(audio_title)
-        audio_header_layout.addStretch(1)
-        audio_header_layout.addWidget(self.audio_time)
-        audio_layout.addWidget(audio_header)
-        self.audio_seek = QSlider(Qt.Orientation.Horizontal)
-        self.audio_seek.setObjectName("audioSeek")
-        self.audio_seek.sliderMoved.connect(self.audio_player.setPosition)
-        self.audio_transcript = QLabel()
-        self.audio_transcript.setObjectName("audioTranscript")
-        self.audio_transcript.setWordWrap(True)
-        self.audio_transcript.setMaximumHeight(180)
-        audio_layout.addWidget(self.audio_transcript)
-        self.audio_to_comment = QToolButton()
-        self.audio_to_comment.setObjectName("audioToComment")
-        self.audio_to_comment.setText("В комментарий")
-        self.audio_to_comment.setIcon(_fomantic_icon("send", 12))
-        self.audio_to_comment.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.audio_to_comment.clicked.connect(self._copy_audio_to_comment)
-        audio_layout.addWidget(self.audio_to_comment, 0, Qt.AlignmentFlag.AlignLeft)
-        self.audio_panel.setFixedWidth(360)
-        self.audio_panel.hide()
-
         strip_header = QWidget()
         strip_header.setObjectName("stripHeader")
         strip_header_layout = QHBoxLayout(strip_header)
@@ -1955,7 +1917,7 @@ class FullView(QFrame):
         strip_layout.setSpacing(0)
         strip_layout.addWidget(strip_header)
         strip_layout.addWidget(self.photo_strip)
-        if QSettings("RAWww", "RAWww").value("viewer_strip_collapsed", False, bool):
+        if QSettings(APP_NAME, APP_NAME).value("viewer_strip_collapsed", False, bool):
             self.photo_strip.hide()
             self.strip_toggle.setIcon(_fomantic_icon("chevron-up", 12))
 
@@ -1977,7 +1939,7 @@ class FullView(QFrame):
         self.photo_strip.setVisible(not visible)
         self.strip_toggle.setIcon(_fomantic_icon("chevron-up" if visible else "chevron-down", 12))
         self.strip_toggle.setToolTip("Развернуть ленту превью" if visible else "Свернуть ленту превью")
-        QSettings("RAWww", "RAWww").setValue("viewer_strip_collapsed", visible)
+        QSettings(APP_NAME, APP_NAME).setValue("viewer_strip_collapsed", visible)
         # The host's resize (handled in eventFilter) keeps the controls pinned,
         # but reposition once more after the layout settles as a safety net.
         QTimer.singleShot(0, self._position_video_controls)
@@ -1991,7 +1953,6 @@ class FullView(QFrame):
 
     def stop_audio(self) -> None:
         self.audio_player.stop()
-        self.audio_panel.hide()
 
     def set_quick_mark(self, kind: str, value: object) -> None:
         self.meta_bar.set_quick_mark(kind, value)
@@ -2267,7 +2228,6 @@ class FullView(QFrame):
 
     def _set_audio_detail(self, detail: dict) -> None:
         path = str(detail.get("audio_comment_path") or "")
-        transcript = str(detail.get("audio_comment_transcript") or "").strip()
         available = bool(path and Path(path).is_file())
         self.audio_toggle.setVisible(available)
         if not available:
@@ -2275,16 +2235,12 @@ class FullView(QFrame):
             self.audio_path = ""
             return
         self.audio_path = path
-        self.audio_transcript.setText(transcript or "Речь распознана, но текст пустой.")
-        self.audio_to_comment.setVisible(bool(transcript))
-        self._position_audio_controls()
 
     def _toggle_audio(self) -> None:
         if not self.audio_path:
             return
         if self.audio_player.source().toLocalFile() != self.audio_path:
             self.audio_player.setSource(QUrl.fromLocalFile(self.audio_path))
-        self.audio_panel.setVisible(True)
         if self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.audio_player.stop()
             self.audio_player.setPosition(0)
@@ -2292,18 +2248,13 @@ class FullView(QFrame):
         else:
             self.audio_player.setPosition(0)
             self.audio_player.play()
-        self._position_audio_controls()
 
     def _audio_position_changed(self, position: int) -> None:
-        if not self.audio_seek.isSliderDown():
-            self.audio_seek.setValue(position)
-        self._update_audio_time(position, self.audio_player.duration())
         duration = self.audio_player.duration()
         self.audio_toggle.set_progress(position / duration if duration > 0 else 0)
 
     def _audio_duration_changed(self, duration: int) -> None:
-        self.audio_seek.setRange(0, max(0, duration))
-        self._update_audio_time(self.audio_player.position(), duration)
+        del duration
 
     def _audio_state_changed(self, state) -> None:
         playing = state == QMediaPlayer.PlaybackState.PlayingState
@@ -2311,34 +2262,9 @@ class FullView(QFrame):
         if not playing and self.audio_player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
             self.audio_toggle.set_progress(1.0)
 
-    def _update_audio_time(self, position: int, duration: int) -> None:
-        def fmt(value: int) -> str:
-            minutes, seconds = divmod(max(0, value // 1000), 60)
-            return f"{minutes}:{seconds:02d}"
-        self.audio_time.setText(f"{fmt(position)} / {fmt(duration)}")
-
-    def _copy_audio_to_comment(self) -> None:
-        transcript = self.audio_transcript.text().strip()
-        if transcript and transcript != "Речь распознана, но текст пустой.":
-            comment = self.full_comment_edit.text().strip()
-            value = transcript if not comment else f"{comment}\n{transcript}"
-            self.full_comment_edit.setText(value)
-            self.commentSubmitted.emit(value)
-
-    def _position_audio_controls(self) -> None:
-        if not self.audio_toggle.isVisible():
-            return
-        self.audio_toggle.move(12, max(12, self.media_panel.height() - 60))
-        self.audio_panel.setFixedWidth(min(360, max(220, self.media_panel.width() - 92)))
-        self.audio_panel.adjustSize()
-        self.audio_panel.move(68, max(12, self.media_panel.height() - self.audio_panel.height() - 12))
-        self.audio_toggle.raise_()
-        self.audio_panel.raise_()
-
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.Resize and obj is self.video_controls.parentWidget():
             self._position_video_controls()
-            self._position_audio_controls()
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -2346,7 +2272,6 @@ class FullView(QFrame):
         self.image_view.update()
         QTimer.singleShot(0, self._position_video_controls)
         QTimer.singleShot(0, self._position_face_filter_chip)
-        QTimer.singleShot(0, self._position_audio_controls)
 
     def _position_face_filter_chip(self) -> None:
         if not self.face_filter_chip.isVisible():
@@ -2756,7 +2681,7 @@ class SettingsDialog(QDialog):
         tabs.setObjectName("settingsTabs")
         tabs.addTab(self._behavior_tab(), "Поведение")
         tabs.addTab(self._placeholder_tab("Интерфейс", "Параметры внешнего вида появятся здесь."), "Интерфейс")
-        tabs.addTab(self._placeholder_tab("О приложении", "RAWww — рабочее пространство для просмотра и отбора материалов."), "О приложении")
+        tabs.addTab(self._placeholder_tab("О приложении", "Контролька — рабочее пространство для просмотра и отбора материалов."), "О приложении")
         layout.addWidget(tabs, 1)
 
         buttons = QHBoxLayout()
@@ -2780,7 +2705,7 @@ class SettingsDialog(QDialog):
         heading = QLabel("Рабочее пространство")
         heading.setObjectName("settingsSectionTitle")
         layout.addWidget(heading)
-        hint = QLabel("Выберите, что RAWww будет восстанавливать при следующем запуске.")
+        hint = QLabel("Выберите, что Контролька будет восстанавливать при следующем запуске.")
         hint.setObjectName("settingsHint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -3511,7 +3436,7 @@ class Workspace(QMainWindow):
 
     def __init__(self, initial_directory: Path | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("RAWww")
+        self.setWindowTitle(APP_NAME)
         self.resize(1440, 920)
         self.closing = False
         self._taskbar_progress = WindowsTaskbarProgress()
@@ -3531,7 +3456,6 @@ class Workspace(QMainWindow):
         self.bridge.cacheLoaded.connect(self._on_cache_loaded)
         self.bridge.directoryScanned.connect(self._on_directory_scanned)
         self.bridge.metadataUpdated.connect(self._on_metadata_updated)
-        self.bridge.audioUpdated.connect(self._on_audio_updated)
         self.video_thumbnailer = VideoThumbnailer(self)
         self.video_thumbnailer.previewReady.connect(self._on_video_preview)
         self.pending: dict[tuple[Path, int], Future] = {}
@@ -3564,7 +3488,7 @@ class Workspace(QMainWindow):
         self.expanded_series: set[Path] = set()
         self.photo_details: dict[str, dict] = {}
         self.image_embeddings: dict[str, bytes] = {}
-        self.settings = QSettings("RAWww", "RAWww")
+        self.settings = QSettings(APP_NAME, APP_NAME)
 
         # ShotSync cloud integration. The key is remembered between launches
         # and validated lazily the first time the ShotSync disk is opened.
@@ -3649,7 +3573,6 @@ class Workspace(QMainWindow):
         self._pending_folder_grid_context: tuple[list[str], int] | None = None
         self.folder_cache: FolderCache | None = None
         self.ai_pipeline = AiPipeline()
-        self.audio_pipeline = AudioTranscriptionPipeline()
         self.metadata_pipeline = MetadataPipeline()
         self.ai_progress_total = 0
         self.preview_progress_total = 0
@@ -3770,7 +3693,6 @@ class Workspace(QMainWindow):
         self.cache_flush_executor.shutdown(wait=False, cancel_futures=False)
         self.metadata_pipeline.shutdown()
         self.ai_pipeline.shutdown()
-        self.audio_pipeline.shutdown()
         super().closeEvent(event)
 
     def set_workspace_active(self, active: bool) -> None:
@@ -3903,20 +3825,6 @@ class Workspace(QMainWindow):
         self.grid_audio_output = QAudioOutput(self)
         self.grid_audio_player.setAudioOutput(self.grid_audio_output)
         self.grid_audio_path = ""
-        self.grid_audio_popup = QFrame(self.grid.viewport())
-        self.grid_audio_popup.setObjectName("gridAudioPopup")
-        popup_layout = QVBoxLayout(self.grid_audio_popup)
-        popup_layout.setContentsMargins(9, 3, 9, 4)
-        popup_layout.setSpacing(3)
-        popup_title = QLabel("АУДИОКОММЕНТАРИЙ")
-        popup_title.setObjectName("gridAudioPopupTitle")
-        popup_layout.addWidget(popup_title)
-        self.grid_audio_transcript = QLabel()
-        self.grid_audio_transcript.setObjectName("gridAudioTranscript")
-        self.grid_audio_transcript.setWordWrap(True)
-        popup_layout.addWidget(self.grid_audio_transcript)
-        self.grid_audio_popup.hide()
-
         splitter = QSplitter()
         sidebar = QWidget()
         sidebar_layout = QVBoxLayout(sidebar)
@@ -4641,7 +4549,7 @@ class Workspace(QMainWindow):
     # ----- ShotSync cloud disk ------------------------------------------
     def _shotsync_button_icon(self) -> QIcon:
         """Load the ShotSync logo bundled with the app assets."""
-        logo_path = Path(__file__).parent / "assets" / "shotsync.png"
+        logo_path = data_path("assets") / "shotsync.png"
         if logo_path.exists():
             px = QPixmap(str(logo_path)).scaled(
                 20, 20,
@@ -6225,24 +6133,6 @@ class Workspace(QMainWindow):
             if self.stack.currentWidget() is self.grid_page and hasattr(self, "meta_bar"):
                 self.meta_bar.set_metadata(detail)
 
-    def _on_audio_updated(self, results: object) -> None:
-        """Expose a newly localised transcript without reloading the folder."""
-        if self.closing or not self.cache_ready or not isinstance(results, list):
-            return
-        for value in results:
-            if not isinstance(value, tuple) or len(value) != 3:
-                continue
-            path_text, audio_name, transcript = value
-            path = Path(path_text)
-            detail = self.photo_details.setdefault(path.name, {})
-            detail.update(audio_comment_path=str(self.current_dir / audio_name), audio_comment_transcript=transcript)
-            item = self.items_by_path.get(path)
-            if item is not None:
-                item.setData(DETAIL_ROLE, detail)
-                self.grid.update(self.grid.visualItemRect(item))
-            if path == self.current_path and self.stack.currentWidget() is self.full_view:
-                self.full_view.set_metadata(detail, (path,))
-
     @staticmethod
     def _camera_filter_key(detail: dict) -> str | None:
         camera = detail.get("camera") or {}
@@ -6449,12 +6339,6 @@ class Workspace(QMainWindow):
                 [path for path in self.view_paths if is_supported_image(path)],
                 self.folder_cache,
                 self.bridge.metadataUpdated.emit,
-            )
-        if self.folder_cache is not None:
-            self.audio_pipeline.scan(
-                [path for path in self.view_paths if is_supported_image(path)],
-                self.folder_cache,
-                self.bridge.audioUpdated.emit,
             )
         self.thumb_index = 0
         self._schedule_visible_thumb_priority()
@@ -7253,26 +7137,11 @@ class Workspace(QMainWindow):
         path = value if isinstance(value, Path) else None
         if path is None:
             self.grid_audio_player.stop()
-            self.grid_audio_popup.hide()
             return
         detail = self.photo_details.get(path.name, {})
         audio_path = str(detail.get("audio_comment_path") or "")
         if not audio_path or not Path(audio_path).is_file():
             return
-        self.grid_audio_transcript.setText(
-            str(detail.get("audio_comment_transcript") or "").strip() or "Речь распознана, но текст пустой."
-        )
-        item = self.items_by_path.get(path)
-        if item is not None:
-            card = self.grid.visualItemRect(item)
-            available_width = max(180, self.grid.viewport().width() - card.left() - 42)
-            self.grid_audio_popup.setFixedWidth(min(360, available_width))
-            self.grid_audio_popup.adjustSize()
-            x = min(self.grid.viewport().width() - self.grid_audio_popup.width() - 6, card.left() + 31)
-            y = max(6, card.bottom() - self.grid_audio_popup.height() - 8)
-            self.grid_audio_popup.move(max(6, x), y)
-        self.grid_audio_popup.show()
-        self.grid_audio_popup.raise_()
         if self.grid_audio_path != audio_path:
             self.grid_audio_path = audio_path
             self.grid_audio_player.setSource(QUrl.fromLocalFile(audio_path))
@@ -7751,8 +7620,9 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.settings = QSettings("RAWww", "RAWww")
-        self.setWindowTitle("RAWww")
+        self.settings = QSettings(APP_NAME, APP_NAME)
+        self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(_application_icon())
         self.resize(1440, 920)
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         root = QWidget()
@@ -7767,8 +7637,8 @@ class MainWindow(QMainWindow):
         title_layout.setSpacing(3)
         app_icon = QLabel()
         app_icon.setObjectName("appIcon")
-        app_icon.setToolTip("RAWww")
-        app_icon.setPixmap(_chrome_icon("app").pixmap(16, 16))
+        app_icon.setToolTip(APP_NAME)
+        app_icon.setPixmap(_title_bar_icon().pixmap(16, 16))
         title_layout.addWidget(app_icon)
         self.tabs = ChromeTabBar()
         self.tabs.setObjectName("workspaceTabs")
@@ -9102,22 +8972,6 @@ def apply_theme(app: QApplication) -> None:
             border: 1px solid #454545;
             border-radius: 12px;
         }
-        QWidget#audioHeader, QLabel#audioPanelTitle, QLabel#audioTime { background: transparent; }
-        QLabel#audioPanelTitle { color: #eef2f4; font-size: 10px; font-weight: 700; padding: 0; margin: 0; }
-        QLabel#audioTime { color: #cfd6dc; font-size: 10px; padding: 0; margin: -2px 0; }
-        QLabel#audioTranscript { background: rgba(255,255,255,0.08); color: #d9e1e6; font-size: 11px; padding: 14px 10px; border-radius: 6px; }
-        QSlider#audioSeek::groove:horizontal { height: 4px; background: #111; border-radius: 2px; }
-        QSlider#audioSeek::handle:horizontal { width: 10px; margin: -4px 0; background: #ddd; border-radius: 5px; }
-        QToolButton#audioToComment { background: #3f6db5; color: #ffffff; padding: 5px 10px; border: 1px solid #76a0df; border-radius: 6px; font-weight: 600; }
-        QToolButton#audioToComment:hover { background: #5284ce; border-color: #a8c6f2; }
-        QFrame#gridAudioPopup {
-            background: #252a30;
-            border: 1px solid #808a95;
-            border-radius: 9px;
-        }
-        QLabel#gridAudioPopupTitle { background: transparent; }
-        QLabel#gridAudioPopupTitle { color: #f3f5f7; font-size: 9px; font-weight: 700; padding: 0; margin: 0; }
-        QLabel#gridAudioTranscript { background: rgba(255,255,255,0.08); color: #eef2f5; font-size: 11px; padding: 14px 10px; border-radius: 6px; }
         QLabel#videoTime { min-width: 82px; background: transparent; color: #d5d5d5; font-size: 11px; font-weight: 600; }
         QSlider#videoSeek { background: transparent; }
         QSlider#videoSeek::groove:horizontal { height: 4px; background: #1b1b1b; border-radius: 2px; }
@@ -9283,7 +9137,7 @@ def _load_fomantic_icons() -> None:
     global FOMANTIC_ICON_FAMILY
     if FOMANTIC_ICON_FAMILY:
         return
-    asset = Path(__file__).with_name("assets") / "fomantic-icons.ttf"
+    asset = data_path("assets") / "fomantic-icons.ttf"
     font_id = QFontDatabase.addApplicationFont(str(asset))
     if font_id >= 0:
         families = QFontDatabase.applicationFontFamilies(font_id)
@@ -9292,7 +9146,7 @@ def _load_fomantic_icons() -> None:
 
 
 def _load_viewer_fonts() -> None:
-    assets = Path(__file__).with_name("assets")
+    assets = data_path("assets")
     for filename in ("Lato-Regular.ttf", "Lato-Bold.ttf"):
         QFontDatabase.addApplicationFont(str(assets / filename))
     _load_fomantic_icons()
@@ -9367,6 +9221,26 @@ def _chrome_icon(kind: str) -> QIcon:
             painter.drawLine(*start, *end)
     painter.end()
     return QIcon(pixmap)
+
+
+def _application_icon() -> QIcon:
+    """Load the branded icon used by Windows and the custom title bar."""
+    return QIcon(str(data_path("assets") / "ctrlka-icon.ico"))
+
+
+def _title_bar_icon() -> QIcon:
+    """Load the transparent mark for the custom title bar."""
+    return QIcon(str(data_path("assets") / "ctrlka-mark.png"))
+
+
+def _set_windows_app_user_model_id() -> None:
+    """Give source runs the same Windows taskbar identity as the packaged app."""
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ru.shotsync.ctrlka")
+    except (AttributeError, OSError):
+        pass
 
 
 def _sidebar_tool_icon(kind: str) -> QIcon:
@@ -9557,7 +9431,10 @@ def main() -> None:
     import multiprocessing
 
     multiprocessing.freeze_support()
+    _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setWindowIcon(_application_icon())
     qt_ru = QTranslator(app)
     if qt_ru.load("qtbase_ru", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
         app.installTranslator(qt_ru)

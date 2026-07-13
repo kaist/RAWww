@@ -14,7 +14,7 @@ from PySide6.QtGui import QImage
 from .imaging import DecodedImage, PixelImage, decode_pixels, pixel_to_decoded
 
 
-CACHE_APP_DIRECTORY = "RAWww"
+CACHE_APP_DIRECTORY = "Контролька"
 CACHE_DIRECTORY = "folder-caches"
 DISK_JPEG_QUALITY = 88
 SQLITE_PAGE_SIZE = 32 * 1024
@@ -51,14 +51,6 @@ CREATE TABLE IF NOT EXISTS photo_selection (
     color_label TEXT NOT NULL DEFAULT '',
     comment TEXT NOT NULL DEFAULT '',
     updated_ns INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS audio_transcripts (
-    name TEXT PRIMARY KEY,
-    audio_name TEXT NOT NULL,
-    file_size INTEGER NOT NULL,
-    mtime_ns INTEGER NOT NULL,
-    transcript TEXT NOT NULL,
-    processed_ns INTEGER NOT NULL
 );
 -- ShotSync "selection" session state (feature 2). A single row marks this
 -- folder as a synced copy of a server shooting.
@@ -235,43 +227,17 @@ class FolderCache:
     def store_photo_metadata(self, results: list[tuple[str, str]]) -> None:
         self._store_ai_results("photo_metadata", "metadata_json", results)
 
-    def audio_transcript_is_current(self, path: Path, audio_path: Path) -> bool:
-        stamp = _stamp(audio_path)
-        with self._lock:
-            row = self._db_or_raise().execute(
-                "SELECT 1 FROM audio_transcripts WHERE name=? AND audio_name=? AND file_size=? AND mtime_ns=?",
-                (path.name, audio_path.name, stamp.size, stamp.mtime_ns),
-            ).fetchone()
-        return row is not None
-
-    def store_audio_transcripts(self, results: list[tuple[str, str, str]]) -> None:
-        rows = []
-        for name, audio_name, transcript in results:
-            try:
-                stamp = _stamp(self.folder / audio_name)
-            except OSError:
-                continue
-            rows.append((name, audio_name, stamp.size, stamp.mtime_ns, transcript, time.time_ns()))
-        with self._lock:
-            self._db_or_raise().executemany(
-                "INSERT OR REPLACE INTO audio_transcripts (name, audio_name, file_size, mtime_ns, transcript, processed_ns) VALUES (?, ?, ?, ?, ?, ?)",
-                rows,
-            )
-            self._db_or_raise().commit()
-
     def load_audio_details(self) -> dict[str, dict]:
         details = {}
-        with self._lock:
-            rows = self._db_or_raise().execute(
-                "SELECT name, audio_name, file_size, mtime_ns, transcript FROM audio_transcripts"
-            ).fetchall()
-        for name, audio_name, size, mtime_ns, transcript in rows:
-            try:
-                stamp = _stamp(self.folder / audio_name)
-            except OSError:
-                continue
-            if stamp.size == size and stamp.mtime_ns == mtime_ns:
-                details[name] = {"audio_comment_path": str(self.folder / audio_name), "audio_comment_transcript": transcript}
+        wavs = {
+            path.stem.casefold(): path
+            for path in self.folder.iterdir()
+            if path.is_file() and path.suffix.casefold() == ".wav"
+        }
+        for name in self.live_names:
+            audio = wavs.get(Path(name).stem.casefold())
+            if audio is not None:
+                details[name] = {"audio_comment_path": str(audio)}
         return details
 
     def load_photo_details(self, *, include_metadata: bool = True) -> dict[str, dict]:
@@ -336,7 +302,7 @@ class FolderCache:
         }
         tables = (
             "previews", "image_embeddings", "face_analysis", "photo_metadata",
-            "photo_selection", "audio_transcripts",
+            "photo_selection",
         )
         with self._lock:
             db = self._db_or_raise()
@@ -518,6 +484,9 @@ class FolderCache:
         try:
             _configure_database(db)
             db.executescript(SCHEMA)
+            # Transcription was removed; discard its obsolete derived table
+            # from caches created by older Контролька versions.
+            db.execute("DROP TABLE IF EXISTS audio_transcripts")
             self._remove_deleted_entries(db)
             db.commit()
             return db
@@ -534,7 +503,6 @@ class FolderCache:
             db.execute("DELETE FROM face_analysis WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = face_analysis.name)")
             db.execute("DELETE FROM photo_metadata WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_metadata.name)")
             db.execute("DELETE FROM photo_selection WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_selection.name)")
-            db.execute("DELETE FROM audio_transcripts WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = audio_transcripts.name)")
         finally:
             db.execute("DROP TABLE live_names")
 

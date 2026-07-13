@@ -38,7 +38,7 @@ def _decode_visible(paths: list[Path], *, with_ai: bool) -> tuple[float, list[fl
 
 
 def main() -> None:
-    folder = Path(str(QSettings("RAWww", "RAWww").value("last_directory", Path.cwd())))
+    folder = Path(str(QSettings("Контролька", "Контролька").value("last_directory", Path.cwd())))
     paths = sorted(path for path in folder.iterdir() if path.is_file() and is_supported_image(path))[:32]
     baseline, baseline_items = _decode_visible(paths, with_ai=False)
     loaded, loaded_items = _decode_visible(paths, with_ai=True)

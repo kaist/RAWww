@@ -31,7 +31,7 @@ class StageTimes:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Profile RAWww pipeline stages.")
+    parser = argparse.ArgumentParser(description="Profile Контролька pipeline stages.")
     parser.add_argument("folder", type=Path)
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--size", type=int, default=2560)

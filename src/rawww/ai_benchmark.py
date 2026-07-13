@@ -17,8 +17,8 @@ from .imaging import decode_pixels, is_supported_image
 
 
 def main() -> None:
-    default = Path(str(QSettings("RAWww", "RAWww").value("last_directory", Path.cwd())))
-    parser = argparse.ArgumentParser(description="Benchmark RAWww photo processing stages.")
+    default = Path(str(QSettings("Контролька", "Контролька").value("last_directory", Path.cwd())))
+    parser = argparse.ArgumentParser(description="Benchmark Контролька photo processing stages.")
     parser.add_argument("folder", type=Path, nargs="?", default=default)
     parser.add_argument("--limit", type=int, default=32)
     parser.add_argument("--thumb-size", type=int, default=256)

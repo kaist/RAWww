@@ -12,7 +12,7 @@ from .imaging import PixelImage, decode_pixels, decode_thumbnail_pixels, is_supp
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark RAWww decode and cache performance.")
+    parser = argparse.ArgumentParser(description="Benchmark Контролька decode and cache performance.")
     parser.add_argument("folder", type=Path)
     parser.add_argument("--limit", type=int, default=30)
     parser.add_argument("--full-limit", type=int, default=8)

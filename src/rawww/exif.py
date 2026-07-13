@@ -9,6 +9,7 @@ from pathlib import Path
 from concurrent.futures import Future, ProcessPoolExecutor
 
 from .cache import FolderCache
+from .runtime_paths import data_path
 
 from .worker_priority import lower_background_priority
 
@@ -19,7 +20,7 @@ EXIFTOOL_TAGS = [
     "-ShutterSpeedValue", "-ISO", "-FNumber", "-ApertureValue", "-FocalLength",
     "-Model", "-SerialNumber", "-InternalSerialNumber",
 ]
-BUNDLED_EXIFTOOL = Path(__file__).with_name("tools") / "exiftool.exe"
+BUNDLED_EXIFTOOL = data_path("tools") / "exiftool.exe"
 METADATA_BATCH_SIZE = 32
 
 

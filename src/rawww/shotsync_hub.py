@@ -38,7 +38,7 @@ class ShotSyncHub(QObject):
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._settings = QSettings("RAWww", "RAWww")
+        self._settings = QSettings("Контролька", "Контролька")
         self.socket = ShotSyncSocket(base_url, self)
         self.receiver = ShotSyncReceiver(base_url, self)
         self.downloader = SelectionDownloader(base_url, self)
