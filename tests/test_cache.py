@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import unittest
 from contextlib import closing
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic, sleep
 from unittest.mock import patch
 
 from PIL import Image
@@ -19,15 +21,50 @@ from rawww.ai import AiPipeline, prepare_analysis_batch
 class CacheTests(unittest.TestCase):
     def test_ai_model_workers_are_lazy_and_releasable(self) -> None:
         pipeline = AiPipeline()
+        self.assertIsNone(pipeline.source_workers)
         self.assertIsNone(pipeline.embedding_workers)
         self.assertIsNone(pipeline.face_workers)
         pipeline._ensure_analysis_workers()
+        self.assertIsNotNone(pipeline.source_workers)
         self.assertIsNotNone(pipeline.embedding_workers)
         self.assertIsNotNone(pipeline.face_workers)
         self.assertIsNot(pipeline.embedding_workers, pipeline.face_workers)
         pipeline.release_analysis_workers()
+        self.assertIsNone(pipeline.source_workers)
         self.assertIsNone(pipeline.embedding_workers)
         self.assertIsNone(pipeline.face_workers)
+        pipeline.shutdown()
+
+    def test_ai_cache_preparation_runs_outside_the_caller_thread(self) -> None:
+        pipeline = AiPipeline()
+        started = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+        worker_thread_ids = []
+
+        class PreparedCache:
+            def close(self, *, flush: bool) -> None:
+                closed.set()
+
+        def prepare(_job):
+            worker_thread_ids.append(threading.get_ident())
+            started.set()
+            release.wait(2)
+            return PreparedCache(), [], []
+
+        with patch.object(pipeline, "_prepare_job", prepare):
+            caller_thread_id = threading.get_ident()
+            self.assertTrue(pipeline.scan([Path("/photos/sample.jpg")]))
+            self.assertTrue(started.wait(1))
+            self.assertNotEqual(worker_thread_ids, [caller_thread_id])
+            self.assertEqual(pipeline.progress(Path("/photos")), (0, 0, True))
+            release.set()
+            deadline = monotonic() + 2
+            while pipeline.pending_count() and monotonic() < deadline:
+                sleep(0.01)
+
+        self.assertEqual(pipeline.pending_count(), 0)
+        self.assertTrue(closed.wait(1))
         pipeline.shutdown()
 
     def test_analysis_source_is_kept_in_memory_and_limited_to_640px(self) -> None:

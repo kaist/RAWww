@@ -4,8 +4,10 @@ import json
 import math
 import os
 import threading
+from dataclasses import dataclass, field
 from io import BytesIO
-from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +27,18 @@ FACE_LONG_SIDE = 640
 ANALYSIS_SOURCE_BATCH_SIZE = 8
 
 _clip_session = None
+
+
+@dataclass
+class _AiJob:
+    folder: Path
+    paths: tuple[Path, ...]
+    cache_root: Path | None
+    cache: FolderCache | None = None
+    total: int = 0
+    completed: int = 0
+    pending: int = 0
+    remaining_kinds: dict[str, int] = field(default_factory=dict)
 
 
 def _load_rgb(source: str | tuple[str, bytes]) -> Image.Image:
@@ -158,38 +172,94 @@ def recognize_face_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[str
 
 
 class AiPipeline:
-    """Two independent background process queues with persistent ONNX models."""
+    """Folder-independent AI jobs that never use the interactive decode pool."""
 
     def __init__(self) -> None:
+        self.job_workers = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-jobs")
+        self.source_workers: ProcessPoolExecutor | None = None
         self.embedding_workers: ProcessPoolExecutor | None = None
         self.face_workers: ProcessPoolExecutor | None = None
         self.futures: set[Future] = set()
-        self._futures_lock = threading.Lock()
+        self.jobs: dict[Path, _AiJob] = {}
+        self._last_progress: dict[Path, tuple[int, int]] = {}
+        self._completed_folders: set[Path] = set()
+        self._futures_lock = threading.RLock()
         self._shutting_down = False
 
-    def scan(self, paths: list[Path], cache: FolderCache, preview_workers: ProcessPoolExecutor) -> None:
+    def scan(self, paths: list[Path], *, cache_root: Path | None = None) -> bool:
         if os.environ.get("RAWWW_DISABLE_AI") == "1":
-            return
-        embedding_paths = cache.missing_ai_paths(paths, "image_embeddings")
-        face_paths = cache.missing_ai_paths(paths, "face_analysis")
-        embedding_names = {str(path) for path in embedding_paths}
-        face_names = {str(path) for path in face_paths}
-        analysis_paths = list(dict.fromkeys([*embedding_paths, *face_paths]))
-        if not analysis_paths:
-            return
-        self._ensure_analysis_workers()
-        for start in range(0, len(analysis_paths), ANALYSIS_SOURCE_BATCH_SIZE):
-            future = preview_workers.submit(
-                prepare_analysis_batch,
-                [str(path) for path in analysis_paths[start:start + ANALYSIS_SOURCE_BATCH_SIZE]],
-            )
-            self._track(future)
-            future.add_done_callback(
-                lambda done, embeddings=embedding_names, faces=face_names, target=cache:
-                    self._analysis_sources_finished(done, embeddings, faces, target)
-            )
+            return False
+        unique_paths = tuple(dict.fromkeys(paths))
+        if not unique_paths:
+            return False
+        folder = unique_paths[0].parent
+        with self._futures_lock:
+            if self._shutting_down or folder in self.jobs:
+                return False
+            job = _AiJob(folder=folder, paths=unique_paths, cache_root=cache_root)
+            self.jobs[folder] = job
+        future = self.job_workers.submit(self._prepare_job, job)
+        self._track(job, future)
+        future.add_done_callback(lambda done, target=job: self._job_prepared(target, done))
+        return True
 
-    def _submit_batches(self, pool, function, paths, batch_size, store) -> None:
+    @staticmethod
+    def _prepare_job(job: _AiJob) -> tuple[FolderCache, list[Path], list[Path]]:
+        cache = FolderCache(
+            job.folder,
+            {path.name for path in job.paths},
+            load_from_disk=True,
+            cache_root=job.cache_root,
+        )
+        try:
+            embedding_paths = cache.missing_ai_paths(list(job.paths), "image_embeddings")
+            face_paths = cache.missing_ai_paths(list(job.paths), "face_analysis")
+            return cache, embedding_paths, face_paths
+        except Exception:
+            cache.close(flush=False)
+            raise
+
+    def _job_prepared(self, job: _AiJob, future: Future) -> None:
+        try:
+            cache, embedding_paths, face_paths = future.result()
+            embedding_names = {str(path) for path in embedding_paths}
+            face_names = {str(path) for path in face_paths}
+            analysis_paths = list(dict.fromkeys([*embedding_paths, *face_paths]))
+            with self._futures_lock:
+                if self._shutting_down:
+                    cache.close(flush=False)
+                    return
+                job.cache = cache
+                job.total = len(analysis_paths)
+                job.remaining_kinds = {
+                    str(path): int(str(path) in embedding_names) + int(str(path) in face_names)
+                    for path in analysis_paths
+                }
+                self._last_progress[job.folder] = (0, job.total)
+            if analysis_paths:
+                self._ensure_analysis_workers()
+                source_workers = self.source_workers
+                if source_workers is None:
+                    raise RuntimeError("AI source worker did not start")
+                for start in range(0, len(analysis_paths), ANALYSIS_SOURCE_BATCH_SIZE):
+                    batch = analysis_paths[start:start + ANALYSIS_SOURCE_BATCH_SIZE]
+                    source_future = source_workers.submit(
+                        prepare_analysis_batch,
+                        [str(path) for path in batch],
+                    )
+                    self._track(job, source_future)
+                    source_future.add_done_callback(
+                        lambda done, target=job, embeddings=embedding_names, faces=face_names:
+                        self._analysis_sources_finished(target, done, embeddings, faces)
+                    )
+        except Exception:
+            with self._futures_lock:
+                job.total = max(job.total, len(job.paths))
+                self._last_progress[job.folder] = (job.completed, job.total)
+        finally:
+            self._future_finished(job, future)
+
+    def _submit_batches(self, job, pool, function, paths, batch_size, store) -> None:
         for start in range(0, len(paths), batch_size):
             with self._futures_lock:
                 if self._shutting_down:
@@ -199,14 +269,18 @@ class AiPipeline:
                 future = pool.submit(function, [str(path) if isinstance(path, Path) else path for path in batch])
             except RuntimeError:
                 return
-            self._track(future)
-            future.add_done_callback(lambda done, sink=store: self._finished(done, sink))
+            self._track(job, future)
+            future.add_done_callback(
+                lambda done, target=job, sink=store:
+                self._results_finished(target, done, sink)
+            )
 
-    def _track(self, future: Future) -> None:
+    def _track(self, job: _AiJob, future: Future) -> None:
         with self._futures_lock:
             self.futures.add(future)
+            job.pending += 1
 
-    def _analysis_sources_finished(self, future, embedding_names, face_names, cache) -> None:
+    def _analysis_sources_finished(self, job, future, embedding_names, face_names) -> None:
         try:
             with self._futures_lock:
                 if self._shutting_down:
@@ -214,58 +288,125 @@ class AiPipeline:
             if future.cancelled():
                 return
             sources = future.result()
-            self._dispatch_analysis_sources(sources, embedding_names, face_names, cache)
+            self._dispatch_analysis_sources(job, sources, embedding_names, face_names)
         except Exception:
             pass
         finally:
-            # Keep this future visible until its dependent batches are queued.
-            with self._futures_lock:
-                self.futures.discard(future)
+            self._future_finished(job, future)
 
-    def _dispatch_analysis_sources(self, sources, embedding_names, face_names, cache) -> None:
+    def _dispatch_analysis_sources(self, job, sources, embedding_names, face_names) -> None:
         embedding_sources = [source for source in sources if source[0] in embedding_names]
         face_sources = [source for source in sources if source[0] in face_names]
-        if self.embedding_workers is None or self.face_workers is None:
+        if (
+            job.cache is None
+            or self.embedding_workers is None
+            or self.face_workers is None
+        ):
             return
-        self._submit_batches(self.embedding_workers, extract_embedding_batch, embedding_sources,
-                             EMBEDDING_BATCH_SIZE, cache.store_image_embeddings)
-        self._submit_batches(self.face_workers, recognize_face_batch, face_sources,
-                             FACE_BATCH_SIZE, cache.store_face_analysis)
+        self._submit_batches(
+            job,
+            self.embedding_workers,
+            extract_embedding_batch,
+            embedding_sources,
+            EMBEDDING_BATCH_SIZE,
+            job.cache.store_image_embeddings,
+        )
+        self._submit_batches(
+            job,
+            self.face_workers,
+            recognize_face_batch,
+            face_sources,
+            FACE_BATCH_SIZE,
+            job.cache.store_face_analysis,
+        )
 
-    def pending_count(self) -> int:
+    def pending_count(self, folder: Path | None = None) -> int:
         with self._futures_lock:
+            if folder is not None:
+                job = self.jobs.get(folder)
+                return job.pending if job is not None else 0
             return len(self.futures)
 
+    def progress(self, folder: Path) -> tuple[int, int, bool]:
+        with self._futures_lock:
+            job = self.jobs.get(folder)
+            if job is not None:
+                return job.completed, job.total, True
+            completed, total = self._last_progress.get(folder, (0, 0))
+            return completed, total, False
+
+    def take_completed_folders(self) -> set[Path]:
+        with self._futures_lock:
+            completed = set(self._completed_folders)
+            self._completed_folders.clear()
+            return completed
+
     def _ensure_analysis_workers(self) -> None:
+        process_context = get_context("spawn")
+        if self.source_workers is None:
+            self.source_workers = ProcessPoolExecutor(max_workers=1, mp_context=process_context)
         if self.embedding_workers is None:
-            self.embedding_workers = ProcessPoolExecutor(max_workers=1)
+            self.embedding_workers = ProcessPoolExecutor(max_workers=1, mp_context=process_context)
         if self.face_workers is None:
-            self.face_workers = ProcessPoolExecutor(max_workers=1)
+            self.face_workers = ProcessPoolExecutor(max_workers=1, mp_context=process_context)
 
     def release_analysis_workers(self) -> None:
-        """Release loaded ONNX models after a manually requested run."""
+        """Release source decoders and loaded ONNX models after all runs."""
+        source_workers, self.source_workers = self.source_workers, None
         embedding_workers, self.embedding_workers = self.embedding_workers, None
         face_workers, self.face_workers = self.face_workers, None
+        if source_workers is not None:
+            source_workers.shutdown(wait=False, cancel_futures=True)
         if embedding_workers is not None:
             embedding_workers.shutdown(wait=False, cancel_futures=True)
         if face_workers is not None:
             face_workers.shutdown(wait=False, cancel_futures=True)
 
-    def _finished(self, future: Future, store) -> None:
-        with self._futures_lock:
-            self.futures.discard(future)
-        if future.cancelled():
-            return
+    def _results_finished(self, job: _AiJob, future: Future, store) -> None:
         try:
-            store(future.result())
+            if future.cancelled():
+                return
+            results = future.result()
+            store(results)
+            with self._futures_lock:
+                for path, _value in results:
+                    remaining = job.remaining_kinds.get(path, 0)
+                    if remaining <= 0:
+                        continue
+                    remaining -= 1
+                    job.remaining_kinds[path] = remaining
+                    if remaining == 0:
+                        job.completed += 1
+                self._last_progress[job.folder] = (job.completed, job.total)
         except Exception:
             pass
+        finally:
+            self._future_finished(job, future)
+
+    def _future_finished(self, job: _AiJob, future: Future) -> None:
+        cache = None
+        with self._futures_lock:
+            self.futures.discard(future)
+            job.pending = max(0, job.pending - 1)
+            if job.pending or self.jobs.get(job.folder) is not job:
+                return
+            self.jobs.pop(job.folder, None)
+            self._last_progress[job.folder] = (job.completed, job.total)
+            self._completed_folders.add(job.folder)
+            cache, job.cache = job.cache, None
+        if cache is not None:
+            cache.close(flush=True)
 
     def shutdown(self) -> None:
         with self._futures_lock:
             self._shutting_down = True
             futures = tuple(self.futures)
             self.futures.clear()
+            caches = [job.cache for job in self.jobs.values() if job.cache is not None]
+            self.jobs.clear()
         for future in futures:
             future.cancel()
+        for cache in caches:
+            cache.close(flush=False)
+        self.job_workers.shutdown(wait=False, cancel_futures=True)
         self.release_analysis_workers()
