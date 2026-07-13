@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject
+from PySide6.QtCore import QEvent, QObject, QSettings
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
 
-from rawww.app import FullView, MainWindow, Workspace
+from rawww.app import FullView, MainWindow, Workspace, _application_settings
 
 
 class _Settings:
@@ -68,6 +70,25 @@ class AppStateTests(unittest.TestCase):
         view.close()
         view.deleteLater()
         parent.deleteLater()
+
+    def test_portable_settings_use_an_ini_file_in_work_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            work_directory = Path(directory)
+            with (
+                patch("rawww.app.PORTABLE", True),
+                patch("rawww.app.work_path", return_value=work_directory),
+            ):
+                settings = _application_settings()
+                settings.setValue("portable-test", "saved")
+                settings.sync()
+
+            settings_file = work_directory / "settings" / "ctrlka.ini"
+            self.assertTrue(settings_file.is_file())
+            reloaded = QSettings(
+                str(settings_file),
+                QSettings.Format.IniFormat,
+            )
+            self.assertEqual(reloaded.value("portable-test"), "saved")
 
     def test_workspace_is_constructed_as_a_child_widget(self) -> None:
         parent = QStackedWidget()
