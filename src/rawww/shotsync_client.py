@@ -41,6 +41,7 @@ class ShotSyncClient(QObject):
     loginFailed = Signal(str)           # human readable error
     sessionVerified = Signal(dict)      # user payload (from /me)
     sessionInvalid = Signal(str)        # stored key no longer works
+    sessionCheckFailed = Signal(str)    # network error; retain the stored key
     shootingsLoaded = Signal(list)      # list of shooting payloads
     shootingsFailed = Signal(str)
     avatarLoaded = Signal(QImage)       # decoded profile avatar
@@ -269,16 +270,22 @@ class ShotSyncClient(QObject):
         )
 
     def _handle_me(self, reply: QNetworkReply) -> None:
-        reply.deleteLater()
         data = self._parse_json(reply)
+        network_error = reply.error() != QNetworkReply.NetworkError.NoError
+        error = self._error_message(data, reply, "Не удалось проверить сессию ShotSync.")
+        reply.deleteLater()
         user = data.get("user")
         if data.get("ok") and isinstance(user, dict):
             self.sessionVerified.emit(user)
             return
+        if network_error:
+            # A lost connection says nothing about the validity of the saved
+            # key. Keep it, so local selections and queued marks remain usable
+            # and sync can resume after the network returns.
+            self.sessionCheckFailed.emit(error)
+            return
         self._api_key = ""
-        self.sessionInvalid.emit(
-            self._error_message(data, reply, "Сессия истекла, войдите заново.")
-        )
+        self.sessionInvalid.emit(error or "Сессия истекла, войдите заново.")
 
     def _handle_shootings(self, reply: QNetworkReply) -> None:
         reply.deleteLater()

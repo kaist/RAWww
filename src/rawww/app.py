@@ -3114,6 +3114,14 @@ def _shotsync_photo_filename(photo: dict) -> str:
     return Path(raw).name.strip()
 
 
+def _humanize_shotsync_network_error(error: str) -> str:
+    """Avoid exposing Qt's raw resolver and socket errors in the UI."""
+    low = (error or "").lower()
+    if any(part in low for part in ("host", "network", "unreachable", "timeout", "connection", "refused")):
+        return "Нет подключения к интернету."
+    return "Не удалось подключиться к ShotSync."
+
+
 class Workspace(QMainWindow):
     fullViewRequested = Signal(object)
     fullscreenRequested = Signal(object)
@@ -3219,6 +3227,7 @@ class Workspace(QMainWindow):
         self.shotsync_client.loginFailed.connect(self._shotsync_login_failed)
         self.shotsync_client.sessionVerified.connect(self._shotsync_session_verified)
         self.shotsync_client.sessionInvalid.connect(self._shotsync_session_invalid)
+        self.shotsync_client.sessionCheckFailed.connect(self._shotsync_session_check_failed)
         self.shotsync_client.shootingsLoaded.connect(self._shotsync_shootings_loaded)
         self.shotsync_client.shootingsFailed.connect(self._shotsync_shootings_failed)
         self.shotsync_client.avatarLoaded.connect(self._shotsync_avatar_loaded)
@@ -5112,6 +5121,13 @@ class Workspace(QMainWindow):
             self.shotsync_panel.show_login()
         self._refresh_shotsync_shortcuts()
 
+    def _shotsync_session_check_failed(self, error: str) -> None:
+        """Open completed local selections when ShotSync cannot be reached."""
+        self._shotsync_checked = True
+        self.shotsync_panel.show_logged_in({})
+        self._show_local_shotsync_shootings(error)
+        self._refresh_shotsync_shortcuts()
+
     def _sync_code_replacements(self) -> None:
         """Pull the current web sets; mutations are posted immediately by the dialog."""
         if not self.shotsync_client.has_key():
@@ -5207,6 +5223,7 @@ class Workspace(QMainWindow):
 
     def _shotsync_shootings_loaded(self, shootings: list) -> None:
         self._shotsync_shootings = [shooting for shooting in shootings if isinstance(shooting, dict)]
+        self.shotsync_panel.set_offline_ids(set())
         self._reconcile_shotsync_selection_copies(self._shotsync_shootings)
         self._resume_shotsync_selection_copies(self._shotsync_shootings)
         self.shotsync_panel.set_shootings(shootings)
@@ -5214,7 +5231,7 @@ class Workspace(QMainWindow):
         self._refresh_shotsync_local_folders(shootings)
 
     def _shotsync_shootings_failed(self, error: str) -> None:
-        self.shotsync_panel.set_shootings_error(error)
+        self._show_local_shotsync_shootings(error)
 
     def _shotsync_avatar_loaded(self, image) -> None:
         self.shotsync_panel.set_avatar(image)
@@ -5287,6 +5304,47 @@ class Workspace(QMainWindow):
             if folder and Path(folder).is_dir():
                 result[shooting_id] = mode
         return result
+
+    def _local_shotsync_shootings(self) -> list[dict]:
+        """Build ShotSync cards for completed local selection folders offline."""
+        shootings: list[dict] = []
+        for shooting_id, mode in self._shotsync_folder_modes().items():
+            folder = self._local_shotsync_folder(shooting_id)
+            if folder is None:
+                continue
+            title = f"Съёмка {shooting_id}"
+            photo_count = 0
+            try:
+                names = {path.name for path in folder.iterdir() if path.is_file()}
+                cache = FolderCache(folder, live_names=names, load_from_disk=True)
+                session = cache.shotsync_session()
+                if session is not None and session[1]:
+                    title = session[1]
+                photo_count = len(cache.shotsync_photo_names())
+                cache.close(flush=False)
+            except OSError:
+                continue
+            shootings.append(
+                {
+                    "id": shooting_id,
+                    "title": title,
+                    "status": "",
+                    "photo_count": photo_count,
+                    "viewer_url": "",
+                    "local_mode": mode,
+                }
+            )
+        return shootings
+
+    def _show_local_shotsync_shootings(self, error: str) -> None:
+        """Keep the ShotSync panel useful without a server connection."""
+        shootings = self._local_shotsync_shootings()
+        self._shotsync_shootings = shootings
+        self.shotsync_panel.set_offline_ids({int(shooting["id"]) for shooting in shootings})
+        self.shotsync_panel.set_shootings(shootings)
+        self._refresh_shotsync_local_folders(shootings)
+        suffix = " Открыты сохранённые съёмки; изменения синхронизируются при подключении."
+        self.shotsync_panel.set_shootings_error(_humanize_shotsync_network_error(error) + suffix)
 
     def _local_shotsync_folder(self, shooting_id: int, title: str = "") -> Path | None:
         folder = self.shotsync.folder_for(shooting_id)

@@ -79,6 +79,7 @@ class ShotSyncPanel(QWidget):
         self._shootings: list[dict] = []
         self._receiving_ids: set[int] = set()
         self._local_ids: set[int] = set()
+        self._offline_ids: set[int] = set()
         self._shooting_modes: dict[int, str] = {}
         self._current_shooting_id: int | None = None
         self._refresh_angle = 0
@@ -340,6 +341,11 @@ class ShotSyncPanel(QWidget):
         self._local_ids = {int(i) for i in ids}
         self._render_shootings()
 
+    def set_offline_ids(self, ids) -> None:
+        """Mark cards that are being shown from the local cache only."""
+        self._offline_ids = {int(i) for i in ids}
+        self._render_shootings()
+
     def set_shooting_modes(self, modes: dict[int, str]) -> None:
         """Set how each local ShotSync folder was created."""
         self._shooting_modes = {int(shooting_id): str(mode) for shooting_id, mode in modes.items()}
@@ -363,9 +369,12 @@ class ShotSyncPanel(QWidget):
             shooting_id = int(shooting.get("id") or 0)
             receiving = shooting_id in self._receiving_ids
             local = shooting_id in self._local_ids
+            offline = shooting_id in self._offline_ids
             mode = self._shooting_modes.get(shooting_id, "")
             is_current = shooting_id == self._current_shooting_id
             parts = [status, f"{photo_count} фото"]
+            if offline:
+                parts.append("офлайн")
             if receiving:
                 parts.append("● приём: слежение включено")
             elif mode == "uploaded":
@@ -378,7 +387,7 @@ class ShotSyncPanel(QWidget):
             item.setToolTip("Открыть папку" if (receiving or local) else title)
             item.setSizeHint(QSize(0, self._card_height(shooting, receiving, mode)))
             self.shooting_list.addItem(item)
-            self.shooting_list.setItemWidget(item, self._shooting_card(shooting, receiving, local, mode, is_current))
+            self.shooting_list.setItemWidget(item, self._shooting_card(shooting, receiving, local, offline, mode, is_current))
 
     @staticmethod
     def _card_height(shooting: dict, receiving: bool, mode: str) -> int:
@@ -393,7 +402,7 @@ class ShotSyncPanel(QWidget):
         action_count = 1 if (receiving or mode == "selection_copy") else 2
         return min(210, max(132, 44 + title_lines * 19 + detail_lines * 16 + action_count * 27))
 
-    def _shooting_card(self, shooting: dict, receiving: bool, local: bool, mode: str, is_current: bool) -> QWidget:
+    def _shooting_card(self, shooting: dict, receiving: bool, local: bool, offline: bool, mode: str, is_current: bool) -> QWidget:
         """Build a compact card whose actions describe the current setup."""
         card = QWidget()
         card.setObjectName("shotsyncShootingCard")
@@ -433,6 +442,8 @@ class ShotSyncPanel(QWidget):
             "uploaded": "Ваша папка отправлена на отбор. Метки можно получить с сервера.",
             "selection_copy": "Локальная копия съёмки, взятая с сервера для отбора.",
         }.get(mode, "Съёмка хранится на сервере.")
+        if offline:
+            state = "Офлайн · работаем с локальной копией; изменения отправятся при подключении."
         details = QLabel(f"{photo_count} фото · {state}")
         details.setObjectName("shotsyncHint")
         details.setWordWrap(True)
