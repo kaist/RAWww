@@ -141,10 +141,10 @@ All integrations should invoke the executable with a quoted path argument:
   types; add a folder action with `Exec=ctrlka %d` where the desktop supports
   it.
 
-For Windows, Explorer can only send new activation requests to an already
-running instance after a later single-instance/IPC layer is added. Until then,
-each Explorer action starts a separate application window, which is safe and
-still opens the requested target.
+The application uses a single-instance/IPC handoff for Explorer activations:
+if it is already running, a new context-menu request is sent to that process,
+the target is opened in a new workspace tab, and the existing window is
+activated instead of starting another process.
 
 In the packaged Windows application, use **Settings → Behaviour → Explorer
 integration** to add or remove these commands. The app registers its own

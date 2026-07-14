@@ -77,6 +77,7 @@ from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection
 from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, is_supported_image, is_supported_media, is_supported_video
 from .launch import target_from_argv
 from .runtime_paths import PORTABLE, data_path, work_path
+from .single_instance import SingleInstance
 from .subprocess_utils import no_window_kwargs
 from . import theme
 from .theme import (
@@ -8698,6 +8699,25 @@ class MainWindow(QMainWindow):
             # frame is therefore Full View rather than a briefly visible grid.
             workspace.open_full(target)
 
+    def open_external_target(self, target: Path | None) -> None:
+        """Handle a path sent by a later file-manager activation."""
+        if target is None or not target.exists():
+            self.activateWindow()
+            self.raise_()
+            return
+        if target.is_dir():
+            # An external activation represents a new navigation request, so
+            # it gets its own tab even if that folder is already open.
+            self._add_workspace(target)
+        elif target.is_file():
+            self._add_workspace(target.parent, defer_initial_scan=True)
+            workspace = self.workspace_stack.currentWidget()
+            if isinstance(workspace, Workspace):
+                workspace.open_full(target)
+        self.showNormal() if self.isMinimized() else None
+        self.activateWindow()
+        self.raise_()
+
     def _add_workspace(
         self,
         directory: Path | None = None,
@@ -9254,6 +9274,10 @@ def main() -> None:
     multiprocessing.freeze_support()
     _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
+    single_instance = SingleInstance(app)
+    target = target_from_argv()
+    if single_instance.start(target):
+        return
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(_application_icon())
     startup_trace = _StartupWindowTrace(app) if os.environ.get("RAWWW_TRACE_STARTUP") else None
@@ -9264,7 +9288,8 @@ def main() -> None:
     if qt_ru.load("qtbase_ru", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
         app.installTranslator(qt_ru)
     apply_theme(app)
-    window = MainWindow(target_from_argv())
+    window = MainWindow(target)
+    single_instance.target_received.connect(window.open_external_target)
     if startup_trace is not None:
         startup_trace.snapshot("main-window-constructed")
     if getattr(window, "_fast_full_view", False):
