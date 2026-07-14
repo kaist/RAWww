@@ -17,6 +17,8 @@ Two pieces cooperate here:
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import uuid
 from pathlib import Path
@@ -87,6 +89,7 @@ class SelectionDownloader(QObject):
             "done": 0,
             "mapping": [],   # (name, photo_id, shooting_id)
             "selection": [], # (name, rating, color_label, comment, original_datetime)
+            "ai": [],        # (name, image_embedding_q8 base64, faces list)
             "queue": [],
             "inflight": 0,
             "retrying": 0,
@@ -152,6 +155,14 @@ class SelectionDownloader(QObject):
             photo.get("color_label") or "",
             photo.get("comment") or "",
             photo.get("original_datetime") or None,
+        ))
+        # Keep the server's AI results so the local cache reuses them instead
+        # of recomputing embeddings/faces after the previews are downloaded.
+        faces = photo.get("faces")
+        run["ai"].append((
+            name,
+            str(photo.get("image_embedding_q8") or ""),
+            faces if isinstance(faces, list) else [],
         ))
         destination = run["folder"] / name
         if destination.is_file() and destination.stat().st_size > 0:
@@ -229,6 +240,7 @@ class SelectionDownloader(QObject):
             ]
             if metadata:
                 cache.store_photo_metadata(metadata)
+            self._store_server_ai(cache, folder, run["ai"])
             cache.close(flush=True)
         except Exception as exc:  # noqa: BLE001 - surface a readable message
             self.failed.emit(shooting_id, f"Не удалось сохранить кэш: {exc}")
@@ -238,6 +250,34 @@ class SelectionDownloader(QObject):
     def _fail(self, shooting_id: int, message: str) -> None:
         self._runs.pop(shooting_id, None)
         self.failed.emit(shooting_id, message)
+
+    @staticmethod
+    def _store_server_ai(cache: "FolderCache", folder: Path, entries: list[tuple]) -> None:
+        """Seed the folder cache with the AI results the server sent.
+
+        Embeddings are stored whenever present. Faces are stored when the
+        server clearly ran AI for the photo (it returned an embedding or a
+        non-empty face list); an empty list is then kept as an authoritative
+        "no faces", so local detection is not re-run. Rows are keyed by the
+        downloaded file so their stamp matches ``missing_ai_paths`` later.
+        """
+        embeddings: list[tuple[str, bytes]] = []
+        faces_records: list[tuple[str, str]] = []
+        for name, embedding_b64, faces in entries:
+            path_str = str(folder / name)
+            if embedding_b64:
+                try:
+                    embedding_bytes = base64.b64decode(embedding_b64, validate=True)
+                except (ValueError, binascii.Error):
+                    embedding_bytes = b""
+                if embedding_bytes:
+                    embeddings.append((path_str, embedding_bytes))
+            if embedding_b64 or faces:
+                faces_records.append((path_str, json.dumps(faces, separators=(",", ":"))))
+        if embeddings:
+            cache.store_image_embeddings(embeddings)
+        if faces_records:
+            cache.store_face_analysis(faces_records)
 
     # ----- helpers -------------------------------------------------------
     def _request(self, url: str) -> QNetworkRequest:

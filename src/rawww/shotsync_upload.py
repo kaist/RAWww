@@ -16,7 +16,9 @@ previews itself via the same imaging path used for thumbnails.
 
 from __future__ import annotations
 
+import base64
 import json
+import threading
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -77,18 +79,70 @@ def exif_original_datetime(path: Path) -> str | None:
     return str(value) if value else None
 
 
+class _AiAttacher:
+    """Resolve the CLIP embedding and faces to send with an AI shooting upload.
+
+    Values already computed by the app's AI pipeline are read straight from the
+    folder cache; anything missing is computed here (reusing the encoded preview
+    so RAW sources are not decoded twice) and written back to the cache so it is
+    reused next time. Model calls are serialized through ``lock`` because the
+    encode pool runs several tasks at once.
+    """
+
+    def __init__(self, cache: "FolderCache", lock: threading.Lock, embed_fn=None, faces_fn=None) -> None:
+        self._cache = cache
+        self._lock = lock
+        self._embed_fn = embed_fn
+        self._faces_fn = faces_fn
+        self._embeddings = cache.load_image_embeddings()
+        self._faces = cache.load_face_analysis()
+
+    def _functions(self):
+        if self._embed_fn is None or self._faces_fn is None:
+            from .ai import extract_embedding_batch, recognize_face_batch
+
+            self._embed_fn = self._embed_fn or extract_embedding_batch
+            self._faces_fn = self._faces_fn or recognize_face_batch
+        return self._embed_fn, self._faces_fn
+
+    def resolve(self, path: Path, preview_bytes: bytes) -> tuple[bytes, str | None]:
+        """Return ``(embedding_q8, faces_json)``; ``faces_json`` is ``None`` if unknown."""
+        name = path.name
+        embedding = self._embeddings.get(name) or b""
+        faces_json = self._faces.get(name)
+        if embedding and faces_json is not None:
+            return embedding, faces_json
+
+        source = (str(path), preview_bytes)
+        embed_fn, faces_fn = self._functions()
+        with self._lock:
+            if not embedding:
+                emb = dict(embed_fn([source])).get(str(path))
+                if emb:
+                    embedding = bytes(emb)
+                    self._cache.store_image_embeddings([(str(path), embedding)])
+            if faces_json is None:
+                computed = dict(faces_fn([source])).get(str(path))
+                if computed is not None:
+                    faces_json = computed
+                    self._cache.store_face_analysis([(str(path), faces_json)])
+        return embedding, faces_json
+
+
 class _EncodeSignals(QObject):
-    done = Signal(object, bytes, object)  # path, jpeg bytes, EXIF original_datetime
+    # path, jpeg bytes, EXIF original_datetime, embedding q8 bytes, faces JSON
+    done = Signal(object, bytes, object, bytes, str)
     failed = Signal(object, str)     # path, error
 
 
 class _EncodeTask(QRunnable):
     """Encode one preview off the UI thread."""
 
-    def __init__(self, path: Path, original_datetime: str | None) -> None:
+    def __init__(self, path: Path, original_datetime: str | None, attacher: "_AiAttacher | None" = None) -> None:
         super().__init__()
         self.path = path
         self.original_datetime = original_datetime
+        self.attacher = attacher
         self.signals = _EncodeSignals()
 
     def run(self) -> None:  # noqa: D401 - QRunnable entry point
@@ -98,7 +152,15 @@ class _EncodeTask(QRunnable):
             self.signals.failed.emit(self.path, str(exc))
             return
         original_datetime = self.original_datetime or exif_original_datetime(self.path)
-        self.signals.done.emit(self.path, data, original_datetime)
+        embedding = b""
+        faces_json = ""
+        if self.attacher is not None:
+            try:
+                embedding, resolved = self.attacher.resolve(self.path, data)
+                faces_json = resolved if resolved is not None else ""
+            except Exception:  # noqa: BLE001 - AI is best-effort; upload still proceeds
+                embedding, faces_json = b"", ""
+        self.signals.done.emit(self.path, data, original_datetime, embedding, faces_json)
 
 
 class FolderUploader(QObject):
@@ -119,6 +181,9 @@ class FolderUploader(QObject):
         # Encoding is CPU-bound; a couple of workers keeps the UI responsive
         # without starving the rest of the app.
         self._pool.setMaxThreadCount(max(2, (QThreadPool.globalInstance().maxThreadCount() or 4) // 2))
+        # Serializes model inference across the encode workers when an AI
+        # shooting has to compute embeddings/faces that were not cached yet.
+        self._ai_lock = threading.Lock()
         self._reset()
 
     def set_api_key(self, key: str | None) -> None:
@@ -157,10 +222,13 @@ class FolderUploader(QObject):
         self._folder: Path | None = None
         self._title = ""
         self._shooting_id = 0
+        self._ai_faces_series = False
         self._pending: list[Path] = []
-        self._encoded: list[tuple[Path, bytes, str | None]] = []
+        self._encoded: list[tuple[Path, bytes, str | None, bytes, str]] = []
         self._original_datetimes: dict[str, str | None] = {}
         self._uploaded_mapping: list[tuple[str, int, int]] = []
+        self._cache: "FolderCache | None" = None
+        self._attacher: _AiAttacher | None = None
         self._inflight = 0
         self._done = 0
         self._total = 0
@@ -227,18 +295,56 @@ class FolderUploader(QObject):
             self._abort("Не удалось создать съёмку на сервере.")
             return
         self._shooting_id = shooting_id
+        # For AI shootings, prepare the folder cache so each upload can carry
+        # the embedding and faces (from cache, or computed once and cached).
+        if self._ai_faces_series:
+            self._open_ai_cache()
         # Kick off encoding for every image; uploads start as bytes arrive.
         for path in self._pending:
-            task = _EncodeTask(path, self._original_datetimes.get(path.name))
+            task = _EncodeTask(path, self._original_datetimes.get(path.name), self._attacher)
             task.signals.done.connect(self._on_encoded)
             task.signals.failed.connect(self._on_encode_failed)
             self._pool.start(task)
 
+    def _open_ai_cache(self) -> None:
+        if self._folder is None:
+            return
+        try:
+            from .cache import FolderCache
+
+            names = {p.name for p in self._pending}
+            self._cache = FolderCache(self._folder, live_names=names, load_from_disk=True)
+            self._attacher = _AiAttacher(self._cache, self._ai_lock)
+        except Exception:  # noqa: BLE001 - fall back to server-side AI on any cache error
+            self._close_cache(flush=False)
+            self._attacher = None
+
+    def _close_cache(self, *, flush: bool) -> None:
+        cache, self._cache = self._cache, None
+        if cache is not None:
+            try:
+                cache.close(flush=flush)
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _append_field(multipart: QHttpMultiPart, name: str, value: bytes) -> None:
+        part = QHttpPart()
+        part.setHeader(
+            QNetworkRequest.KnownHeaders.ContentDispositionHeader,
+            f'form-data; name="{name}"',
+        )
+        part.setBody(QByteArray(value))
+        multipart.append(part)
+
     # ----- encode -> upload pipeline ------------------------------------
-    def _on_encoded(self, path: Path, data: bytes, original_datetime: str | None) -> None:
+    def _on_encoded(
+        self, path: Path, data: bytes, original_datetime: str | None,
+        embedding: bytes, faces_json: str,
+    ) -> None:
         if self._folder is None or self._failed:
             return
-        self._encoded.append((path, data, original_datetime))
+        self._encoded.append((path, data, original_datetime, bytes(embedding), faces_json))
         self._pump()
 
     def _on_encode_failed(self, path: Path, error: str) -> None:
@@ -248,10 +354,13 @@ class FolderUploader(QObject):
 
     def _pump(self) -> None:
         while self._encoded and self._inflight < MAX_INFLIGHT_UPLOADS:
-            path, data, original_datetime = self._encoded.pop(0)
-            self._upload_one(path, data, original_datetime)
+            path, data, original_datetime, embedding, faces_json = self._encoded.pop(0)
+            self._upload_one(path, data, original_datetime, embedding, faces_json)
 
-    def _upload_one(self, path: Path, data: bytes, original_datetime: str | None) -> None:
+    def _upload_one(
+        self, path: Path, data: bytes, original_datetime: str | None,
+        embedding: bytes = b"", faces_json: str = "",
+    ) -> None:
         multipart = QHttpMultiPart(QHttpMultiPart.ContentType.FormDataType)
         part = QHttpPart()
         part.setHeader(
@@ -272,6 +381,14 @@ class FolderUploader(QObject):
             )
             datetime_part.setBody(QByteArray(str(original_datetime).encode("utf-8")))
             multipart.append(datetime_part)
+
+        # Client-computed AI: the server stores these as-is and skips its own
+        # embedding/face detection for this photo. An empty faces list ("[]")
+        # is authoritative ("no faces found"), so it is still sent.
+        if embedding:
+            self._append_field(multipart, "image_embedding_q8", base64.b64encode(embedding))
+        if faces_json:
+            self._append_field(multipart, "faces", faces_json.encode("utf-8"))
 
         request = QNetworkRequest(
             QUrl(f"{self._base_url}/api/shootings/{self._shooting_id}/photos/upload/")
@@ -316,7 +433,12 @@ class FolderUploader(QObject):
             from .cache import FolderCache
 
             names = {p.name for p in self._pending}
-            cache = FolderCache(folder, live_names=names, load_from_disk=True)
+            # Reuse the AI cache opened for this run when present; otherwise a
+            # plain (non-AI) upload opens its own to tag the folder.
+            cache = self._cache
+            if cache is None:
+                cache = FolderCache(folder, live_names=names, load_from_disk=True)
+            self._cache = None
             cache.set_shotsync_session(shooting_id, title)
             cache.set_shotsync_photos(self._uploaded_mapping)
             cache.close(flush=True)
@@ -330,6 +452,7 @@ class FolderUploader(QObject):
         if self._failed:
             return
         self._failed = True
+        self._close_cache(flush=True)
         shooting_id = self._shooting_id
         # A shooting is created before the first preview is encoded. Remove it
         # on any later failure so partial uploads never remain in the account.

@@ -69,6 +69,7 @@ from .cache import FolderCache, cache_size, clear_cache, maintain_folder_caches,
 from .decode_cache import DecodeCache
 from .decode_scheduler import DecodeScheduler
 from .shotsync_client import ShotSyncClient
+from .face_sets_sync import merge_server_faces, upload_fields_for_entry
 from .shotsync_login import ShotSyncLoginDialog
 from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
@@ -5080,6 +5081,7 @@ class Workspace(QMainWindow):
         self.shotsync_panel.set_shootings_loading()
         self.shotsync_client.fetch_shootings()
         self._sync_code_replacements()
+        self._sync_face_sets()
         self._refresh_shotsync_shortcuts()
 
     def _shotsync_login_failed(self, error: str) -> None:
@@ -5098,6 +5100,7 @@ class Workspace(QMainWindow):
         self.shotsync_panel.set_shootings_loading()
         self.shotsync_client.fetch_shootings()
         self._sync_code_replacements()
+        self._sync_face_sets()
         self._refresh_shotsync_shortcuts()
 
     def _shotsync_session_invalid(self, error: str) -> None:
@@ -5122,6 +5125,74 @@ class Workspace(QMainWindow):
         """Read the offline replacement library kept in the app settings."""
         sets = self.settings.value("code_replacements/local_sets", [], list)
         return [entry for entry in sets if isinstance(entry, dict)]
+
+    # ----- face sets sync ------------------------------------------------
+    def _sync_face_sets(self) -> None:
+        """Pull the server's saved faces and reconcile them with the local library.
+
+        Mirrors the code-replacements sync: while logged in the server is the
+        source of truth, so its people replace the local list (avatars kept),
+        local-only people are uploaded, and missing previews are downloaded.
+        """
+        if not self.shotsync_client.has_key():
+            return
+        self.shotsync_client.request_json(
+            "/api/users/faces/",
+            lambda ok, data, _error: self._apply_server_faces(data.get("faces", [])) if ok else None,
+        )
+
+    def _apply_server_faces(self, server_faces: list) -> None:
+        faces = server_faces if isinstance(server_faces, list) else []
+        merged, to_push, previews = merge_server_faces(self.face_sets, faces)
+        self.face_sets = merged
+        self._save_face_sets()
+        self._update_analysis_controls()
+        for entry in to_push:
+            self._push_face_set(entry)
+        for local_id, photo_url in previews:
+            self._fetch_face_preview(local_id, photo_url)
+
+    def _push_face_set(self, entry: dict) -> None:
+        """Upload a local-only face set to the server and store its server id."""
+        if entry.get("server_id") or not self.shotsync_client.has_key():
+            return
+        if not entry.get("embedding"):
+            return
+        photo = None
+        avatar = str(entry.get("avatar") or "")
+        if avatar:
+            try:
+                photo = ("face.png", base64.b64decode(avatar), "image/png")
+            except (ValueError, TypeError):
+                photo = None
+        local_id = entry.get("id")
+
+        def done(ok: bool, data: dict, _error: str) -> None:
+            face = data.get("face") if ok and isinstance(data, dict) else None
+            if not isinstance(face, dict) or face.get("id") is None:
+                return
+            target = self._face_set_by_id(str(local_id))
+            if target is not None:
+                target["server_id"] = int(face["id"])
+                self._save_face_sets()
+
+        self.shotsync_client.post_multipart(
+            "/api/users/faces/upload/", upload_fields_for_entry(entry), photo, done
+        )
+
+    def _fetch_face_preview(self, local_id: str, photo_url: str) -> None:
+        """Download a server face preview and cache it locally as a base64 avatar."""
+        def done(ok: bool, data: bytes) -> None:
+            if not ok or not data:
+                return
+            target = self._face_set_by_id(str(local_id))
+            if target is None:
+                return
+            target["avatar"] = base64.b64encode(data).decode("ascii")
+            self._save_face_sets()
+            self._update_analysis_controls()
+
+        self.shotsync_client.fetch_bytes(photo_url, done)
 
     def _set_code_replacements(self, sets: list[dict]) -> None:
         self.code_replacement_sets = [entry for entry in sets if isinstance(entry, dict)]
@@ -7538,16 +7609,21 @@ class Workspace(QMainWindow):
         toast_message = "Это лицо уже есть в наборе."
         if not already_added:
             avatar = self._current_face_avatar(face, 80)
-            self.face_sets.append({
+            entry = {
                 "id": sha1(json.dumps(embedding).encode()).hexdigest()[:12],
                 "name": "Без имени",
                 "embedding": embedding,
                 "avatar": self._pixmap_to_base64(avatar),
-            })
+            }
+            bbox = face.get("bbox")
+            if isinstance(bbox, dict) and bbox:
+                entry["bbox"] = bbox
+            self.face_sets.append(entry)
             self._save_face_sets()
             self._update_analysis_controls()
             if self._xmp_auto_enabled():
                 self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+            self._push_face_set(entry)
             toast_message = "Лицо добавлено в набор."
         self._show_face_sets(toast_message)
 
@@ -7653,12 +7729,28 @@ class Workspace(QMainWindow):
             self._save_face_sets()
             if self._xmp_auto_enabled():
                 self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+            server_id = entry.get("server_id")
+            if server_id and self.shotsync_client.has_key():
+                self.shotsync_client.request_json(
+                    f"/api/users/faces/{int(server_id)}/",
+                    lambda _ok, _data, _error: None,
+                    method="POST",
+                    payload={"name": entry["name"]},
+                )
 
     def _delete_face_set(self, face_id: str, rebuild: Callable[[], None]) -> None:
+        removed = self._face_set_by_id(face_id)
         self.face_sets = [entry for entry in self.face_sets if entry.get("id") != face_id]
         self._save_face_sets()
         if self._xmp_auto_enabled():
             self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+        server_id = (removed or {}).get("server_id")
+        if server_id and self.shotsync_client.has_key():
+            self.shotsync_client.request_json(
+                f"/api/users/faces/{int(server_id)}/delete/",
+                lambda _ok, _data, _error: None,
+                method="POST",
+            )
         rebuild()
 
     def _show_face_set(self, face_id: str, dialog: QDialog) -> None:
