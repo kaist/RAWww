@@ -16,8 +16,12 @@ jobs:
         include:
           - name: Windows packages
             os: windows-latest
-          - name: macOS DMG
+          - name: macOS Apple Silicon DMG
             os: macos-14
+            macos_arch: arm64
+          - name: macOS Intel DMG
+            os: macos-15-intel
+            macos_arch: intel
           - name: Linux AppImage
             os: ubuntu-22.04
 
@@ -100,7 +104,7 @@ jobs:
           </dict></plist>
           PLIST
           chmod +x "dist/ctrlka.app/Contents/MacOS/ctrlka"
-          hdiutil create -volname Контролька -srcfolder "dist/ctrlka.app" -ov -format UDZO "dist/ctrlka-macos.dmg"
+          hdiutil create -volname Контролька -srcfolder "dist/ctrlka.app" -ov -format UDZO "dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"
 
       - name: Build Linux application
         if: runner.os == 'Linux'
@@ -146,8 +150,8 @@ jobs:
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: ctrlka-macos
-          path: dist/ctrlka-macos.dmg
+          name: ctrlka-macos-${{ matrix.macos_arch }}
+          path: dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg
           if-no-files-found: error
 
       - name: Upload Linux artifact

@@ -119,7 +119,9 @@ an optional `onefile` release.
 The manually started **Build desktop packages** GitHub Actions workflow builds
 the Windows `onedir` package as `ctrlka-windows-portable.zip`, launches it for
 a startup smoke test, and builds the Russian Inno Setup installer. Both files
-are published in the `ctrlka-windows` workflow artifact.
+are published in the `ctrlka-windows` workflow artifact. macOS builds are
+published separately as `ctrlka-macos-arm64` (Apple Silicon) and
+`ctrlka-macos-intel` (Intel) DMG artifacts.
 
 The portable build keeps its settings, cache, and working data in the `work`
 folder beside `ctrlka.exe`; the installer build uses the normal Windows data
