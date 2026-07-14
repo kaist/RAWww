@@ -272,6 +272,16 @@ class FolderCache:
     def store_face_analysis(self, results: list[tuple[str, str]]) -> None:
         self._store_ai_results("face_analysis", "faces_json", results)
 
+    def load_face_analysis(self) -> dict[str, str]:
+        """Return the raw per-file faces JSON produced by the AI pipeline."""
+        with self._lock:
+            db = self._db_or_raise()
+            return {
+                str(name): faces_json
+                for name, faces_json in db.execute("SELECT name, faces_json FROM face_analysis")
+                if faces_json
+            }
+
     def store_photo_metadata(self, results: list[tuple[str, str]]) -> None:
         self._store_ai_results("photo_metadata", "metadata_json", results)
 

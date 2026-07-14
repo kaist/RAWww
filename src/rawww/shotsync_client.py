@@ -191,6 +191,62 @@ class ShotSyncClient(QObject):
         multi.setParent(reply)
         reply.finished.connect(lambda: self._finish_json_request(reply, callback))
 
+    def post_multipart(
+        self, path: str, fields: dict[str, str], photo: tuple[str, bytes, str] | None, callback
+    ) -> None:
+        """POST text ``fields`` plus an optional ``photo`` to a JSON endpoint.
+
+        ``photo`` is ``(filename, data, content_type)``. Used to sync a face set
+        (its embedding/name/bbox as fields and its avatar crop as ``photo``).
+        """
+        if not self._api_key:
+            callback(False, {}, "Требуется авторизация в ShotSync.")
+            return
+        multi = QHttpMultiPart(QHttpMultiPart.ContentType.FormDataType)
+        for name, value in fields.items():
+            part = QHttpPart()
+            part.setHeader(
+                QNetworkRequest.KnownHeaders.ContentDispositionHeader,
+                f'form-data; name="{name}"',
+            )
+            part.setBody(QByteArray(str(value).encode("utf-8")))
+            multi.append(part)
+        if photo is not None:
+            filename, data, content_type = photo
+            part = QHttpPart()
+            part.setHeader(
+                QNetworkRequest.KnownHeaders.ContentDispositionHeader,
+                f'form-data; name="photo"; filename="{filename}"',
+            )
+            part.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, content_type)
+            part.setBody(QByteArray(data))
+            multi.append(part)
+        reply = self._manager.post(self._request(path, with_key=True), multi)
+        multi.setParent(reply)
+        reply.finished.connect(lambda: self._finish_json_request(reply, callback))
+
+    def fetch_bytes(self, url: str, callback) -> None:
+        """Download ``url`` (e.g. a face preview) and report ``(ok, data)``."""
+        if not url:
+            callback(False, b"")
+            return
+        if url.startswith("/"):
+            url = f"{self._base_url}{url}"
+        request = QNetworkRequest(QUrl(url))
+        request.setAttribute(
+            QNetworkRequest.Attribute.RedirectPolicyAttribute,
+            QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy,
+        )
+        reply = self._manager.get(request)
+
+        def done() -> None:
+            ok = reply.error() == QNetworkReply.NetworkError.NoError
+            data = bytes(reply.readAll()) if ok else b""
+            reply.deleteLater()
+            callback(ok, data)
+
+        reply.finished.connect(done)
+
     def _finish_json_request(self, reply: QNetworkReply, callback) -> None:
         data = self._parse_json(reply)
         ok = bool(data.get("ok")) and reply.error() == QNetworkReply.NetworkError.NoError
