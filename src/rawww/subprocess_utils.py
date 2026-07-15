@@ -1,4 +1,7 @@
-"""Helpers for launching child processes without flashing console windows."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Запуск дочерних процессов без внезапного мигания консольных окон."""
 
 from __future__ import annotations
 
@@ -7,13 +10,12 @@ import sys
 
 
 def no_window_kwargs() -> dict:
-    """Return ``subprocess`` keyword arguments that hide the child's console.
+    """Возвращает параметры ``subprocess``, скрывающие дочернюю консоль Windows.
 
-    ExifTool and Git are console executables. When they are launched from the
-    windowed (``--windowed``) frozen Windows build they briefly pop a console
-    window each time, which flashes on screen during startup and folder scans.
-    ``CREATE_NO_WINDOW`` together with a hidden ``STARTUPINFO`` suppresses it.
-    The flags only exist on Windows, so other platforms get an empty mapping.
+    ExifTool и Git — консольные программы. Без этих флагов оконная сборка на
+    Windows ненадолго показывает консоль при запуске и сканировании папок.
+    Сочетание ``CREATE_NO_WINDOW`` и скрытого ``STARTUPINFO`` убирает мигание.
+    На других платформах функция возвращает пустой словарь.
     """
     if sys.platform != "win32":
         return {}

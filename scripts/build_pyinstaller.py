@@ -1,4 +1,7 @@
-"""Build Контролька with PyInstaller and report the largest bundled files."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Сборка Контрольки с помощью PyInstaller и отчёт о наиболее крупных файлах в дистрибутиве."""
 
 from __future__ import annotations
 
@@ -79,13 +82,13 @@ def _add_portable_marker() -> None:
 
 
 def _prune_known_unused_qt_files(directory: Path) -> None:
-    """Remove leaf Qt libraries not used by Контролька's bundled bindings.
+    """Удаляет библиотеки Qt, которые не используются собранной Контролькой.
 
-    The application bundles QtCore, QtGui, QtWidgets, QtMultimedia,
-    QtMultimediaWidgets, QtNetwork, and QtWebSockets only. ``pyi-bindepend``
-    confirms none of those libraries links to this QML/Quick/PDF group.
-    Keep this list explicit: adding a corresponding PySide import requires
-    removing its DLL from this list and testing the build again.
+    В приложение входят только QtCore, QtGui, QtWidgets, QtMultimedia,
+    QtMultimediaWidgets, QtNetwork и QtWebSockets. Проверка ``pyi-bindepend``
+    подтверждает, что они не зависят от удаляемой группы QML, Quick и PDF.
+    Список оставлен явным: при добавлении нового импорта PySide соответствующую
+    DLL нужно убрать из списка и заново проверить сборку.
     """
     qt_dir = CONTENTS / "PySide6"
     removed = []
@@ -99,7 +102,7 @@ def _prune_known_unused_qt_files(directory: Path) -> None:
 
 
 def _move_application_data(directory: Path) -> None:
-    """Put editable application resources beside the executable, not in bin."""
+    """Переносит изменяемые ресурсы рядом с EXE, а не внутрь служебной папки."""
     source = CONTENTS / "data"
     target = directory / "data"
     if not source.is_dir():
@@ -141,19 +144,18 @@ def _compress_binaries(directory: Path) -> None:
 
 
 def _clean_previous_build() -> None:
-    """Remove the previous target and work directory before collecting files."""
+    """Удаляет предыдущий дистрибутив и рабочий каталог перед новой сборкой."""
     for directory in (DIST, ROOT / "build" / "pyinstaller"):
         if directory.exists():
             shutil.rmtree(directory)
 
 
 def _bake_build_version() -> None:
-    """Freeze the Git-derived version into the package before bundling.
+    """Записывает вычисленную из Git версию внутрь собираемого пакета.
 
-    The shipped application must not run Git at runtime (it flashes a console
-    window and there is no repository on a client machine). Resolving it here
-    and importing the result inside ``rawww.version`` keeps the frozen build
-    self-contained.
+    Готовое приложение не должно запускать Git: на машине пользователя может не
+    быть ни Git, ни репозитория, а в Windows ещё и мелькнёт консоль. Версия
+    вычисляется здесь, после чего ``rawww.version`` читает уже готовое значение.
     """
     try:
         result = subprocess.run(
@@ -175,6 +177,7 @@ def _bake_build_version() -> None:
 
 
 def main() -> None:
+    """Собирает дистрибутив, чистит лишние файлы и печатает сводку размера."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--upx", action="store_true", help="compress DLL/EXE/PYD files with UPX --brute")
     parser.add_argument("--console", action="store_true", help="keep a console for diagnosing startup errors")
@@ -202,14 +205,11 @@ def main() -> None:
     for module in EXCLUDED_QT_MODULES:
         command.extend(("--exclude-module", module))
     if args.upx:
-        # PyInstaller otherwise auto-detects UPX and applies its own LZMA
-        # settings before this script gets a chance to run ``--brute``.
         command.append("--noupx")
     command.append(str(ROOT / "scripts" / "pyinstaller_entry.py"))
     try:
         subprocess.run(command, cwd=ROOT, check=True)
     finally:
-        # The generated module is a build artifact; never leave it in the tree.
         BUILD_VERSION_MODULE.unlink(missing_ok=True)
     _move_application_data(DIST)
     _prune_known_unused_qt_files(DIST)

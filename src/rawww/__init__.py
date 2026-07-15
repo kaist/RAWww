@@ -1,12 +1,15 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 __all__ = ["main"]
 
 
 def main(*args, **kwargs):
-    """Lazy entry point.
+    """Ленивая точка входа.
 
-    Importing the GUI (``.app``) pulls in QtGui/QtWidgets which need a display
-    stack (libGL). Deferring the import keeps lightweight submodules such as
-    ``shotsync_socket`` importable in headless environments (e.g. tests).
+    Импорт ``.app`` подтягивает QtGui и QtWidgets, которым нужен графический стек.
+    Отложенный импорт позволяет использовать лёгкие модули вроде
+    ``shotsync_socket`` в тестах и окружениях без дисплея.
     """
     from .app import main as _main
 

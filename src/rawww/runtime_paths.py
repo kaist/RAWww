@@ -1,4 +1,7 @@
-"""Locations of resources in source checkouts and frozen distributions."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Расположение ресурсов в исходниках и в собранном приложении."""
 
 from __future__ import annotations
 
@@ -6,9 +9,6 @@ import sys
 from pathlib import Path
 
 
-# A portable PyInstaller distribution carries this marker beside its executable.
-# The regular installer intentionally does not, because its application
-# directory is normally under Program Files and is not writable by the user.
 PORTABLE = bool(
     getattr(sys, "frozen", False)
     and (Path(sys.executable).resolve().parent / "portable.flag").is_file()

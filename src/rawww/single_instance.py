@@ -1,4 +1,7 @@
-"""Single-instance handoff for file-manager activation requests."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Передаёт запросы из файлового менеджера уже запущенному экземпляру приложения."""
 
 from __future__ import annotations
 
@@ -12,7 +15,12 @@ SERVER_NAME = "rawww-single-instance-v1"
 
 
 class SingleInstance(QObject):
-    """Keep one GUI process and forward later launches to it."""
+    """Оставляет один GUI-процесс и передаёт ему запросы повторных запусков.
+
+    Первый экземпляр слушает локальный сокет, последующие отправляют ему путь и
+    завершаются. Так двойной щелчок по файлу открывает новую вкладку, а не вторую
+    Контрольку со своим кэшем и собственным мнением о текущей папке.
+    """
 
     target_received = Signal(object)
 
@@ -23,13 +31,10 @@ class SingleInstance(QObject):
         self._buffers: dict[QLocalSocket, bytearray] = {}
 
     def start(self, target: Path | None) -> bool:
-        """Return True in a secondary process after forwarding its request."""
+        """Возвращает ``True`` во вторичном процессе после передачи запроса."""
         if self.server.listen(SERVER_NAME):
             return False
 
-        # A crashed process can leave a stale Unix-domain socket behind.
-        # On Windows this is normally a no-op, and an active server is never
-        # removed because the connect attempt above succeeds in that case.
         QLocalServer.removeServer(SERVER_NAME)
         if self.server.listen(SERVER_NAME):
             return False

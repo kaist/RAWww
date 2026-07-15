@@ -1,8 +1,7 @@
-"""Register Explorer commands for a packaged Контролька build.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-The registration is per-user (HKCU), so it never requires elevation and does
-not replace the user's default image viewer.
-"""
+"""Регистрация команд Контрольки в проводнике Windows для собранного приложения."""
 
 from __future__ import annotations
 

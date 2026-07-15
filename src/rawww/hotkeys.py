@@ -1,4 +1,7 @@
-"""Keyboard shortcut definitions and helpers, shared by the settings UI and the workspace."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Сочетания клавиш и их помощники, общие для настроек и рабочей области."""
 
 from __future__ import annotations
 
@@ -24,7 +27,7 @@ HOTKEY_DEFAULTS: dict[str, tuple[str, str]] = {
 
 
 def _hotkey_sequence(settings: QSettings, identifier: str) -> QKeySequence:
-    """Return a saved shortcut; an explicitly blank value disables it."""
+    """Возвращает сохранённое сочетание; пустое значение означает «отключено»."""
     default = HOTKEY_DEFAULTS[identifier][1]
     key = f"hotkeys/{identifier}"
     if not settings.contains(key):
@@ -33,10 +36,10 @@ def _hotkey_sequence(settings: QSettings, identifier: str) -> QKeySequence:
 
 
 def _uses_reserved_navigation_key(sequence: QKeySequence) -> bool:
-    """Bare arrows, Enter and Escape always retain their navigation behaviour.
+    """Не позволяет назначить голые стрелки, Enter и Escape поверх навигации.
 
-    Only the unmodified keys are reserved; combinations such as ``Ctrl+Up``
-    stay assignable because they never collide with plain navigation.
+    Зарезервированы только клавиши без модификаторов. Сочетания вроде
+    ``Ctrl+Up`` остаются доступными: обычному перемещению они не мешают.
     """
     reserved = {int(key) for key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape)}
     return any(sequence[index].toCombined() in reserved for index in range(sequence.count()))

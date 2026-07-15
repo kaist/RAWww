@@ -1,4 +1,7 @@
-"""Resolve a filesystem target passed to the desktop application."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Определяет файловый путь, с которым приложение запустил проводник."""
 
 from __future__ import annotations
 
@@ -8,12 +11,11 @@ from typing import Sequence
 
 
 def target_from_argv(argv: Sequence[str] | None = None) -> Path | None:
-    """Return the first existing path supplied when the application starts.
+    """Возвращает первый существующий путь из аргументов запуска.
 
-    File managers pass a path as the first positional argument when opening a
-    file association or a folder context-menu command.  Options are ignored so
-    the normal application startup remains tolerant of platform launch flags;
-    a path beginning with ``-`` can still be supplied after ``--``.
+    Файловый менеджер передаёт его при открытии ассоциации или команды папки.
+    Параметры запуска пропускаются, а путь, начинающийся с дефиса, можно явно
+    указать после ``--``.
     """
     arguments = list(sys.argv[1:] if argv is None else argv)
     positional = False

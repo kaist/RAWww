@@ -1,183 +1,151 @@
 # Контролька
 
-Python project managed with `uv`.
+Контролька — настольное приложение для быстрого просмотра, отбора и
+подготовки фотографий. Оно открывает папки с RAW, JPEG и другими
+поддерживаемыми изображениями, помогает расставлять оценки и метки, а затем
+передаёт результат в привычный рабочий процесс через XMP. Мышь пригодится,
+но горячие клавиши будут рады сделать большую часть работы за неё.
 
-## Setup
+Подробное описание для фотографов: [shotsync.ru/ctrlka](https://shotsync.ru/ctrlka).
+
+## Возможности
+
+- Быстрый просмотр RAW и JPEG, полноэкранный режим, лента кадров и несколько
+  вкладок с папками.
+- Отбор оценками, цветными метками, комментариями, тегами и быстрыми метками;
+  копирование, перемещение и удаление файлов прямо из приложения.
+- Групповые операции: переименование, изменение размера изображений и
+  пересохранение JPEG.
+- Экспорт рейтингов, меток, комментариев и найденных лиц в XMP — эти данные
+  смогут прочитать Lightroom, Capture One и другие программы с поддержкой XMP.
+- Локальный AI-анализ: поиск лиц, наборы лиц и объединение похожих кадров в
+  серии.
+- Аудиозаметки, записанные камерой, рядом со снимком.
+- Интеграция с ShotSync: отправка съёмки на отбор, получение фотографий в
+  реальном времени, синхронизация оценок и меток между устройствами.
+
+## Требования
+
+- Python 3.12 или новее;
+- [uv](https://docs.astral.sh/uv/);
+- Windows, macOS или Linux с графической средой. Основной сценарий сборки и
+  интеграции с проводником реализован для Windows.
+
+Модели распознавания лиц и ExifTool поставляются в репозитории. Первое
+использование AI и метаданных может занять немного времени: приложение
+загружает соответствующие компоненты только тогда, когда они понадобились.
+
+## Установка и запуск из исходников
+
+Перейдите в корень репозитория и попросите `uv` собрать окружение. Отдельно
+создавать `.venv` и вручную ставить зависимости не нужно — пусть рутиной
+занимается инструмент, ему за это даже не приходится платить кофе.
 
 ```powershell
 uv sync
-```
-
-## Run
-
-```powershell
 uv run rawww
 ```
 
-The application also accepts a file or folder path:
+`uv sync` создаст локальное виртуальное окружение, установит зависимости из
+`pyproject.toml` и зафиксированные версии из `uv.lock`. Для повторного запуска
+достаточно команды `uv run rawww`.
+
+Можно сразу открыть папку или отдельный кадр:
 
 ```powershell
-uv run rawww "D:\photos\shoot"
-uv run rawww "D:\photos\shoot\IMG_0001.CR3"
+uv run rawww "D:\фото\съёмка"
+uv run rawww "D:\фото\съёмка\IMG_0001.CR3"
 ```
 
-To diagnose a startup flash on Windows, record every native window created
-during the first three seconds:
+## Как пользоваться
+
+1. Откройте папку с фотографиями или перетащите её в приложение.
+2. Просматривайте кадры в сетке или на весь экран; оставляйте оценки, цветные
+   метки и комментарии.
+3. При необходимости включите AI-анализ, чтобы собрать серии и найти лица.
+4. Экспортируйте XMP для дальнейшей работы в редакторе либо синхронизируйте
+   съёмку с ShotSync.
+
+Сочетания клавиш настраиваются в самом приложении. Полный список и описание
+интерфейса находятся в разделе помощи и на странице проекта.
+
+## ShotSync
+
+ShotSync не обязателен: локальный отбор работает без учётной записи и без
+интернета. При входе в ShotSync можно отправить папку на удалённый отбор,
+получать новые кадры со съёмки и синхронизировать оценки, цветовые метки,
+комментарии, коды замены и наборы лиц. Подробнее — на
+[shotsync.ru/ctrlka](https://shotsync.ru/ctrlka).
+
+## Разработка
+
+Если вы впервые открыли исходники, двигайтесь в таком порядке:
+
+1. Прочитайте [описание архитектуры](docs/ARCHITECTURE.md) — там есть карта
+   классов, жизненный цикл папки, фоновые очереди, кэш и ShotSync.
+2. Посмотрите [правила участия](CONTRIBUTING.md) — подготовка окружения, стиль
+   изменений, ручные проверки и условия GPL.
+3. Откройте `src/rawww/app.py` и найдите `MainWindow`, `Workspace`, `PhotoGrid`,
+   `FullView` и `ViewerStrip`. Это основные точки сборки интерфейса.
+4. Алгоритмы ищите в профильных модулях: `imaging.py`, `cache.py`,
+   `decode_scheduler.py`, `exif.py`, `ai.py`, `xmp.py` и `shotsync_*.py`.
+
+Быстрая подготовка рабочего окружения разработчика:
 
 ```powershell
-$env:RAWWW_TRACE_STARTUP = "1"
-uv run rawww 2> startup-windows.log
+uv sync
+uv run python -m compileall -q src scripts tests
+uv run python -m unittest discover -s tests -v
+uv run rawww
 ```
 
-A folder is opened in its own workspace tab. A file opens its parent folder
-and immediately switches to Full View for that file; it is presented directly
-fullscreen, without first showing the grid or restored workspaces. This is the
-same command-line contract used by file-manager integrations.
+Все проектные комментарии, докстринги и документы пишутся по-русски. Имена
+API, классов, форматов и инструментов сохраняются в оригинальном виде, иначе
+поиск по документации быстро превратится в игру «угадай перевод термина».
 
-## Viewer
-
-- Folder workspaces open in independent tabs. Use `+` to create a tab; tabs may be reordered or closed without changing another tab's current folder, filters, or selection. Open tabs and the active tab are restored at startup; tabs whose folders no longer exist are omitted.
-- Grid mode: mounted disks appear as buttons above the directory tree on the left; the list refreshes automatically, includes USB media and inserted cards, and excludes empty card-reader slots.
-- ShotSync-style selection toolbar: filter by rating, color label, shot size, filename/comment, and change the sort order or card size. The **Серии** grouping toggle is global: its state applies immediately to every open tab and remains the same when another folder is opened.
-- In the ShotSync panel, shooting cards open their local folder when one exists; cloud-only shootings offer **Take for selection** or **Watch**. Sending a shooting opens a dialog to choose its name, source folder, and server-side AI face/series processing.
-- Use Ctrl/Shift to select multiple cards, then assign a 0-5 rating, color label, comment, or the 5-star quick mark. Selection metadata is stored in the central folder cache and survives restarts.
-- Drag files and folders from the grid to a folder card, the folder tree, or another workspace tab to move them; hold `Ctrl` while dragging to copy. Dragging from Explorer into the grid, tree, or a tab copies the dropped items into that folder. The grid also exposes selected items as regular file URLs, so they can be dragged out to Explorer or another application.
-- In the grid or focused folder tree, `Ctrl+C`, `Ctrl+X`, and `Ctrl+V` copy, cut, and paste selected files/folders. `Ctrl+D` clears the current selection. Existing names are never overwritten.
-- `Shift+C` and `Shift+M` open the quick copy/move destination picker. Repeat the shortcut or press Enter to use the selected path; `1`–`9` starts the operation for that numbered path immediately. The last used destination and open workspace folders are offered automatically; shortcuts can be changed in **Settings → Hotkeys**.
-- In the grid or focused folder tree, `Del` moves selected files/folders to the system recycle bin; `Shift+Del` removes them permanently. Confirmation is enabled by default and can be disabled in **Settings → Behaviour**. Individual photos from a ShotSync selection copy are protected from deletion.
-- Right-click a folder in the tree and choose **Rename** to edit its name inline. Its preview and AI cache is moved to the new path, including caches for nested folders.
-- Select a processed photo and press **Find face** to show photos containing a matching face; the × button clears face search. **No faces** is available in the shot-size filter.
-- Hotkeys: `1`-`5` assign a rating, `0` clears it; `Shift+1`-`5` set red through purple colour labels and `Shift+0` clears the label. `M` toggles the quick mark, `C` opens the comment editor, and `E` opens the active file in the external editor. By default this is Adobe Photoshop; set another executable in **Settings → Behaviour**. Change hotkeys in **Settings → Hotkeys**; arrow keys, Enter and Esc remain reserved for navigation.
-- **Коды замены** are configured in **Настройки → Коды замен**. They work locally without an account; sign in through the shared ShotSync login dialog to use the account's synchronized sets. Create sets, edit codes, or import CSV/TSV/XLSX. A completed code/value row is persisted when **Готово** is pressed even if Enter or Tab was not used first. In every comment field type `{`, `\`, `=` or `@` to open and filter code suggestions; Контролька stores the marker (for example `{name}`) and shows its expanded value directly in the field when it is not being edited.
-- The **Утилиты** button holds batch tools that run across multiple processes: rename, **Групповой резайс** (export the current list to JPEG), and **Уменьшить JPG** (re-encode every JPEG in the open folder in place at a chosen quality, default 85%, overwriting without confirmation and reporting the megabytes saved). Both export tools always keep the embedded ICC profile and keep full EXIF (including sub-IFDs) when **Сохранить EXIF** is ticked. EXIF/ICC is only written by these export tools; the preview pipeline never embeds metadata.
-- The **XMP** button beside AI creates Lightroom/Capture One-compatible `.xmp` sidecars. It exports ratings, colour labels, expanded comments, hashtags as keywords, and named face regions. Enable automatic creation to update sidecars in the background after local or ShotSync metadata changes.
-- Full view: double-click a photo or press `F`. Hold the left mouse button for a temporary 100% inspection and drag to pan; press `Z` to toggle it. The inspector decodes and caches the full JPEG or the embedded RAW preview (falling back to RAW decoding only when needed), focusing the largest recognized face when available (otherwise the cursor position or image centre); arrow keys pan by 5% while it is active. Face focus on zoom can be turned off in **Settings → Interface** (**Акцент на лице при зуме**, on by default), after which zoom always centres on the cursor.
-- Full view shows the current rating and colour label as a floating badge on the right; click an empty badge to apply the quick mark (`M`), or a marked badge to clear all marks. Choose its top/bottom position or disable it in **Settings → Interface**.
-- Back to grid: `Esc`, `Enter`, or `G`.
-- Toggle fullscreen: `F11`.
-- Navigate in full view: arrow keys or space.
-- Collapse the full-view lower panel with `Shift+Down`: the first press hides the thumbnail strip, the second hides the metadata/marks bar too. `Shift+Up` reverses it step by step. The state is remembered between sessions and both shortcuts can be reassigned in **Settings → Hotkeys**.
-- Video files (`.mp4`, `.mov`, `.m4v`, `.avi`, `.mkv`, `.webm`) show a captured frame and video badge in the grid. In full view, use Play/Pause and the seek bar; playback uses Qt Multimedia and the system media codecs.
-- Camera WAV notes matching a photo's filename are available for playback when a folder opens. The microphone badge opens the audio player in full view, and hovering the microphone badge in the grid plays the matching WAV without a transcript popup.
-
-JPEG files are decoded with draft downsampling for fast previews. RAW files use the embedded preview when available. Embedded ICC profiles are converted to sRGB before display.
-
-The last opened folder is restored on startup.
-
-The grid keeps its fast 256px JPEG cache. The currently open folder is watched for added, removed, renamed, and changed files and is refreshed after a short debounce. Unchanged cache and AI records are retained. EXIF uses one dedicated process with one bundled stay-open ExifTool subprocess, so metadata never occupies thumbnail or full-preview decode workers. CLIP embeddings and face detection/recognition start only when **Process new photos** is pressed and report progress in the toolbar status panel, Windows taskbar, and as a percentage badge in the macOS Dock. The button queues only new, changed, or previously unfinished photos. Enable **Всегда запускать AI после превью** in **Settings → Behavior** (off by default) to start this analysis automatically once a folder's previews are ready; it also fires after new photos are added and re-previewed. AI waits until generated previews and cached previews being read from SQLite have actually reached the grid. Cache checks, source preparation, CLIP, and face recognition then run in dedicated low-priority background queues with an independent cache connection, so changing folders or tabs does not cancel the task or block navigation. A 640px JPEG is prepared and shared by the two independent AI workers entirely in memory, then discarded; SQLite stores only the final embeddings and face data. The CLIP and InsightFace processes are created lazily for each run and terminated when the queue finishes, releasing their models from memory. ONNX models and the complete Windows ExifTool distribution live inside the application package, so no system installation or `PATH` configuration is required. Set `RAWWW_DISABLE_AI=1` before starting the app to disable background analysis.
-
-Preview caches are kept centrally in the operating system's application-data directory, under `Контролька/cache/folder-caches`, with one SQLite file per browsed folder. The application writes only small JPEG grid previews, and entries are invalidated by file size and modification time. Existing larger preview variants are left untouched. SQLite is accessed directly on disk in WAL mode, so opening a folder does not duplicate its complete cache in application memory. Full-view images are decoded from their source files on demand and kept only in a bounded RAM LRU; up to ten neighbours in each direction are preloaded in the background.
-
-Cache databases use a throughput-oriented SQLite profile: 32 KiB pages for large thumbnail records, WAL, a 128 MiB page cache, memory-mapped reads, and batched writes. Because the database is disposable, synchronous durability is disabled. Recent entries are regenerated after an abnormal shutdown; if a cache database itself is corrupt, it is deleted and rebuilt automatically from the source photos, including embeddings and face data. Shortly after startup, a low-priority task removes caches whose source folders no longer exist and compacts caches with records for deleted files.
-
-The current full-view image uses a dedicated foreground decode pool and can duplicate an already-running background decode instead of waiting for it. In grid mode, the selected card starts a debounced foreground full-view decode so opening it can reuse the RAM result.
-
-Folder opening is staged: the file list is populated in UI batches while the cache opens off the UI thread. Thumbnail work begins only after the cache is ready. The scheduler rebuilds its priorities after scrolling or resizing: visible cards are loaded from the viewport centre outward, followed by a one-screen buffer, and only then by the sequential background pass. Executor queues are intentionally short so work from an old viewport cannot build up after a fast scroll. Full-preview warming is limited to one frame at a time.
-
-## Tests
+## Проверка изменений
 
 ```powershell
 uv run python -m unittest discover -s tests -v
 ```
 
-## Updates
+Для небольшой правки можно запустить только связанный тестовый модуль, но перед
+публикацией изменения лучше выполнить весь набор. Изменения Qt-интерфейса,
+drag-and-drop, видео и нативных окон дополнительно проверяются вручную.
 
-The application version is generated as `1.0.<Git commit count>` during build
-and is shared with the running application through `src/rawww/version.py`.
-Контролька checks
-`https://shotsync.ru/ctrlka/api/version/` ten seconds after launch by default;
-this can be disabled in **Settings → About**. Published releases and their
-platform-specific builds are managed in the ShotSync admin panel.
-
-## Windows build
-
-Create a portable `onedir` build and print its largest bundled files:
+Для профилирования доступны вспомогательные команды:
 
 ```powershell
-git pull
-uv sync --locked
+uv run python -m rawww.ai_benchmark --limit 32
+uv run python -m rawww.benchmark "D:\фото\съёмка" --limit 30 --full-limit 8 --full-size 2560
+```
+
+## Сборка для Windows
+
+```powershell
 uv run python scripts/build_pyinstaller.py --portable
-.\dist\ctrlka\ctrlka.exe
-Compress-Archive -Path dist\ctrlka -DestinationPath dist\ctrlka-windows-portable.zip -Force
 ```
 
-For an experimental smaller build, additionally compress native binaries with
-UPX:
-
-```powershell
-uv run python scripts/build_pyinstaller.py --portable --upx
-```
-
-The executable is created at `dist/ctrlka/ctrlka.exe`. Keep the complete
-directory when distributing it. Supporting libraries are in `bin`; application
-models, assets, and ExifTool are in `data`. The build script prints the largest files and
-automatically removes unused Qt QML/Quick/PDF/OpenGL DLLs and keeps only the
-Russian Qt base translation after every build; `onedir`
-is also the format used to inspect and safely reduce bundled data before making
-an optional `onefile` release.
-
-The manually started **Build desktop packages** GitHub Actions workflow builds
-the Windows `onedir` package as `ctrlka-windows-portable.zip`, launches it for
-a startup smoke test, and builds the Russian Inno Setup installer. Both files
-are published in the `ctrlka-windows` workflow artifact. macOS builds are
-published separately as `ctrlka-macos-arm64` (Apple Silicon) and
-`ctrlka-macos-intel` (Intel) DMG artifacts.
-
-The portable build keeps its settings, cache, and working data in the `work`
-folder beside `ctrlka.exe`; the installer build uses the normal Windows data
-locations.
-
-## File-manager integration
-
-All integrations should invoke the executable with a quoted path argument:
-`".../ctrlka.exe" "%1"`. The application supports both files and folders.
-
-- Windows: register a per-user file association for the desired RAW/image
-  extensions and a folder context-menu verb under `HKCU\Software\Classes`.
-  This does not require administrator privileges. The command value is
-  `"C:\path\to\ctrlka.exe" "%1"`.
-- macOS: package the application as `.app`, declare supported image UTTypes in
-  `CFBundleDocumentTypes`, and handle the launch/open-file event by forwarding
-  its path to this same entry point.
-- Linux: install a `.desktop` file with `Exec=ctrlka %f` and the image MIME
-  types; add a folder action with `Exec=ctrlka %d` where the desktop supports
-  it.
-
-The application uses a single-instance/IPC handoff for Explorer activations:
-if it is already running, a new context-menu request is sent to that process,
-the target is opened in a new workspace tab, and the existing window is
-activated instead of starting another process.
-
-In the packaged Windows application, use **Settings → Behaviour → Explorer
-integration** to add or remove these commands. The app registers its own
-`ctrlka.exe`; the change is applied immediately for the current user.
-
-The equivalent command-line helper remains available:
+Опция `--portable` создаёт переносимую сборку. Скрипт сборки сам подготавливает
+необходимые ресурсы и версию приложения. Для регистрации собранной программы
+в проводнике Windows используйте:
 
 ```powershell
 uv run python scripts/register_windows_integration.py
 ```
 
-The script writes only to the current user's registry, does not replace the
-default image viewer, and adds **Open in Контролька** for supported media and
-folders. To remove the commands later, run:
+Чтобы отменить регистрацию:
 
 ```powershell
 uv run python scripts/register_windows_integration.py --unregister
 ```
 
-## Processing benchmark
+## Лицензия и авторство
 
-Run per-stage preview, EXIF, CLIP, face-analysis, and SQLite measurements on the last folder opened in Контролька:
+© 2026 Игорь Заломский, <igor@zalomskij.ru>.
 
-```powershell
-uv run python -m rawww.ai_benchmark --limit 32
-```
-
-## Decode benchmark
-
-The output compares thumbnail creation with and without blocking EXIF extraction; SQLite thumbnail hits never invoke ExifTool.
-
-```powershell
-uv run python -m rawww.benchmark "D:\фото\на обработку\а ню" --limit 30 --full-limit 8 --full-size 2560
-```
+Проект распространяется по лицензии [GNU GPL v3 или более поздней версии](LICENSE).
+При распространении изменённой версии программы необходимо предоставить её
+исходный код и сохранить условия GPL. Это относится к передаче программы
+другим людям; размещение изменённой версии только как сетевого сервиса GPL не
+охватывает — для такого требования нужна AGPL.

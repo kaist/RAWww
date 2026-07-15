@@ -1,15 +1,7 @@
-"""Sidebar panel for the ShotSync integration.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-The panel lives in the left navigation column and swaps between three states:
-
-* a short "checking" state while a stored key is validated,
-* a login form (login + password) when the user is signed out,
-* the signed-in view with the profile header and the list of shootings.
-
-All networking happens in :mod:`rawww.shotsync_client`; this widget only emits
-intent signals (``loginRequested``, ``logoutRequested``, ``refreshRequested``)
-and renders whatever state the app hands back to it.
-"""
+"""Боковая панель ShotSync в интерфейсе приложения."""
 
 from __future__ import annotations
 
@@ -36,7 +28,7 @@ SHOTSYNC_BASE_URL = "https://shotsync.ru"
 
 
 def _rounded_avatar(image: QImage, size: int = 40) -> QPixmap:
-    """Return a circular avatar pixmap for the profile header."""
+    """Обрезает аватар по кругу для заголовка профиля."""
     scaled = image.scaled(
         size,
         size,
@@ -58,19 +50,30 @@ def _rounded_avatar(image: QImage, size: int = 40) -> QPixmap:
 
 
 class ShotSyncPanel(QWidget):
-    """ShotSync navigation panel shown in place of the folder tree."""
+    """Показывает авторизацию, профиль и список съёмок ShotSync в боковой панели.
+
+    Виджет переключается между проверкой сессии, формой входа и содержимым
+    профиля. Для каждой съёмки он рисует состояние локальной копии, приёма и
+    доступные действия. Сам панель ничего не загружает и не удаляет: она испускает
+    сигналы с данными карточки, а сетевую и файловую работу выполняет ``Workspace``.
+
+    Списки ID передаются отдельно, потому что серверное состояние, локальная
+    папка и текущая операция меняются независимо. После каждого изменения
+    карточки пересобираются целиком — элементов немного, зато логика не хранит
+    полдюжины полуживых виджетов на одну съёмку.
+    """
 
     loginRequested = Signal()
     logoutRequested = Signal()
     refreshRequested = Signal()
-    shootingActivated = Signal(dict)    # emitted when a shooting card is opened
-    receiveRequested = Signal(dict)     # toggle live "receive photos" for a shooting
-    selectRequested = Signal(dict)      # download a shooting locally for selection
-    removeLocalRequested = Signal(dict) # remove the local folder, keep server shooting
-    deleteServerRequested = Signal(dict) # delete an uploaded shooting from ShotSync
-    getMarksForRequested = Signal(dict) # pull marks for a local selection folder
-    sendFolderRequested = Signal()      # upload the open folder as a new shooting
-    getMarksRequested = Signal()        # pull marks for the open ShotSync folder
+    shootingActivated = Signal(dict)  # пользователь открыл карточку съёмки
+    receiveRequested = Signal(dict)  # включить или выключить приём оригиналов
+    selectRequested = Signal(dict)  # скачать съёмку для локального отбора
+    removeLocalRequested = Signal(dict)  # удалить только локальную копию
+    deleteServerRequested = Signal(dict)  # удалить только съёмку на сервере
+    getMarksForRequested = Signal(dict)  # получить метки в локальную папку
+    sendFolderRequested = Signal()       # загрузите открытую папку как новую съемку
+    getMarksRequested = Signal()         # метки для открытой папки ShotSync
 
     def __init__(self, icon_provider: IconProvider | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -101,7 +104,6 @@ class ShotSyncPanel(QWidget):
         self.stack.addWidget(self._build_logged_in_page())
         self.stack.setCurrentIndex(0)
 
-    # ----- icon helper ---------------------------------------------------
     def _icon(self, name: str, size: int = 14, color: str = "#d6d6d6") -> QIcon:
         if self._icon_provider is None:
             return QIcon()
@@ -110,7 +112,6 @@ class ShotSyncPanel(QWidget):
         except TypeError:
             return self._icon_provider(name)
 
-    # ----- page builders -------------------------------------------------
     def _build_checking_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -125,6 +126,7 @@ class ShotSyncPanel(QWidget):
         return page
 
     def _build_login_page(self) -> QWidget:
+        """Собирает форму входа и область сообщения об ошибке."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(16, 22, 16, 16)
@@ -154,6 +156,7 @@ class ShotSyncPanel(QWidget):
         return page
 
     def _build_logged_in_page(self) -> QWidget:
+        """Собирает профиль, действия папки и прокручиваемый список съёмок."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -237,11 +240,10 @@ class ShotSyncPanel(QWidget):
         return page
 
     def set_folder_actions(self, *, can_send: bool, is_session: bool) -> None:
-        """Enable/disable the current-folder actions based on context."""
+        """Обновляет доступность действий с учётом открытой папки."""
         if hasattr(self, "send_folder_button"):
             self.send_folder_button.setEnabled(can_send)
 
-    # ----- interaction ---------------------------------------------------
     def _confirm_logout(self) -> None:
         msg = QMessageBox(self)
         msg.setWindowTitle("Выход из ShotSync")
@@ -260,7 +262,6 @@ class ShotSyncPanel(QWidget):
         if isinstance(data, dict):
             self.shootingActivated.emit(data)
 
-    # ----- state transitions --------------------------------------------
     def show_checking(self) -> None:
         self.stack.setCurrentIndex(0)
 
@@ -332,22 +333,22 @@ class ShotSyncPanel(QWidget):
         self._render_shootings()
 
     def set_receiving_ids(self, ids) -> None:
-        """Update which shootings are being received and repaint the list."""
+        """Запоминает принимаемые съёмки и обновляет их карточки."""
         self._receiving_ids = {int(i) for i in ids}
         self._render_shootings()
 
     def set_local_ids(self, ids) -> None:
-        """Mark shootings that already have a local folder to open."""
+        """Отмечает съёмки, для которых уже существует локальная папка."""
         self._local_ids = {int(i) for i in ids}
         self._render_shootings()
 
     def set_offline_ids(self, ids) -> None:
-        """Mark cards that are being shown from the local cache only."""
+        """Отмечает карточки, доступные сейчас только из локального кэша."""
         self._offline_ids = {int(i) for i in ids}
         self._render_shootings()
 
     def set_shooting_modes(self, modes: dict[int, str]) -> None:
-        """Set how each local ShotSync folder was created."""
+        """Задаёт происхождение локальных папок: отправка или скачанный отбор."""
         self._shooting_modes = {int(shooting_id): str(mode) for shooting_id, mode in modes.items()}
         self._render_shootings()
 
@@ -356,6 +357,7 @@ class ShotSyncPanel(QWidget):
         self._render_shootings()
 
     def _render_shootings(self) -> None:
+        """Полностью перестраивает список карточек по текущим наборам состояний."""
         self.shooting_list.clear()
         if not self._shootings:
             self.shooting_status.setText("Пока нет ни одной съёмки.")
@@ -391,7 +393,7 @@ class ShotSyncPanel(QWidget):
 
     @staticmethod
     def _card_height(shooting: dict, receiving: bool, mode: str) -> int:
-        """Estimate the wrapped text and action rows for a compact card."""
+        """Оценивает высоту карточки по заголовку, описанию и числу действий."""
         title = str(shooting.get("title") or "Без названия")
         title_lines = max(1, (len(title) + 27) // 28)
         description_length = {
@@ -403,7 +405,7 @@ class ShotSyncPanel(QWidget):
         return min(210, max(132, 44 + title_lines * 19 + detail_lines * 16 + action_count * 27))
 
     def _shooting_card(self, shooting: dict, receiving: bool, local: bool, offline: bool, mode: str, is_current: bool) -> QWidget:
-        """Build a compact card whose actions describe the current setup."""
+        """Собирает карточку съёмки с действиями для её текущего состояния."""
         card = QWidget()
         card.setObjectName("shotsyncShootingCard")
         card.setProperty("currentShooting", is_current)
@@ -468,8 +470,6 @@ class ShotSyncPanel(QWidget):
             remove_button = action_button("Удалить локально", "trash")
             remove_button.clicked.connect(lambda: self.removeLocalRequested.emit(shooting))
             actions.addWidget(remove_button)
-        # A remembered folder alone is not a ShotSync state. Only a real
-        # selection session or live receive hides the two server actions.
         if not mode and not receiving:
             select_button = action_button("Взять на отбор", "download")
             select_button.clicked.connect(lambda: self.selectRequested.emit(shooting))
@@ -486,11 +486,10 @@ class ShotSyncPanel(QWidget):
         return card
 
 def _humanize_login_error(raw: str) -> str:
-    """Convert a raw server/network error into a human-readable Russian message."""
+    """Переводит ответ сервера или сетевую ошибку в понятное русское сообщение."""
     if not raw:
         return "Не удалось войти. Попробуйте ещё раз."
     low = raw.lower()
-    # Server-side auth errors
     if any(k in low for k in ("invalid", "incorrect", "wrong", "неверн", "not found", "not exist",
                                "no active", "does not exist")):
         return "Неверный логин или пароль."
@@ -498,7 +497,6 @@ def _humanize_login_error(raw: str) -> str:
         return "Неверный логин или пароль."
     if any(k in low for k in ("login", "логин", "email", "user")):
         return "Пользователь с таким логином не найден."
-    # Network / connection errors
     if any(k in low for k in ("connection", "timeout", "host", "network", "refused",
                                "unreachable", "соединен", "подключен", "сеть", "недоступ")):
         return "Ошибка сети. Проверьте подключение к интернету."
@@ -506,7 +504,6 @@ def _humanize_login_error(raw: str) -> str:
         return "Ошибка безопасного соединения (SSL)."
     if any(k in low for k in ("server", "500", "503", "unavailable")):
         return "Сервер временно недоступен. Попробуйте позже."
-    # Fall back to the raw message but trim any trailing punctuation excess
     return raw.rstrip(".") + "."
 
 

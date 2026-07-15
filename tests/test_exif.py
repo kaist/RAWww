@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 import json
@@ -13,6 +16,8 @@ from rawww.exif import MetadataPipeline, camera_details, extract_metadata_batch
 
 
 class ExifTests(unittest.TestCase):
+    """Проверяет нормализацию EXIF и формирование сведений о съёмке."""
+
     def test_extracted_metadata_keeps_xmp_rating_and_capture_settings(self) -> None:
         payload = [{
             "SourceFile": "photo.raw",

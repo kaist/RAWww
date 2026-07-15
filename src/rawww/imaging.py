@@ -1,3 +1,12 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Декодирование RAW, JPEG и остальных поддерживаемых изображений.
+
+Модуль возвращает простые пиксельные структуры, чтобы фоновые процессы не
+таскали за собой Qt-объекты, которым положено жить в главном потоке.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -14,7 +23,7 @@ rawpy = None
 
 
 def _rawpy():
-    """Import the native RAW decoder only when a RAW file is actually read."""
+    """Лениво импортирует ``rawpy`` только при первом чтении RAW."""
     global rawpy
     if rawpy is None:
         try:
@@ -60,6 +69,8 @@ SHARPEN_PREVIEWS = True
 
 @dataclass(frozen=True)
 class DecodedImage:
+    """Изображение, уже превращённое в безопасный для интерфейса ``QImage``."""
+
     path: Path
     image: QImage
     width: int
@@ -68,6 +79,8 @@ class DecodedImage:
 
 @dataclass(frozen=True)
 class PixelImage:
+    """Сырые пиксели и геометрия кадра для передачи между процессами."""
+
     path: Path
     pixels: bytes
     width: int
@@ -97,17 +110,18 @@ def decode_pixels(path: Path, max_size: int) -> PixelImage:
 
 
 def decode_thumbnail_pixels(path: Path, max_size: int) -> PixelImage:
-    """Thumbnail worker entry point; never compete with the foreground view."""
+    """Декодирует миниатюру в фоновом процессе с пониженным приоритетом."""
     lower_background_priority()
     return decode_pixels(path, max_size)
 
 
 def decode_original_pixels(path: Path) -> PixelImage:
-    """Decode the complete source for the 100% viewer.
+    """Декодирует оригинал в полном разрешении для просмотра 100 %.
 
-    This deliberately shares the colour-management and orientation path used
-    by previews, but skips JPEG ``draft`` downsampling. RAW files keep using
-    their embedded preview; only files without one fall back to raw decoding.
+    Цветовой профиль и ориентация обрабатываются так же, как у превью, но для
+    JPEG не используется черновое уменьшение ``draft``. У RAW по-прежнему
+    предпочитается встроенное превью; полный RAW-декодер включается лишь при его
+    отсутствии.
     """
     if path.suffix.lower() in RAW_EXTENSIONS:
         return _decode_raw_preview(path, None)
@@ -122,8 +136,6 @@ def pixel_to_decoded(pixel: PixelImage) -> DecodedImage:
         pixel.width * 4,
         QImage.Format.Format_RGBA8888,
     ).copy()
-    # Photographic previews never need alpha. RGB888 keeps the in-RAM
-    # thumbnail cache at three bytes per pixel instead of four.
     qimage = rgba.convertToFormat(QImage.Format.Format_RGB888)
     return DecodedImage(path=pixel.path, image=qimage, width=pixel.width, height=pixel.height)
 
@@ -161,6 +173,7 @@ def _decode_pillow(
 
 
 def _decode_qt_jpeg_bytes(path: Path, data: bytes, max_size: int) -> PixelImage:
+    """Быстро декодирует JPEG-байты средствами Qt без временного файла."""
     byte_array = QByteArray(data)
     buffer = QBuffer(byte_array)
     buffer.open(QIODevice.OpenModeFlag.ReadOnly)

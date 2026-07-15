@@ -1,9 +1,7 @@
-"""Tests for the RAWww ShotSync live-receive stack (feature 1).
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-These cover the pure logic of the shared socket, the download receiver and the
-hub's folder bookkeeping without needing a live server or network: Qt signals
-are driven directly and downloads are intercepted.
-"""
+"""Проверки получения фотографий и синхронизации с ShotSync."""
 
 from __future__ import annotations
 
@@ -24,30 +22,25 @@ from rawww.shotsync_selection import SelectionMarkSyncer  # noqa: E402
 from rawww.shotsync_socket import ShotSyncSocket  # noqa: E402
 from rawww.shotsync_upload import MarksFetcher, encode_preview, exif_original_datetime  # noqa: E402
 
-# The panel (QtWidgets) and the folder cache (QtGui/QImage) both need a
-# display/GL stack (libGL). Keep everything that touches them optional so the
-# pure socket/receiver/hub/syncer logic can still be tested in a headless CI
-# environment; the guarded suites run on a normal desktop.
-try:  # pragma: no cover - environment dependent
+try:  # pragma: no cover — зависит от окружения
     from PySide6.QtWidgets import QApplication
 
     from rawww.cache import FolderCache
     from rawww.shotsync_panel import ShotSyncPanel
 
     HAVE_GUI = True
-except Exception:  # noqa: BLE001 - libGL or similar missing
+except Exception:  # noqa: BLE001 — в окружении может отсутствовать libGL
     HAVE_GUI = False
 
 BASE_URL = "https://shotsync.ru"
 
 
 def _app() -> QCoreApplication:
-    """A running Qt event loop object; QtNetwork/QtWebSockets need one.
+    """Возвращает общий цикл событий, необходимый QtNetwork и QtWebSockets.
 
-    When the GUI stack is available a full ``QApplication`` is created so the
-    same single instance can also back the widget suites. Qt refuses to create
-    a ``QApplication`` once a plain ``QCoreApplication`` exists, so building the
-    wrong type here would make later widget tests abort the process.
+    При доступном GUI сразу создаётся ``QApplication``, чтобы тот же экземпляр
+    подошёл последующим тестам виджетов. Qt не разрешает повысить уже созданный
+    ``QCoreApplication`` до ``QApplication``, поэтому порядок здесь важен.
     """
     existing = QCoreApplication.instance()
     if existing is not None:
@@ -58,6 +51,8 @@ def _app() -> QCoreApplication:
 
 
 class SocketParsingTests(unittest.TestCase):
+    """Проверяет разбор входящих сообщений WebSocket ShotSync."""
+
     def setUp(self) -> None:
         _app()
         self.socket = ShotSyncSocket(BASE_URL)
@@ -98,7 +93,7 @@ class SocketParsingTests(unittest.TestCase):
         events: list = []
         self.socket.photoAdded.connect(lambda *a: events.append(a))
         self.socket._on_text_message("not json")
-        self.socket._on_text_message('{"type": "photo.added"}')  # missing photo
+        self.socket._on_text_message('{"type": "photo.added"}')  # нет данных фотографии
         self.assertEqual(events, [])
 
     def test_send_json_reports_offline(self) -> None:
@@ -106,6 +101,8 @@ class SocketParsingTests(unittest.TestCase):
 
 
 class ReceiverTests(unittest.TestCase):
+    """Проверяет очередь и правила получения файлов ShotSync."""
+
     def setUp(self) -> None:
         _app()
         self.receiver = ShotSyncReceiver(BASE_URL)
@@ -155,9 +152,7 @@ class ReceiverTests(unittest.TestCase):
             folder = Path(tmp)
             (folder / "a.cr2").write_bytes(b"data")
             self.receiver.start_receiving(5, folder, "S")
-            # Already on disk -> no download.
             self.receiver.on_photo_added(5, {"id": 1, "name": "a.cr2", "url": "/media/a.cr2"})
-            # Shooting not being received -> ignored.
             self.receiver.on_photo_added(99, {"id": 2, "name": "b.cr2", "url": "/media/b.cr2"})
             self.assertEqual(calls, [])
 
@@ -168,16 +163,17 @@ class ReceiverTests(unittest.TestCase):
             folder = Path(tmp)
             self.receiver.start_receiving(5, folder, "S")
             self.receiver.on_photo_updated(5, {"id": 1, "rating": 4})
-            self.receiver.on_photo_updated(6, {"id": 2, "rating": 1})  # not received
+            self.receiver.on_photo_updated(6, {"id": 2, "rating": 1})  # съёмка не принимается
             self.assertEqual(marks, [(5, str(folder), {"id": 1, "rating": 4})])
 
 
 class HubPersistenceTests(unittest.TestCase):
+    """Проверяет восстановление активных приёмов между запусками."""
+
     def setUp(self) -> None:
         _app()
         self.hub = ShotSyncHub(BASE_URL)
         self._tmp = TemporaryDirectory()
-        # Isolate settings to a throwaway ini so real user config is untouched.
         ini = Path(self._tmp.name) / "settings.ini"
         self.hub._settings = QSettings(str(ini), QSettings.Format.IniFormat)
 
@@ -193,7 +189,6 @@ class HubPersistenceTests(unittest.TestCase):
         self.assertEqual(self.hub.folder_for(42), folder)
         self.assertTrue(changed)
 
-        # A fresh hub sharing the same settings restores the target.
         restored = ShotSyncHub(BASE_URL)
         restored._settings = self.hub._settings
         restored._restore_targets()
@@ -221,6 +216,8 @@ class HubPersistenceTests(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_GUI, "QtWidgets/libGL not available in this environment")
 class PanelRenderingTests(unittest.TestCase):
+    """Проверяет состояния и действия карточек панели ShotSync."""
+
     def setUp(self) -> None:
         _app()
         self.panel = ShotSyncPanel()
@@ -236,7 +233,6 @@ class PanelRenderingTests(unittest.TestCase):
         self.panel.receiveRequested.connect(emitted.append)
         shooting = {"id": 2, "title": "Portrait", "photo_count": 0, "status": "active"}
         self.panel.set_shootings([shooting])
-        # Emit directly to avoid opening a native menu in the test.
         self.panel.receiveRequested.emit(shooting)
         self.assertEqual(emitted, [shooting])
 
@@ -255,7 +251,7 @@ class PanelRenderingTests(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_GUI, "QtGui/libGL not available in this environment")
 class CacheShotSyncTests(unittest.TestCase):
-    """Selection session state persisted in the folder cache (feature 2)."""
+    """Проверяет хранение сессии, соответствий и очереди меток в кэше."""
 
     def setUp(self) -> None:
         self._tmp = TemporaryDirectory()
@@ -295,7 +291,7 @@ class CacheShotSyncTests(unittest.TestCase):
 
 
 class _FakeHub(QObject):
-    """Minimal stand-in for ShotSyncHub used by the mark-syncer tests."""
+    """Минимальная замена ``ShotSyncHub`` для тестов синхронизации меток."""
 
     ackReceived = Signal(dict)
     connectionChanged = Signal(bool)
@@ -313,10 +309,10 @@ class _FakeHub(QObject):
 
 
 class _FakeCache:
-    """In-memory stand-in for the ShotSync bits of :class:`FolderCache`.
+    """Хранит нужную тестам часть состояния ``FolderCache`` прямо в памяти.
 
-    Mirrors the coalescing pending-queue semantics so the syncer logic can be
-    exercised without QtGui/libGL (which the real cache pulls in).
+    Заглушка повторяет объединение ожидающих меток и позволяет проверять
+    синхронизацию без QtGui и настоящей SQLite-базы.
     """
 
     def __init__(self, photos: dict[str, int]) -> None:
@@ -348,7 +344,7 @@ class _FakeCache:
 
 
 class SelectionMarkSyncerTests(unittest.TestCase):
-    """Marks are queued offline and flushed/cleared once the socket is live."""
+    """Проверяет очередь меток без сети и очистку после ответа сервера."""
 
     def setUp(self) -> None:
         _app()
@@ -366,7 +362,6 @@ class SelectionMarkSyncerTests(unittest.TestCase):
 
     def test_flush_on_reconnect_sends_and_ack_clears(self) -> None:
         self.syncer.queue_mark("a.jpg", detail={"rating": 4}, changes={"rating": 4})
-        # Socket comes online -> syncer flushes queued marks.
         self.hub.connected = True
         self.hub.connectionChanged.emit(True)
         self.assertEqual(len(self.hub.sent), 1)
@@ -374,7 +369,6 @@ class SelectionMarkSyncerTests(unittest.TestCase):
         self.assertEqual(message["type"], "photo.rate")
         self.assertEqual(message["photo_ids"], [101])
         self.assertEqual(message["rating"], 4)
-        # Server acks -> queue is cleared.
         self.hub.ackReceived.emit({"ok": True, "request_id": message["request_id"]})
         self.assertEqual(self.cache.pending_shotsync_count(), 0)
 
@@ -396,10 +390,10 @@ class SelectionMarkSyncerTests(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_GUI, "imaging pipeline (QtGui/libGL) not available")
 class EncodePreviewTests(unittest.TestCase):
-    """Client-side 1920px JPEG preview generation (feature 3).
+    """Проверяет создание клиентского JPEG-превью с длинной стороной до 1920 px.
 
-    Now routes through :func:`rawww.imaging.decode_pixels` so RAW files are
-    handled; that pulls in QtGui, hence the GUI guard.
+    Код использует ``rawww.imaging.decode_pixels`` и умеет обрабатывать RAW,
+    поэтому этим тестам нужен рабочий QtGui.
     """
 
     def test_downscales_large_image_to_jpeg(self) -> None:
@@ -412,7 +406,7 @@ class EncodePreviewTests(unittest.TestCase):
             self.assertTrue(data)
             with Image.open(BytesIO(data)) as out:
                 self.assertEqual(out.format, "JPEG")
-                self.assertEqual(max(out.size), 1920)  # long edge clamped
+                self.assertEqual(max(out.size), 1920)  # длинная сторона ограничена
 
     def test_small_image_is_not_upscaled(self) -> None:
         from PIL import Image
@@ -426,6 +420,8 @@ class EncodePreviewTests(unittest.TestCase):
 
 
 class UploadExifTimestampTests(unittest.TestCase):
+    """Проверяет сохранение времени съёмки при подготовке превью."""
+
     def test_fallback_reads_original_datetime_from_source_exif(self) -> None:
         with patch(
             "rawww.exif.extract_metadata_batch",
@@ -438,7 +434,7 @@ class UploadExifTimestampTests(unittest.TestCase):
 
 
 class _CollectingCache:
-    """Records store_photo_selection calls for the MarksFetcher test."""
+    """Записывает вызовы store_photo_selection для теста MarksFetcher."""
 
     def __init__(self) -> None:
         self.stored: list[tuple] = []
@@ -451,7 +447,7 @@ class _CollectingCache:
 
 
 class MarksFetcherTests(unittest.TestCase):
-    """The "Получить" flow writes returned marks into the folder cache."""
+    """Проверяет запись полученных серверных меток в кэш папки."""
 
     def setUp(self) -> None:
         _app()
@@ -465,7 +461,7 @@ class MarksFetcherTests(unittest.TestCase):
             "marks": [
                 {"id": 101, "name": "a.jpg", "rating": 5, "color_label": "red", "comment": "hero"},
                 {"name": "b.jpg", "rating": None, "color_label": "", "comment": ""},
-                {"name": "", "rating": 3},  # skipped: no name
+                {"name": "", "rating": 3},  # запись без имени пропускается
             ],
         }
         applied = self.fetcher._apply_marks(payload, cache)

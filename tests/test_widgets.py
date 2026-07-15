@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 import os
@@ -15,6 +18,8 @@ from rawww.widgets import CodeReplacementsEditor
 
 
 class CodeReplacementsEditorTests(unittest.TestCase):
+    """Проверяет редактор кодов замены и его локальное состояние."""
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])

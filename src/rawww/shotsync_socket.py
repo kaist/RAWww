@@ -1,21 +1,7 @@
-"""Single shared WebSocket connection to ShotSync (``ws/app``).
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-The whole application keeps **one** live socket, no matter how many tabs or
-shootings are being observed at once.  The server pushes every event for the
-signed-in user through ``wss://shotsync.ru/ws/app/?api_key=…``:
-
-* ``connection.ready``           - sent once right after the socket opens.
-* ``photo.added``   ``{shooting_id, photo}``  - a new photo finished processing.
-* ``photo.updated`` ``{shooting_id, photo}``  - rating/color/comment changed.
-* ``shooting.updated`` ``{shooting}``          - shooting metadata changed.
-* ``shooting.deleted`` ``{shooting_id}``       - shooting was removed.
-* ``photo.ack`` ``{ok, request_id, …}``        - reply to a mark we sent.
-* ``pong``                                     - reply to our heartbeat ping.
-
-The same socket is used to *send* owner marks (features 2 and 3) via
-:meth:`send_json`; callers that need durability keep their own on-disk queue
-and re-send through here once :attr:`connected` turns back on.
-"""
+"""Общий WebSocket-клиент ShotSync с автоматическим переподключением."""
 
 from __future__ import annotations
 
@@ -24,22 +10,25 @@ import json
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtWebSockets import QWebSocket
 
-# Reconnect backoff (milliseconds): quick first retry, capped so a long outage
-# does not hammer the server.
 _RECONNECT_START_MS = 1000
 _RECONNECT_MAX_MS = 30000
 _HEARTBEAT_MS = 25000
 
 
 class ShotSyncSocket(QObject):
-    """Auto-reconnecting wrapper around a single :class:`QWebSocket`."""
+    """Поддерживает одно живое WebSocket-соединение с ShotSync.
 
-    connectionChanged = Signal(bool)          # True when the socket is live
-    photoAdded = Signal(int, dict)            # shooting_id, photo payload
-    photoUpdated = Signal(int, dict)          # shooting_id, photo payload
-    shootingUpdated = Signal(dict)            # shooting payload
-    shootingDeleted = Signal(int)              # shooting_id
-    ackReceived = Signal(dict)                # photo.ack payload
+    Сам переподключается с растущей задержкой, отправляет heartbeat и разбирает
+    входящие события. Остальному приложению оставляет сигналы, а сетевую кухню
+    прячет здесь — ей совершенно незачем расползаться по интерфейсу.
+    """
+
+    connectionChanged = Signal(bool)  # соединение с сервером установлено
+    photoAdded = Signal(int, dict)  # съёмка и данные новой фотографии
+    photoUpdated = Signal(int, dict)  # съёмка и обновлённые данные фотографии
+    shootingUpdated = Signal(dict)  # данные изменившейся съёмки
+    shootingDeleted = Signal(int)  # идентификатор удалённой съёмки
+    ackReceived = Signal(dict)  # содержимое подтверждения photo.ack
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -63,13 +52,12 @@ class ShotSyncSocket(QObject):
         self._heartbeat.setInterval(_HEARTBEAT_MS)
         self._heartbeat.timeout.connect(self._send_ping)
 
-    # ----- public state --------------------------------------------------
     @property
     def connected(self) -> bool:
         return self._connected
 
     def set_api_key(self, key: str | None) -> None:
-        """Update the credential; reconnect if it changed while running."""
+        """Обновляет ключ и переподключается, если активные данные изменились."""
         new_key = (key or "").strip()
         if new_key == self._api_key:
             return
@@ -78,7 +66,7 @@ class ShotSyncSocket(QObject):
             self._reopen()
 
     def start(self) -> None:
-        """Begin (and keep) a live connection while a key is available."""
+        """Запускает и поддерживает соединение, пока задан ключ API."""
         self._want_running = True
         if not self._api_key:
             return
@@ -86,20 +74,19 @@ class ShotSyncSocket(QObject):
             self._open()
 
     def stop(self) -> None:
-        """Tear the socket down and stop reconnecting."""
+        """Закрывает сокет и запрещает автоматическое переподключение."""
         self._want_running = False
         self._reconnect_timer.stop()
         self._heartbeat.stop()
         self._socket.close()
 
     def send_json(self, payload: dict) -> bool:
-        """Send a JSON message. Returns ``False`` when the socket is offline."""
+        """Отправляет JSON и возвращает ``False``, если соединения сейчас нет."""
         if not self._connected:
             return False
         self._socket.sendTextMessage(json.dumps(payload))
         return True
 
-    # ----- connection lifecycle -----------------------------------------
     def _ws_url(self) -> QUrl:
         scheme = "wss" if self._base_url.startswith("https") else "ws"
         host = self._base_url.split("://", 1)[-1]
@@ -121,7 +108,6 @@ class ShotSyncSocket(QObject):
         if self._reconnect_timer.isActive():
             return
         self._reconnect_timer.start(self._reconnect_ms)
-        # Exponential backoff, capped.
         self._reconnect_ms = min(self._reconnect_ms * 2, _RECONNECT_MAX_MS)
 
     def _on_connected(self) -> None:
@@ -141,8 +127,8 @@ class ShotSyncSocket(QObject):
     def _send_ping(self) -> None:
         self.send_json({"type": "ping"})
 
-    # ----- inbound messages ----------------------------------------------
     def _on_text_message(self, message: str) -> None:
+        """Разбирает входящее событие и направляет его в подходящий сигнал Qt."""
         try:
             data = json.loads(message)
         except (ValueError, TypeError):

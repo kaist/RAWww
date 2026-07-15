@@ -1,18 +1,7 @@
-"""Pure helpers for syncing local face sets with the ShotSync server.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-The desktop keeps its "наборы лиц" (people) in ``QSettings`` as a JSON list of
-``{"id", "name", "embedding", "avatar"}`` entries, where ``avatar`` is a base64
-image of the face crop. The server keeps the same people as ``AccountFace``
-rows returned by ``GET /api/users/faces/`` as
-``{"id", "name", "embedding", "photo_url", "bbox", "auto_mark"}``.
-
-When the user is logged in the server library is authoritative (mirroring the
-code-replacements sync), so this module converts server rows into the local
-entry shape while preserving avatars already stored locally, and reports which
-local-only people still need to be uploaded and which previews still need to be
-fetched. All functions here are side-effect free so they can be unit tested
-without Qt or the network.
-"""
+"""Синхронизация локальных наборов лиц с данными ShotSync."""
 
 from __future__ import annotations
 
@@ -20,18 +9,16 @@ import json
 import math
 from hashlib import sha1
 
-# A local-only person is considered "already on the server" (so it is not
-# uploaded again) when its embedding matches a server one this closely.
 DUPLICATE_SIMILARITY = 0.9
 
 
 def local_face_id(embedding: list) -> str:
-    """Stable 12-char id derived from an embedding (matches app.py)."""
+    """Строит стабильный 12-символьный идентификатор из эмбеддинга лица."""
     return sha1(json.dumps(embedding).encode()).hexdigest()[:12]
 
 
 def face_similarity(left: list, right: list) -> float:
-    """Cosine similarity of two embeddings; 0.0 when either is empty."""
+    """Возвращает косинусное сходство эмбеддингов или 0 для пустого вектора."""
     if not left or not right or len(left) != len(right):
         return 0.0
     dot = sum(float(a) * float(b) for a, b in zip(left, right))
@@ -52,10 +39,10 @@ def clean_auto_mark(value: object) -> dict:
 
 
 def server_face_to_local(face: dict, previous: dict | None = None) -> dict:
-    """Convert one server ``AccountFace`` payload to a local face-set entry.
+    """Преобразует серверную запись ``AccountFace`` в локальный набор лица.
 
-    ``previous`` is the matching local entry (if any); its ``avatar`` and ``id``
-    are preserved so the on-screen preview and widget identity stay stable.
+    Если передан ``previous``, его локальные ID и аватар сохраняются. Благодаря
+    этому после синхронизации виджет не меняет личность и не мигает превью.
     """
     embedding = [float(value) for value in (face.get("embedding") or [])]
     previous = previous or {}
@@ -72,18 +59,14 @@ def server_face_to_local(face: dict, previous: dict | None = None) -> dict:
 def merge_server_faces(
     local_sets: list[dict], server_faces: list[dict]
 ) -> tuple[list[dict], list[dict], list[tuple[str, str]]]:
-    """Reconcile the local library with the server list.
+    """Объединяет локальную библиотеку лиц с актуальным списком сервера.
 
-    Returns ``(merged, to_push, previews)``:
-
-    * ``merged`` — the new local library. Server people come first (authoritative
-      when logged in), keeping any avatar already stored locally. Local-only
-      people that the server does not have yet are appended so nothing is lost
-      before their upload finishes.
-    * ``to_push`` — local-only people (no ``server_id`` and not matching any
-      server embedding) that should be uploaded to the server.
-    * ``previews`` — ``(local_id, photo_url)`` for server people whose avatar is
-      not available locally yet and must be downloaded.
+    Возвращает ``(merged, to_push, previews)``. В ``merged`` серверные записи
+    считаются основными, но уже загруженные локальные аватары сохраняются.
+    ``to_push`` содержит локальные наборы, которых ещё нет на сервере, а
+    ``previews`` — пары ``(local_id, photo_url)`` для недостающих аватаров.
+    Локальные данные не исчезают до успешной отправки: синхронизация должна
+    объединять библиотеку, а не играть в рулетку с лицами пользователей.
     """
     previous_by_server_id = {
         int(entry["server_id"]): entry
@@ -119,7 +102,7 @@ def merge_server_faces(
 
 
 def upload_fields_for_entry(entry: dict) -> dict[str, str]:
-    """Build the multipart text fields for ``POST /api/users/faces/upload/``."""
+    """Готовит текстовые поля для ``POST /api/users/faces/upload/``."""
     fields = {
         "embedding": json.dumps(entry.get("embedding") or [], separators=(",", ":")),
         "name": str(entry.get("name") or ""),

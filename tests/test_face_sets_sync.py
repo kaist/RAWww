@@ -1,4 +1,7 @@
-"""Tests for reconciling local face sets with the ShotSync server library."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Проверки синхронизации локальных наборов лиц с ShotSync."""
 
 from __future__ import annotations
 
@@ -24,6 +27,8 @@ def _server_face(face_id, name, embedding, photo_url="", auto_mark=None):
 
 
 class ServerFaceToLocalTests(unittest.TestCase):
+    """Проверяет преобразование серверного лица в локальный набор."""
+
     def test_converts_and_keeps_previous_avatar_and_id(self):
         previous = {"id": "keepid", "avatar": "AVATAR", "embedding": [0.1, 0.2]}
         entry = server_face_to_local(
@@ -43,6 +48,8 @@ class ServerFaceToLocalTests(unittest.TestCase):
 
 
 class MergeServerFacesTests(unittest.TestCase):
+    """Проверяет объединение серверной и локальной библиотек лиц."""
+
     def test_server_faces_replace_local_and_keep_local_avatar(self):
         local = [{"id": "abc", "server_id": 7, "name": "Old", "embedding": [0.1], "avatar": "AV"}]
         server = [_server_face(7, "New", [0.1], photo_url="https://x/a.jpg")]
@@ -50,9 +57,9 @@ class MergeServerFacesTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["server_id"], 7)
         self.assertEqual(merged[0]["name"], "New")
-        self.assertEqual(merged[0]["avatar"], "AV")  # preserved
+        self.assertEqual(merged[0]["avatar"], "AV")  # локальный аватар сохранился
         self.assertEqual(to_push, [])
-        self.assertEqual(previews, [])  # avatar already present -> not fetched
+        self.assertEqual(previews, [])  # существующий аватар не скачиваем повторно
 
     def test_missing_avatar_is_queued_for_preview(self):
         local = [{"id": "abc", "server_id": 7, "name": "N", "embedding": [0.1], "avatar": ""}]
@@ -74,11 +81,13 @@ class MergeServerFacesTests(unittest.TestCase):
         server = [_server_face(7, "Server", [1.0, 0.0])]
         merged, to_push, _previews = merge_server_faces(local, server)
         self.assertEqual(to_push, [])
-        self.assertEqual(len(merged), 1)  # only the server copy remains
+        self.assertEqual(len(merged), 1)  # после объединения остаётся серверная запись
         self.assertEqual(merged[0]["server_id"], 7)
 
 
 class UploadFieldsTests(unittest.TestCase):
+    """Проверяет поля формы при отправке набора лиц."""
+
     def test_serializes_embedding_name_and_optional_bbox(self):
         fields = upload_fields_for_entry(
             {"name": "Иван", "embedding": [0.1, 0.2], "bbox": {"x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4}}

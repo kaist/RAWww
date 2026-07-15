@@ -1,8 +1,7 @@
-"""Bounded in-memory LRU caches for decoded frames and thumbnails.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-This is pure bookkeeping logic with no Qt widget dependencies, split out of
-``Workspace`` so it can be reasoned about and unit-tested on its own.
-"""
+"""Ограниченные LRU-кэши в памяти для декодированных кадров и миниатюр."""
 
 from __future__ import annotations
 
@@ -15,7 +14,12 @@ from .imaging import DecodedImage
 
 
 class DecodeCache:
-    """RAM LRU for full/preview frames plus a byte-bounded thumbnail LRU."""
+    """Хранит в RAM недавние полные кадры, превью и миниатюры по правилам LRU.
+
+    Крупные изображения ограничиваются числом записей, миниатюры — суммарным
+    размером байтов. При переполнении первым уходит то, чем дольше всего не
+    пользовались: память всё-таки кэш, а не музей каждого открытого файла.
+    """
 
     def __init__(
         self,
@@ -48,9 +52,6 @@ class DecodeCache:
         self._trim_memory()
 
     def _trim_memory(self) -> None:
-        # Original frames are much larger than display previews. Keeping the
-        # active one is enough for a repeated Z press without risking a large
-        # accumulation while browsing.
         original_keys = [key for key in self.memory if key[1] == self._original_size]
         while len(original_keys) > 1:
             self.memory.pop(original_keys.pop(0), None)

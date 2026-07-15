@@ -1,9 +1,7 @@
-"""Unit tests for the in-memory decode/thumbnail LRU caches.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-These exercise the eviction and byte-accounting logic in isolation, which used
-to live inline in the ``Workspace`` god-object and was impossible to test
-without a full Qt application and folder cache.
-"""
+"""Проверки кэшей декодированных кадров и миниатюр."""
 
 from __future__ import annotations
 
@@ -38,6 +36,8 @@ def _make_cache(*, ram_limit=96, full_limit=5, thumbnail_bytes_limit=10_000) -> 
 
 
 class DecodeCacheMemoryTests(unittest.TestCase):
+    """Проверяет вытеснение полноразмерных кадров из оперативной памяти."""
+
     def test_get_returns_none_for_missing_key(self) -> None:
         cache = _make_cache()
         self.assertIsNone(cache.get((Path("a.jpg"), THUMB_SIZE)))
@@ -54,7 +54,7 @@ class DecodeCacheMemoryTests(unittest.TestCase):
         a, b, c = (Path("a"), THUMB_SIZE), (Path("b"), THUMB_SIZE), (Path("c"), THUMB_SIZE)
         cache.put(a, _decoded("a", THUMB_SIZE))
         cache.put(b, _decoded("b", THUMB_SIZE))
-        cache.get(a)  # touch 'a' so 'b' becomes the eviction victim
+        cache.get(a)  # обращение к «a» делает «b» самой старой записью
         cache.put(c, _decoded("c", THUMB_SIZE))
         self.assertIsNotNone(cache.get(a))
         self.assertIsNone(cache.get(b))
@@ -86,6 +86,8 @@ class DecodeCacheMemoryTests(unittest.TestCase):
 
 
 class DecodeCacheThumbnailTests(unittest.TestCase):
+    """Проверяет ограничение памяти и порядок вытеснения миниатюр."""
+
     def test_thumbnail_roundtrip_and_byte_accounting(self) -> None:
         cache = _make_cache()
         image = QImage(8, 8, QImage.Format.Format_RGBA8888)

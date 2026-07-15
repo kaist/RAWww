@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 from io import BytesIO
@@ -13,6 +16,8 @@ from rawww.face_analysis import FACE_TEMPLATE, Face, _aligned_face, _nms, recogn
 
 
 class FaceAnalysisTests(unittest.TestCase):
+    """Проверяет подготовку изображения, детектор и эмбеддинги лиц."""
+
     def test_nms_keeps_separate_detections(self) -> None:
         detections = np.array([
             [0, 0, 10, 10, 0.9],
@@ -53,6 +58,8 @@ class FaceAnalysisTests(unittest.TestCase):
         scores = np.array([0.9, 0.8], dtype=np.float32)
 
         class Session:
+            """Предсказуемая заглушка ONNX без тяжёлой нейросети внутри."""
+
             def __init__(self) -> None:
                 self.batches = []
 

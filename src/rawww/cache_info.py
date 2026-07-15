@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 import argparse
@@ -9,6 +12,7 @@ from .cache import cache_path
 
 
 def main() -> None:
+    """Печатает расположение и размер кэша для диагностики."""
     parser = argparse.ArgumentParser()
     parser.add_argument("folder", type=Path)
     parser.add_argument("--limit", type=int, default=20)

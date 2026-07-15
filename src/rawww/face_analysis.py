@@ -1,4 +1,7 @@
-"""Minimal CPU face detection and embedding inference for the bundled models."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Поиск лиц и эмбеддингов на CPU с моделями, поставляемыми вместе с приложением."""
 
 from __future__ import annotations
 
@@ -24,6 +27,8 @@ FACE_TEMPLATE = np.array(
 
 @dataclass(frozen=True)
 class Face:
+    """Найденное лицо: рамка, ориентиры и вектор для сравнения с наборами."""
+
     bbox: np.ndarray
     landmarks: np.ndarray
     confidence: float
@@ -98,6 +103,7 @@ def _nms(detections: np.ndarray, threshold: float = 0.4) -> np.ndarray:
 
 
 def _detect(image: Image.Image, threshold: float = 0.5) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Запускает детектор и возвращает рамки, ориентиры и уверенность после NMS."""
     values, scale = _detector_input(image)
     session = _detector()
     outputs = session.run(None, {session.get_inputs()[0].name: values})
@@ -147,7 +153,7 @@ def _aligned_face(image: Image.Image, landmarks: np.ndarray) -> Image.Image:
 
 
 def recognize(image: Image.Image) -> list[Face]:
-    """Return all detected faces with 512-value embeddings for an RGB image."""
+    """Находит лица в RGB-изображении и строит для каждого 512-мерный эмбеддинг."""
     boxes, landmarks, scores = _detect(image)
     if not len(boxes):
         return []
@@ -157,9 +163,6 @@ def recognize(image: Image.Image) -> list[Face]:
         values = (np.asarray(aligned, dtype=np.float32) - 127.5) / 127.5
         crops.append(values.transpose(2, 0, 1))
     session = _recognition()
-    # The bundled recognition model has a fixed batch dimension of one.  Passing
-    # several aligned faces at once still produces embeddings, but ONNX Runtime
-    # warns for every output because its declared shape is ``(1, 512)``.
     input_name = session.get_inputs()[0].name
     embeddings = np.vstack([
         session.run(None, {input_name: crop[None]})[0]

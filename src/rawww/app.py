@@ -1,3 +1,13 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Главное окно Ctrlka: интерфейс просмотра, каталогов и рабочих вкладок.
+
+Здесь намеренно собрана Qt-обвязка приложения. Тяжёлая работа вынесена в
+отдельные модули и фоновые исполнители, чтобы интерфейс не замирал в позе
+задумчивого фотографа при открытии большой папки.
+"""
+
 from __future__ import annotations
 
 import os
@@ -105,7 +115,6 @@ from .version import __version__
 
 
 THUMB_SIZE = 256
-# A non-preview decode key: the complete source used by the 100% inspector.
 ORIGINAL_SIZE = 0
 CARD_HARD_MIN_WIDTH = 96
 CARD_TARGET_WIDTH = 200
@@ -124,12 +133,7 @@ BACKGROUND_DECODE_WORKERS = 3
 VISIBLE_THUMB_DECODE_WORKERS = 1
 MAX_PENDING_THUMBS = 2
 VISIBLE_THUMB_LOOKUP_WORKERS = 2
-# The visible decoder has one worker. Keeping more than one job submitted
-# would put stale viewport work in an executor queue where it cannot be
-# reprioritized after a scroll.
 MAX_VISIBLE_THUMB_PENDING = 1
-# Keep startup work below one frame.  A zero-interval timer can otherwise
-# repeatedly win the event loop and make the native window look hung.
 POPULATE_BATCH = 48
 THUMB_SUBMIT_BATCH = 1
 WORK_PUMP_INTERVAL_MS = 16
@@ -156,7 +160,11 @@ def _application_settings() -> QSettings:
 
 
 def _resize_export_worker(job: tuple[str, str, int, bool, int, bool, float, int, int, bool, int]) -> tuple[str, str, str | None]:
-    """Process-isolated JPEG export; RAW files prefer their embedded preview."""
+    """Экспортирует JPEG в отдельном процессе.
+
+    Для RAW сначала берём встроенное превью: для пакетной операции это обычно
+    быстрее и бережнее к памяти, чем разворачивать весь исходник на каждом кадре.
+    """
     source_text, output_text, max_side, sharpen, sharpen_amount, unsharp, unsharp_radius, unsharp_amount, unsharp_threshold, keep_exif, raw_orientation = job
     source, output = Path(source_text), Path(output_text)
     temporary = output.with_name(f".{output.stem}.{uuid4().hex}.tmp")
@@ -180,9 +188,6 @@ def _resize_export_worker(job: tuple[str, str, int, bool, int, bool, float, int,
             image = Image.open(source)
         embedded_orientation = image.getexif().get(274)
         image = ImageOps.exif_transpose(image)
-        # Embedded RAW previews often lack their camera file's orientation
-        # tag. The regular preview pipeline uses EXIF transpose; apply the
-        # cached RAW orientation only when it was absent from that preview.
         if is_raw and not embedded_orientation:
             transforms = {
                 2: Image.Transpose.FLIP_LEFT_RIGHT,
@@ -196,9 +201,6 @@ def _resize_export_worker(job: tuple[str, str, int, bool, int, bool, float, int,
             transform = transforms.get(int(raw_orientation or 1))
             if transform is not None:
                 image = image.transpose(transform)
-        # exif_transpose already re-serialised info["exif"] without the
-        # orientation tag, so it keeps sub-IFDs (GPS, maker notes) that a bare
-        # getexif().tobytes() would drop. The ICC profile always travels along.
         if keep_exif:
             exif = image.info.get("exif") or image.getexif().tobytes()
         else:
@@ -224,7 +226,11 @@ def _resize_export_worker(job: tuple[str, str, int, bool, int, bool, float, int,
 
 
 def _recompress_jpeg_worker(job: tuple[str, int, bool]) -> tuple[str, int, int, str | None]:
-    """Re-encode a JPEG in place at a lower quality, keeping ICC and (optionally) EXIF."""
+    """Пересохраняет JPEG с меньшим качеством, сохраняя профиль цвета и EXIF.
+
+    Работа идёт через временный файл: фотография не должна исчезнуть из-за
+    неудачного пересохранения — такие фокусы хороши только в плохих бэкапах.
+    """
     source_text, quality, keep_exif = job
     source = Path(source_text)
     temporary = source.with_name(f".{source.stem}.{uuid4().hex}.tmp")
@@ -234,9 +240,6 @@ def _recompress_jpeg_worker(job: tuple[str, int, bool]) -> tuple[str, int, int, 
         original_size = source.stat().st_size
         with Image.open(source) as opened:
             opened.load()
-            # Orientation is left untouched: the pixels are not transposed, so
-            # the original EXIF (incl. its orientation tag), ICC and sub-IFDs
-            # stay valid as-is.
             exif = opened.info.get("exif") if keep_exif else None
             icc_profile = opened.info.get("icc_profile")
             image = opened if opened.mode in ("RGB", "L", "CMYK") else opened.convert("RGB")
@@ -248,8 +251,6 @@ def _recompress_jpeg_worker(job: tuple[str, int, bool]) -> tuple[str, int, int, 
             try:
                 image.save(temporary, **options)
             except (ValueError, OSError):
-                # "keep" subsampling only works when the source is a JPEG whose
-                # chroma layout Pillow can reuse; fall back to the encoder default.
                 options.pop("subsampling", None)
                 image.save(temporary, **options)
         new_size = temporary.stat().st_size
@@ -261,6 +262,8 @@ def _recompress_jpeg_worker(job: tuple[str, int, bool]) -> tuple[str, int, int, 
 
 
 class DecodeBridge(QObject):
+    """Переносит результаты фоновых задач обратно в главный поток Qt."""
+
     decoded = Signal(object)
     failed = Signal(str, str)
     cacheLoaded = Signal(int, object)
@@ -270,12 +273,12 @@ class DecodeBridge(QObject):
 
 
 def _write_xmp_task(path: Path, detail: dict, face_sets: list[dict], replacements: dict[str, str]) -> None:
-    """Worker-thread entry point; never blocks the Qt event loop on disk I/O."""
+    """Фоновая точка входа для записи XMP, чтобы дисковая операция не тормозила Qt."""
     write_sidecar(path, build_xmp(detail, face_sets, replacements))
 
 
 def _load_cache_and_check_ai(cache: FolderCache, paths: list[Path]) -> set[Path]:
-    """Open a folder cache and calculate AI availability off the UI thread."""
+    """Открывает кэш папки и проверяет AI-данные в фоне, не подвешивая окно."""
     cache.load_from_disk()
     embedding_missing = cache.missing_ai_paths(paths, "image_embeddings")
     face_missing = cache.missing_ai_paths(paths, "face_analysis")
@@ -283,7 +286,18 @@ def _load_cache_and_check_ai(cache: FolderCache, paths: list[Path]) -> set[Path]
 
 
 class VideoThumbnailer(QObject):
-    """Decode one representative video frame at a time through Qt Multimedia."""
+    """Последовательно создаёт миниатюры видео средствами Qt Multimedia.
+
+    ``QMediaPlayer`` и ``QVideoSink`` переиспользуются для всей рабочей вкладки:
+    класс берёт следующий путь из очереди, ждёт пригодный кадр, уменьшает его и
+    отдаёт через ``previewReady``. Одновременно обрабатывается только один файл.
+    Это не просто экономия — асинхронный кадр от прошлого ролика иначе легко
+    приезжает позже и притворяется миниатюрой следующего.
+
+    Счётчик поколения отбрасывает запоздавшие события после отмены, а флаг
+    активности останавливает работу у скрытых вкладок и во время просмотра
+    видео. Сам миниатюрщик ничего не пишет в кэш: это забота ``Workspace``.
+    """
 
     previewReady = Signal(Path, QImage)
 
@@ -320,14 +334,12 @@ class VideoThumbnailer(QObject):
             self._reset_current()
 
     def cancel(self) -> None:
-        """Drop queued/current work while keeping the thumbnailer active."""
+        """Отменяет текущую и отложенную работу, не выключая миниатюрщик целиком."""
         self._queue.clear()
         self._queued.clear()
         self._reset_current()
 
     def _reset_current(self) -> None:
-        # Bump the generation so any late status/frame callbacks from the clip
-        # we are abandoning are ignored instead of being attributed elsewhere.
         self._generation += 1
         self._player.stop()
         self._current = None
@@ -335,8 +347,6 @@ class VideoThumbnailer(QObject):
         self._ready_for_frame = False
 
     def _maybe_start(self) -> None:
-        # Decoding is strictly serialized: never begin a new clip while one is
-        # already in flight, otherwise overlapping starts mislabel thumbnails.
         if self._current is not None:
             return
         if not self._active or not self._queue:
@@ -347,23 +357,15 @@ class VideoThumbnailer(QObject):
         self._generation += 1
         self._current = path
         self._queued.discard(path)
-        # A frame must not be accepted until the media for this exact source
-        # has finished loading. Otherwise buffered frames from the previous
-        # clip can arrive first and be stored under the new path, mixing up
-        # thumbnails.
         self._ready_for_frame = False
         self._current_source = QUrl.fromLocalFile(str(path))
         self._player.setSource(self._current_source)
-        # Playing briefly is the portable way to make all Qt backends deliver
-        # a frame; the first frame is enough for a grid thumbnail.
         self._player.play()
 
     def _is_current_source(self) -> bool:
         return self._current is not None and self._player.source() == self._current_source
 
     def _media_status_changed(self, status) -> None:
-        # Only open the frame gate for a status that belongs to the clip we are
-        # currently decoding; stale events from a previous source are ignored.
         if not self._is_current_source():
             return
         if status in (
@@ -375,7 +377,6 @@ class VideoThumbnailer(QObject):
     def _frame_ready(self, frame) -> None:
         if not self._ready_for_frame or not frame.isValid():
             return
-        # Reject frames that do not belong to the source we are decoding now.
         if not self._is_current_source():
             return
         image = frame.toImage()
@@ -394,6 +395,8 @@ class VideoThumbnailer(QObject):
 
 
 class FolderNameEditor(QLineEdit):
+    """Временный редактор имени папки прямо поверх дерева каталогов."""
+
     accepted = Signal()
     cancelled = Signal()
 
@@ -412,7 +415,7 @@ class FolderNameEditor(QLineEdit):
 
 
 def _local_paths_from_mime(mime: QMimeData) -> list[Path]:
-    """Return existing local file URLs, keeping their original drag order."""
+    """Возвращает существующие локальные пути из перетаскивания, сохраняя порядок."""
     if not mime.hasUrls():
         return []
     paths: list[Path] = []
@@ -431,7 +434,7 @@ _PREFERRED_DROP_EFFECT_MIME = 'application/x-qt-windows-mime;value="Preferred Dr
 
 
 def _mime_requests_move(mime: QMimeData) -> bool:
-    """Recognise our cut marker and Windows Explorer's standard cut marker."""
+    """Распознаёт отметку «вырезать» нашего приложения и стандартную отметку Проводника."""
     if mime.hasFormat("application/x-rawww-cut"):
         return True
     effect = bytes(mime.data(_PREFERRED_DROP_EFFECT_MIME))
@@ -439,14 +442,24 @@ def _mime_requests_move(mime: QMimeData) -> bool:
 
 
 class PhotoGrid(QListWidget):
+    """Главная сетка фотографий и папок в рабочей вкладке.
+
+    Класс отвечает не за данные каталога, а за их интерактивное представление:
+    рассчитывает адаптивную ширину карточек, сообщает контроллеру о прокрутке,
+    открытии и удалении, обрабатывает серии, аудиозаметки и перенос файлов.
+    Сами операции с диском выполняет ``Workspace`` — сетка только формулирует
+    намерение пользователя через сигналы. Иначе один неудачный drag-and-drop
+    мог бы превратить виджет в маленький, но очень деятельный файловый менеджер.
+    """
+
     openRequested = Signal(Path)
     viewportChanged = Signal()
     cardSizeChanged = Signal(int)
     seriesToggleRequested = Signal(Path)
     audioRequested = Signal(Path)
     audioHoverChanged = Signal(object)
-    deleteRequested = Signal(bool)  # permanent
-    pathsDropped = Signal(object, object, object)  # paths, destination, action
+    deleteRequested = Signal(bool)   # постоянный
+    pathsDropped = Signal(object, object, object)   # пути, пункт назначения, действие
 
     def __init__(self) -> None:
         super().__init__()
@@ -457,8 +470,6 @@ class PhotoGrid(QListWidget):
         self.setViewMode(QListWidget.ViewMode.IconMode)
         self.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.setMovement(QListWidget.Movement.Static)
-        # A stable scrollbar gutter prevents QListView from laying out against
-        # a width that changes depending on the resulting number of rows.
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.card_size = 1
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -471,8 +482,6 @@ class PhotoGrid(QListWidget):
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
         self._hovered_audio_path: Path | None = None
-        # Adjacent columns can differ by one pixel so their total always equals
-        # the viewport width.  A uniform grid cannot represent that remainder.
         self.setUniformItemSizes(False)
         self.setWordWrap(False)
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
@@ -483,11 +492,11 @@ class PhotoGrid(QListWidget):
         self._update_card_size()
 
     def _queue_card_size_update(self, _minimum: int, _maximum: int) -> None:
-        # The vertical scrollbar changes the viewport width after QListView has
-        # laid out its contents.  Recalculate once that geometry has settled.
+        """Пересчитывает карточки после того, как Qt окончательно уложит полосу прокрутки."""
         QTimer.singleShot(0, self._update_card_size)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
+        """Сообщает, что после изменения размера набор видимых кадров поменялся."""
         super().resizeEvent(event)
         self._update_card_size()
         self.viewportChanged.emit()
@@ -498,6 +507,7 @@ class PhotoGrid(QListWidget):
             self.openRequested.emit(Path(path))
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        """Разбирает клики по интерактивным областям карточки до обычного выбора элемента."""
         if event.button() == Qt.MouseButton.LeftButton:
             item = self.itemAt(event.position().toPoint())
             if item is not None:
@@ -528,6 +538,7 @@ class PhotoGrid(QListWidget):
         super().keyPressEvent(event)
 
     def startDrag(self, supported_actions) -> None:  # noqa: N802
+        """Упаковывает выбранные пути в стандартный MIME-набор для приложения и Проводника."""
         paths = [Path(item.data(Qt.ItemDataRole.UserRole)) for item in self.selectedItems()
                  if item.data(Qt.ItemDataRole.UserRole)]
         if not paths:
@@ -552,6 +563,12 @@ class PhotoGrid(QListWidget):
         event.ignore()
 
     def dropEvent(self, event) -> None:  # noqa: N802
+        """Определяет цель переноса и передаёт реальную файловую операцию рабочей вкладке.
+
+        Внутренний перенос сохраняет выбранное действие copy/move. Внешний
+        источник по умолчанию копируется: угадывать желание пользователя по
+        настроению курсора — пока не самая надёжная технология.
+        """
         paths = _local_paths_from_mime(event.mimeData())
         if not paths:
             event.ignore()
@@ -571,6 +588,7 @@ class PhotoGrid(QListWidget):
         return QRect(rect.left() + 7, rect.bottom() - 43, 22, 22)
 
     def _update_audio_hover(self, position: QPoint) -> None:
+        """Следит только за значком аудиозаметки, не перерисовывая всю карточку без нужды."""
         item = self.itemAt(position)
         path = None
         if item is not None and (item.data(DETAIL_ROLE) or {}).get("audio_comment_path"):
@@ -599,19 +617,20 @@ class PhotoGrid(QListWidget):
         super().leaveEvent(event)
 
     def _update_card_size(self) -> None:
+        """Распределяет ширину окна между колонками без щелей и скачков.
+
+        Остаточные пиксели получают первые колонки. Поэтому сумма ширин всегда
+        совпадает с viewport даже при DPI-масштабировании и нечётных размерах.
+        """
         available = max(CARD_HARD_MIN_WIDTH, self.viewport().width())
         target_width = CARD_SIZE_TARGETS[self.card_size]
         min_columns = max(1, math.ceil(available / CARD_MAX_WIDTH))
         max_columns = max(1, available // CARD_HARD_MIN_WIDTH)
         columns = max(min_columns, min(max_columns, round(available / target_width)))
-        # QListView's icon layout reserves its rightmost viewport coordinate
-        # when deciding whether to wrap.  Keep two layout pixels free; the
-        # delegate extends the last column over them when painting.
         layout_width = max(1, available - 2)
         width, remainder = divmod(layout_width, columns)
         height = int((available / columns) / CARD_ASPECT)
         icon_size = QSize(width + bool(remainder), height)
-        # An invalid grid size tells QListView to use the per-item size hints.
         grid_size = QSize()
         spacing = 0
         self._column_count = columns
@@ -634,6 +653,7 @@ class PhotoGrid(QListWidget):
         self.scheduleDelayedItemsLayout()
 
     def card_size_hint(self, row: int) -> QSize:
+        """Возвращает фактический размер карточки с учётом остаточного пикселя колонки."""
         column = row % self._column_count
         width = self._column_width + (1 if column < self._wide_column_count else 0)
         return QSize(width, self._card_height)
@@ -652,7 +672,7 @@ class PhotoGrid(QListWidget):
 
 
 class AudioToggleButton(QToolButton):
-    """Round full-view audio control with the web viewer's progress ring."""
+    """Круглая кнопка аудиозаметки с кольцом прогресса, как в веб-просмотрщике."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -678,7 +698,7 @@ class AudioToggleButton(QToolButton):
 
 
 class MarkIndicatorButton(QToolButton):
-    """Antialiased circular quick-mark control for Full View."""
+    """Круглая кнопка быстрой метки в полноэкранном просмотре."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -728,7 +748,18 @@ class MarkIndicatorButton(QToolButton):
 
 
 class PhotoCardDelegate(QStyledItemDelegate):
-    """The single card renderer shared by grid and fullscreen strips."""
+    """Рисует карточки файлов в основной сетке и навигационных лентах.
+
+    Данные лежат в ролях ``QListWidgetItem``: путь, миниатюра, метаданные,
+    состояние серии, аудиозаметка и прогресс фоновой работы. Делегат превращает
+    их в готовую карточку — фон выделения, превью, имя, рейтинг, цветную метку,
+    значки видео и звука. В компактном режиме часть деталей скрывается, чтобы
+    боковая и нижняя ленты не превращались в приборную панель самолёта.
+
+    Здесь нет загрузки файлов и изменения метаданных. Делегат только рисует и
+    сообщает геометрию интерактивных областей; клики разбирает ``PhotoGrid``.
+    Один художник на все режимы не даёт карточкам разъехаться визуально.
+    """
 
     def __init__(self, parent=None, *, compact: bool = False) -> None:
         super().__init__(parent)
@@ -769,7 +800,6 @@ class PhotoCardDelegate(QStyledItemDelegate):
 
         top, side, bottom = (14, 4, 15) if self.compact else (20, 4, 16)
         image_rect = rect.adjusted(side, top, -side, -bottom)
-        # Check if this item is a directory
         path = index.data(Qt.ItemDataRole.UserRole)
         path_obj = Path(path) if path else None
         if path_obj and path_obj.is_dir():
@@ -781,13 +811,10 @@ class PhotoCardDelegate(QStyledItemDelegate):
                 image_rect.width(),
                 max(24, text_rect.top() - image_rect.top() - 2),
             )
-            # Use system folder icon from Qt file icon provider
             icon_provider = QFileIconProvider()
             folder_icon = icon_provider.icon(QFileInfo(str(path_obj)))
             if not folder_icon.isNull():
-                # Clear any background first (remove old gray background)
                 painter.fillRect(folder_rect, Qt.GlobalColor.transparent)
-                # Keep the folder icon above the caption instead of using the full card height.
                 scaled = folder_icon.pixmap(folder_rect.size()).size().scaled(
                     folder_rect.size(),
                     Qt.AspectRatioMode.KeepAspectRatio
@@ -838,18 +865,13 @@ class PhotoCardDelegate(QStyledItemDelegate):
                     theme.FOMANTIC_ICON_CODES.get("microphone", "M") if theme.FOMANTIC_ICON_FAMILY else "M",
                 )
 
-            # A series is a temporary expanded context, not a normal row in
-            # the timeline. Darken its preview as well as the card chrome so
-            # the complete group remains recognisable in grids and strips.
             if expanded_series:
                 painter.fillRect(image_rect, QColor(0, 0, 0, 76))
 
-        # For folders: full width text, no ratings/badges.
         caption_rect = QRect(rect.left() + 5, rect.bottom() - bottom + 2, rect.width() - 10, bottom - 2)
         text_rect = QRect(caption_rect)
         if path_obj and path_obj.is_dir():
             text_rect = QRect(rect.left() + 8, rect.bottom() - (20 if self.compact else 24) - 1, rect.width() - 16, 20 if self.compact else 24)
-        # For folders always use just the folder name, never full path
         if path_obj and path_obj.is_dir():
             text = path_obj.name
         else:
@@ -870,8 +892,6 @@ class PhotoCardDelegate(QStyledItemDelegate):
         display_text = text
         font_metrics = painter.fontMetrics()
         if path_obj and path_obj.is_file() and font_metrics.horizontalAdvance(text) > text_rect.width():
-            # The extension is secondary information. When a narrow card
-            # cannot fit both, spend all available width on the filename.
             display_text = path_obj.stem
         painter.drawText(
             text_rect,
@@ -880,7 +900,6 @@ class PhotoCardDelegate(QStyledItemDelegate):
             else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             font_metrics.elidedText(display_text, Qt.TextElideMode.ElideMiddle, text_rect.width()),
         )
-        # Only render ratings and series badges for photos, not folders
         if not (path_obj and path_obj.is_dir()):
             count = int(series.get("count", 0) or 0)
             badge_height = 10 if self.compact else 12
@@ -919,6 +938,16 @@ class PhotoCardDelegate(QStyledItemDelegate):
 
 
 class ViewerStrip(QListWidget):
+    """Навигационная лента кадров в полноэкранном просмотре.
+
+    Один и тот же класс работает горизонтально для соседних фотографий и
+    вертикально для раскрытой серии. Он хранит соответствие ``Path -> item``,
+    обновляет только изменившиеся превью и метаданные, держит текущий кадр в
+    видимой области и сообщает планировщику, какие миниатюры сейчас важнее.
+    Файлы лента не открывает сама — она посылает ``pathActivated``, а решение
+    принимает ``Workspace``. Виджет знает своё место и не рвётся руководить.
+    """
+
     pathActivated = Signal(Path)
     seriesToggleRequested = Signal(Path)
     viewportChanged = Signal()
@@ -940,8 +969,6 @@ class ViewerStrip(QListWidget):
         if vertical:
             self.setFlow(QListWidget.Flow.TopToBottom)
             self.setWrapping(False)
-            # Keep series cards the same size as the cards in the bottom
-            # strip.  The extra width leaves room for the vertical scrollbar.
             self.setGridSize(QSize(118, 104))
             self.setIconSize(QSize(112, 98))
             self.setFixedWidth(136)
@@ -953,8 +980,6 @@ class ViewerStrip(QListWidget):
             self.setGridSize(QSize(118, 104))
             self.setIconSize(QSize(112, 98))
             self.setFixedHeight(108)
-            # A horizontal filmstrip must never reserve space for a vertical
-            # scrollbar: its one row is deliberately clipped horizontally.
             self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.setHorizontalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
@@ -963,6 +988,7 @@ class ViewerStrip(QListWidget):
         scroll_bar.valueChanged.connect(self.viewportChanged)
 
     def _activate(self, item: QListWidgetItem) -> None:
+        """Синхронизирует визуальный выбор и просит рабочую вкладку открыть путь."""
         value = item.data(Qt.ItemDataRole.UserRole)
         if value:
             self.setCurrentItem(item)
@@ -991,6 +1017,12 @@ class ViewerStrip(QListWidget):
         previews: dict[Path, QImage],
         series_cards: dict[Path, dict] | None = None,
     ) -> None:
+        """Синхронизирует содержимое ленты без лишней полной перестройки.
+
+        Если список путей прежний, обновляются только готовые превью и серии.
+        Так сохраняется прокрутка, а Qt не пересоздаёт сотни элементов из-за
+        одной приехавшей миниатюры — он и без того сегодня хорошо поработал.
+        """
         series_cards = series_cards or {}
         if paths != self._paths:
             self.clear()
@@ -1018,6 +1050,7 @@ class ViewerStrip(QListWidget):
         self.set_current(current)
 
     def set_current(self, current: Path | None) -> None:
+        """Выделяет открытый кадр и возвращает его в видимую часть ленты."""
         current_item = self._items_by_path.get(current) if current is not None else None
         if current_item is not None:
             self.setCurrentItem(current_item)
@@ -1030,6 +1063,7 @@ class ViewerStrip(QListWidget):
             self.update(self.visualItemRect(item))
 
     def wheelEvent(self, event) -> None:  # noqa: N802
+        """Преобразует колесо мыши в горизонтальную прокрутку нижней ленты."""
         if not self.vertical:
             delta = event.angleDelta().y() or event.pixelDelta().y()
             if delta:
@@ -1046,7 +1080,7 @@ class ViewerStrip(QListWidget):
             self.update(self.visualItemRect(item))
 
     def visible_paths(self) -> list[Path]:
-        """Return items intersecting the viewport, in display order."""
+        """Возвращает элементы, пересекающие область просмотра, в порядке отображения."""
         viewport_rect = self.viewport().rect()
         return [
             path
@@ -1064,7 +1098,7 @@ class ViewerStrip(QListWidget):
 
 
 class VideoSeekSlider(QSlider):
-    """A seek slider that jumps to the point clicked on its track."""
+    """Ползунок видео, перескакивающий прямо в место щелчка по дорожке."""
 
     seekRequested = Signal(int)
 
@@ -1082,7 +1116,7 @@ class VideoSeekSlider(QSlider):
 
 
 class ColorLabelButton(QToolButton):
-    """Color swatch with a selection outline painted inside its bounds."""
+    """Образец цвета с контуром выделения, нарисованным внутри его границ."""
 
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)
@@ -1101,7 +1135,7 @@ _CODE_TOKEN_TAG = 1027
 
 
 class CodeTokenObject(QObject, QTextObjectInterface):
-    """An atomic, painted inline token stored as one object character."""
+    """Рисует код замены как цельную плашку внутри текстового редактора."""
 
     def intrinsicSize(self, doc, _pos, fmt):  # noqa: N802
         metrics = QFontMetricsF(doc.defaultFont())
@@ -1117,7 +1151,19 @@ class CodeTokenObject(QObject, QTextObjectInterface):
 
 
 class RichCodeCommentEdit(QTextEdit):
-    """Single-line rich editor: visible tokens retain their raw marker."""
+    """Однострочный редактор комментария с визуальными кодами замены.
+
+    Последовательности вроде ``{code}`` хранятся как обычный исходный текст, но
+    на экране превращаются в неделимые плашки через ``CodeTokenObject``. Поэтому
+    пользователь не может случайно стереть половину маркера, а ShotSync и XMP
+    всё равно получают исходную запись, пригодную для последующей подстановки.
+
+    Класс следит за курсором, предлагает варианты из активного набора, умеет
+    вставлять и удалять токены целиком и сохраняет поведение однострочного поля
+    поверх многострочного ``QTextEdit``. Флаг ``_rendering`` защищает от
+    рекурсивной перерисовки документа — Qt любит прислать ещё один сигнал ровно
+    тогда, когда предыдущий ещё не успел снять пальто.
+    """
 
     editingFinished = Signal()
     returnPressed = Signal()
@@ -1170,6 +1216,7 @@ class RichCodeCommentEdit(QTextEdit):
         self._render(str(text or ""))
 
     def _render(self, raw: str, raw_cursor: int | None = None) -> None:
+        """Перестраивает документ из исходного текста и сохраняет позицию курсора."""
         if raw_cursor is None: raw_cursor = len(raw)
         self._rendering = True
         cursor = self.textCursor()
@@ -1228,8 +1275,6 @@ class RichCodeCommentEdit(QTextEdit):
                 if target <= raw + len(marker):
                     cursor = self.textCursor()
                     cursor.setPosition(visual + (length if token else target - raw))
-                    # Never let following typing inherit a token's hidden raw
-                    # marker; otherwise serialization would swallow it.
                     cursor.setCharFormat(QTextCharFormat())
                     self.setTextCursor(cursor)
                     return
@@ -1243,6 +1288,7 @@ class RichCodeCommentEdit(QTextEdit):
         QTimer.singleShot(0, self._offer_codes)
 
     def _offer_codes(self) -> None:
+        """Показывает подходящие коды замены рядом с текущим маркером."""
         before = self.text()[:self._raw_cursor()]
         start, opener = max((before.rfind(mark), mark) for mark in ("{", "\\", "=", "@"))
         if start < 0:
@@ -1295,7 +1341,6 @@ class RichCodeCommentEdit(QTextEdit):
         self._hide_suggestions()
         self._completer.popup().hide()
         self.setFocus(Qt.FocusReason.OtherFocusReason)
-        # QCompleter releases its popup focus after the activation callback.
         QTimer.singleShot(0, lambda: self.setFocus(Qt.FocusReason.OtherFocusReason))
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
@@ -1354,7 +1399,20 @@ class RichCodeCommentEdit(QTextEdit):
 
 
 class ViewerMetaBar(QWidget):
-    """Shared rating, label, quick-mark and comment controls for grid/full view."""
+    """Показывает и редактирует метаданные активной фотографии.
+
+    Эту панель используют и сетка, и полноэкранный просмотр, поэтому вся логика
+    одинаковых элементов управления собрана в одном месте: рейтинг от нуля до
+    пяти, цветовая метка, комментарий, быстрая метка и автопереход к следующему
+    кадру. Справа выводится короткая выжимка из EXIF — камера, выдержка,
+    диафрагма, ISO и фокусное расстояние.
+
+    Класс намеренно не записывает данные в кэш и не меняет файлы. Действия
+    пользователя он сообщает сигналами, а ``Workspace`` уже решает, куда
+    сохранить результат. Методы ``set_*`` выполняют обратную синхронизацию и
+    блокируют сигналы на время обновления, иначе один клик мог бы устроить
+    маленький вечный двигатель из сигналов Qt.
+    """
 
     ratingRequested = Signal(object)
     colorRequested = Signal(str)
@@ -1369,9 +1427,6 @@ class ViewerMetaBar(QWidget):
         self.settings = settings or _application_settings()
         self._quick_mark = ("rating", 5)
         layout = QHBoxLayout(self)
-        # The bar is 30px tall including its top/bottom borders. Leave an
-        # exact 24px content lane so every fixed-height control is centred
-        # identically in grid and full-view.
         layout.setContentsMargins(6, 2, 6, 2)
         layout.setSpacing(5)
 
@@ -1380,7 +1435,7 @@ class ViewerMetaBar(QWidget):
         self.quick_mark_button.setIcon(_fomantic_icon("bookmark", 13))
         self.quick_mark_button.setText("быстр. метка")
         self.quick_mark_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.quick_mark_button.setToolTip("На��троить быструю метку; M — применить")
+        self.quick_mark_button.setToolTip("Настроить быструю метку; M — применить")
         self.quick_mark_button.setFixedSize(96, 24)
         self.quick_mark_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.quick_mark_button.clicked.connect(self._show_quick_mark_menu)
@@ -1420,9 +1475,6 @@ class ViewerMetaBar(QWidget):
         self.rating_buttons: dict[int, QPushButton] = {}
         self.rating_group = QWidget()
         self.rating_group.setObjectName("viewerRatingRow")
-        # Use explicit integer geometry here. QHBoxLayout may distribute its
-        # border-adjusted contents rect fractionally under Windows DPI scaling,
-        # which makes adjacent fixed-size buttons paint over one another.
         self.rating_group.setFixedSize(149, 24)
         self.rating_group.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         for rating in range(0, 6):
@@ -1458,9 +1510,7 @@ class ViewerMetaBar(QWidget):
         layout.addWidget(self.exif_label, 1)
 
     def _show_quick_mark_menu(self) -> None:
-        # A popup must use the actual top-level widget as its transient
-        # parent. Parenting it to this embedded bar produces QWidgetWindow
-        # "must be a top level window" warnings on Windows.
+        """Строит меню выбора действия, которое будет висеть на клавише M."""
         menu = QMenu(self.window())
         menu.setToolTipsVisible(True)
         title = menu.addAction("Настроить быструю метку")
@@ -1468,6 +1518,7 @@ class ViewerMetaBar(QWidget):
         menu.addSeparator()
 
         def add_visual_action(*, selected: bool, visual: str | QIcon, tooltip: str, callback) -> None:
+            """Добавляет в меню строку с отметкой выбора и визуальным значением."""
             action = QWidgetAction(menu)
             row = QPushButton()
             row.setObjectName("quickMarkMenuItem")
@@ -1526,6 +1577,7 @@ class ViewerMetaBar(QWidget):
         menu.exec(self.quick_mark_button.mapToGlobal(QPoint(0, -menu.sizeHint().height())))
 
     def _configure_quick_mark(self, kind: str, value: object) -> None:
+        """Запоминает выбранную быструю метку и сообщает о новой настройке."""
         self._quick_mark = (kind, value)
         self.quickMarkConfigured.emit(kind, value)
 
@@ -1533,16 +1585,19 @@ class ViewerMetaBar(QWidget):
         self._quick_mark = (kind, value)
 
     def set_auto_advance(self, enabled: bool) -> None:
+        """Обновляет автопереход без обратного сигнала в ``Workspace``."""
         self.auto_advance_button.blockSignals(True)
         self.auto_advance_button.setChecked(enabled)
         self.auto_advance_button.blockSignals(False)
 
     def set_comment(self, comment: str) -> None:
+        """Подставляет комментарий активного кадра без имитации ручного ввода."""
         self.comment_edit.blockSignals(True)
         self.comment_edit.setText(comment)
         self.comment_edit.blockSignals(False)
 
     def set_metadata(self, detail: dict) -> None:
+        """Синхронизирует кнопки и EXIF-строку с метаданными активного кадра."""
         color = str(detail.get("color_label") or "")
         rating = int(detail.get("rating") or 0)
         for value, button in self.color_buttons.items():
@@ -1576,6 +1631,15 @@ class ViewerMetaBar(QWidget):
 
 
 class FullView(QFrame):
+    """Собирает полноэкранный просмотр фотографии или видео.
+
+    Компонент координирует изображение, плеер, нижнюю и боковую ленты,
+    метаданные, лица, масштаб 100 % и плавающие элементы управления. Он не
+    загружает файлы сам: ``Workspace`` поставляет готовые кадры и получает
+    сигналы навигации. Благодаря этому просмотрщик не знает, откуда приехала
+    фотография — с диска, из кэша или после долгой прогулки по RAW.
+    """
+
     exitRequested = Signal()
     nextRequested = Signal()
     previousRequested = Signal()
@@ -1689,9 +1753,6 @@ class FullView(QFrame):
         self.mark_indicator.clicked.connect(self.markIndicatorRequested)
         self.mark_indicator.hide()
         self._mark_detail: dict = {}
-        # The floating video controls are positioned manually on top of their
-        # host. Reposition them whenever the host resizes (e.g. when the bottom
-        # strip is collapsed/expanded) so they always stay pinned to the bottom.
         self.media_panel.installEventFilter(self)
 
         self.face_filter_chip = QFrame(self.media_panel)
@@ -1715,8 +1776,6 @@ class FullView(QFrame):
         face_chip_layout.addWidget(self.face_filter_clear)
         self.face_filter_chip.hide()
 
-        # Mirrors the web viewer: a round microphone control opens a compact
-        # Compact audio player panel over the lower-left corner of the photo.
         self.audio_player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
         self.audio_output.setVolume(1.0)
@@ -1740,7 +1799,7 @@ class FullView(QFrame):
         self.strip_toggle = QToolButton()
         self.strip_toggle.setObjectName("stripToggle")
         self.strip_toggle.setIcon(_fomantic_icon("chevron-down", 12))
-        self.strip_toggle.setToolTip("Свернуть ленту пр��вью")
+        self.strip_toggle.setToolTip("Свернуть ленту превью")
         self.strip_toggle.clicked.connect(self.toggle_strip)
         strip_header_layout.addWidget(self.strip_toggle)
         self.video_play_button = QToolButton()
@@ -1788,17 +1847,12 @@ class FullView(QFrame):
         layout.setSpacing(0)
         layout.addWidget(stage, 1)
         layout.addWidget(self.strip_panel)
-        # The full-view frame often hands focus to a child control (the image,
-        # strip, or metadata bar). Keep Z available throughout that subtree.
         self.zoom_action = QAction(self)
         self.zoom_action.setShortcut(QKeySequence("Z"))
         self.zoom_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.zoom_action.triggered.connect(self._toggle_zoom)
         self.addAction(self.zoom_action)
 
-    # Full-view lower area has three states driven by Ctrl+Down / Ctrl+Up:
-    # 0 = strip and metadata bar visible, 1 = only the metadata bar (thumbnail
-    # strip collapsed), 2 = the whole panel hidden.
     STRIP_FULL = 0
     STRIP_COLLAPSED = 1
     STRIP_HIDDEN = 2
@@ -1807,7 +1861,6 @@ class FullView(QFrame):
         settings = _application_settings()
         if settings.contains("viewer_strip_level"):
             return max(self.STRIP_FULL, min(self.STRIP_HIDDEN, settings.value("viewer_strip_level", self.STRIP_FULL, int)))
-        # Migrate the previous two-state collapsed flag.
         return self.STRIP_COLLAPSED if settings.value("viewer_strip_collapsed", False, bool) else self.STRIP_FULL
 
     def _apply_strip_level(self) -> None:
@@ -1824,8 +1877,6 @@ class FullView(QFrame):
         self._strip_level = level
         self._apply_strip_level()
         _application_settings().setValue("viewer_strip_level", level)
-        # The host's resize (handled in eventFilter) keeps the controls pinned,
-        # but reposition once more after the layout settles as a safety net.
         QTimer.singleShot(0, self._position_video_controls)
 
     def cycle_strip(self, step: int) -> None:
@@ -1849,7 +1900,7 @@ class FullView(QFrame):
         self.counter_label.raise_()
 
     def stop_video(self) -> None:
-        """Fully stop playback so nothing keeps running after leaving full view."""
+        """Полностью останавливает видео при выходе из полноэкранного режима."""
         if not self._is_video:
             return
         self.video_player.stop()
@@ -1877,9 +1928,7 @@ class FullView(QFrame):
         strip_series_cards: dict[Path, dict] | None = None,
         show_series_strip: bool = True,
     ) -> None:
-        # The bottom strip represents collapsed series and therefore selects
-        # its leader. The vertical strip represents every member and must keep
-        # the actual opened frame selected.
+        """Обновляет соседние кадры, текущую серию и навигационные ленты."""
         series_current = current if series_current is None else series_current
         if generation != self._photo_generation:
             self.photo_strip.set_paths(paths, current, details, previews, strip_series_cards)
@@ -1925,11 +1974,9 @@ class FullView(QFrame):
         self.face_filter_chip.hide()
 
     def _show_face_actions(self, face: object, position: object) -> None:
+        """Показывает действия над найденным лицом в точке щелчка."""
         if not isinstance(face, dict) or not isinstance(position, QPoint):
             return
-        # FullView is embedded in a stacked page. A popup needs the actual
-        # top-level parent on Windows, otherwise Qt creates an invalid child
-        # QWidgetWindow and emits a warning for every click.
         menu = QMenu(self.window())
         menu.setObjectName("faceActionMenu")
         action = QWidgetAction(menu)
@@ -2012,7 +2059,7 @@ class FullView(QFrame):
         self._preview_pixmap = self._pixmap
         suffix = "  -  preview" if fallback else ""
         self.info_label.setText(f"{decoded.path.name}  ·  {decoded.width} × {decoded.height}{suffix}")
-        # A late screen-sized decode must not replace an active original.
+        # Запоздалое экранное превью не должно заменить уже открытый оригинал.
         if self.image_view.zoom_requested:
             return
         self.image_view.set_pixmap(self._pixmap, smooth=False)
@@ -2107,7 +2154,7 @@ class FullView(QFrame):
         return self._pixmap is not None and not self._pixmap.isNull()
 
     def show_original(self, decoded: DecodedImage) -> None:
-        """Enter 100% only after the original source has finished decoding."""
+        """Включает масштаб 100 %, когда исходный кадр уже декодирован."""
         if decoded.path != self._path or not self.image_view.zoom_requested:
             return
         self.image_view.set_original_pixmap(QPixmap.fromImage(decoded.image))
@@ -2144,7 +2191,7 @@ class FullView(QFrame):
             self.nextRequested.emit()
 
     def refresh_mark_indicator(self) -> None:
-        """Apply a changed interface preference without reopening Full View."""
+        """Обновляет индикатор метки без повторного открытия просмотра."""
         self._update_mark_indicator()
 
     def _update_mark_indicator(self) -> None:
@@ -2173,7 +2220,7 @@ class FullView(QFrame):
         self._position_mark_indicator()
 
     def cancel_zoom(self) -> None:
-        """Discard a pending/active inspection before changing photos."""
+        """Отменяет незавершённое увеличение перед сменой фотографии."""
         self._reset_zoom()
 
     def _position_video_controls(self) -> None:
@@ -2226,8 +2273,6 @@ class FullView(QFrame):
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.Resize and obj is self.video_controls.parentWidget():
-            # Collapsing the strip/metadata panel resizes the media panel without
-            # resizing the frame, so re-pin every floating overlay to its edge.
             self._position_video_controls()
             self._position_counter()
             self._position_face_filter_chip()
@@ -2309,6 +2354,14 @@ class FullView(QFrame):
 
 
 class FullImageView(QWidget):
+    """Рисует открытый кадр и управляет интерактивным просмотром 100 %.
+
+    Здесь живут геометрия вписывания, удержание точки под курсором, панорамирование,
+    индикатор загрузки и клики по найденным лицам. Виджет работает только с уже
+    декодированным ``QPixmap``; запрос оригинала уходит наружу сигналом, чтобы
+    тяжёлая работа не поселилась в обработчике мыши.
+    """
+
     faceClicked = Signal(object, QPoint)
     zoomPressed = Signal(object)
     zoomReleased = Signal()
@@ -2376,8 +2429,6 @@ class FullImageView(QWidget):
         self._spinner_timer.stop()
         self._view_center = self._zoom_focus()
         self._clamp_view_center()
-        # A held mouse may have started while the original was loading. Make
-        # that exact point the origin now, after the face/cursor focus is set.
         if self._drag_position is not None:
             self._drag_center = QPointF(self._view_center)
         self.update()
@@ -2465,10 +2516,6 @@ class FullImageView(QWidget):
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         self._note_mouse_activity()
         if self._zoomed and self._drag_position is not None and self._pixmap is not None:
-            # Map the pointer's displacement from the grab point to the whole
-            # scene, while keeping the originally focused point under it.
-            # This avoids a jump on the first tiny movement and never needs a
-            # second grab to reach the edge of the image.
             start = self._drag_center or self._view_center
             self._view_center = QPointF(
                 start.x() - (event.position().x() - self._drag_position.x()) / max(1, self.width()),
@@ -2510,9 +2557,6 @@ class FullImageView(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self._note_mouse_activity()
-            # A detected face is an interactive target.  Check it before
-            # starting the press-and-hold zoom, otherwise the temporary zoom
-            # consumes the release event that opens the face menu.
             if self._face_at(event.position()) >= 0:
                 event.accept()
                 return
@@ -2520,8 +2564,6 @@ class FullImageView(QWidget):
                 self._drag_position = event.position()
                 self._drag_center = QPointF(self._view_center)
             else:
-                # Keep this point while the source is decoding. If the user
-                # keeps holding the button, the first later move pans at once.
                 self._drag_position = event.position()
                 self._drag_center = None
                 self.zoomPressed.emit(event.position())
@@ -2570,14 +2612,14 @@ class FullImageView(QWidget):
         )
 
     def face_avatar(self, face: dict, size: int) -> QPixmap:
-        """Return a circular crop of a detected face for chips and face sets."""
+        """Возвращает круглый аватар найденного лица для плашек и наборов."""
         if self._pixmap is None or self._pixmap.isNull():
             return QPixmap()
         return self.face_avatar_from_pixmap(self._pixmap, face, size)
 
     @staticmethod
     def face_avatar_from_pixmap(pixmap: QPixmap, face: dict, size: int) -> QPixmap:
-        """Crop a face from the decoded source instead of a UI thumbnail."""
+        """Вырезает лицо из декодированного кадра, а не из мелкой миниатюры."""
         if pixmap.isNull():
             return QPixmap()
         bbox = face.get("bbox") or {}
@@ -2646,7 +2688,7 @@ class FullImageView(QWidget):
 
 
 class ChromeTitleBar(QFrame):
-    """Draggable client-side title strip used by the tab host."""
+    """Перетаскиваемый заголовок окна с вкладками в стиле браузера."""
 
     def __init__(self, window: QMainWindow) -> None:
         super().__init__(window)
@@ -2673,12 +2715,11 @@ class ChromeTitleBar(QFrame):
         super().mouseDoubleClickEvent(event)
 
 
-# These shortcuts are deliberately kept in one place: SettingsDialog uses the
-# same ids to edit them that Workspace uses to install them.
 class DirectoryTree(QTreeView):
-    """Folder tree that accepts local file URLs without letting its model move them."""
+    """Дерево папок, которое принимает URL-адреса локальных файлов, не позволяя своей модели перемещать их.
+    """
 
-    pathsDropped = Signal(object, object, object)  # paths, destination, action
+    pathsDropped = Signal(object, object, object)   # пути, пункт назначения, действие
 
     def __init__(self) -> None:
         super().__init__()
@@ -2745,7 +2786,7 @@ class DirectoryTree(QTreeView):
 
 
 class FavoritesList(QListWidget):
-    """A reorderable list that exposes its folder path while being dragged."""
+    """Переупорядочиваемый список, в котором при перетаскивании отображается путь к папке."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -2769,7 +2810,7 @@ class FavoritesList(QListWidget):
 
 
 class FavoritesSplitterHandle(QSplitterHandle):
-    """Visible grip for resizing the favorites panel."""
+    """Видимая ручка для изменения размера панели избранного."""
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -2796,11 +2837,15 @@ class FavoritesSplitterHandle(QSplitterHandle):
 
 
 class FavoritesSplitter(QSplitter):
+    """Разделитель дерева и избранного с собственным заметным захватом."""
+
     def createHandle(self):  # noqa: N802
         return FavoritesSplitterHandle(self.orientation(), self)
 
 
 class FilterComboBox(QComboBox):
+    """Комбобокс фильтра, который не отдаёт колесу мыши случайно менять выбор."""
+
     def showPopup(self) -> None:  # noqa: N802
         view = self.view()
         visible_items = min(self.count(), self.maxVisibleItems())
@@ -2813,7 +2858,7 @@ class FilterComboBox(QComboBox):
 
 
 class CenteredSearchEdit(QLineEdit):
-    """Search field whose leading and clear actions stay vertically centered."""
+    """Поле поиска с аккуратно отцентрированными значками по краям."""
 
     def _center_action_buttons(self) -> None:
         for button in self.findChildren(QToolButton):
@@ -2834,7 +2879,7 @@ class CenteredSearchEdit(QLineEdit):
 
 
 class GridZoomControls(QFrame):
-    """Compact overlay controls for changing the thumbnail size."""
+    """Компактные элементы управления наложением для изменения размера миниатюр."""
 
     def __init__(self, changed: Callable[[int], None], parent=None) -> None:
         super().__init__(parent)
@@ -2858,7 +2903,7 @@ class GridZoomControls(QFrame):
 
 
 class FavoritesTrashButton(QToolButton):
-    """Drop target used to remove a folder from the favorites list."""
+    """Цель перетаскивания, используемая для удаления папки из списка избранного."""
 
     favoriteDropped = Signal(str)
 
@@ -2897,9 +2942,15 @@ class FavoritesTrashButton(QToolButton):
 
 
 class ChromeTabBar(QTabBar):
-    """Chrome-like tab widths instead of Qt's full-row expansion."""
+    """Панель рабочих вкладок с браузерной шириной и переносом файлов.
+
+    Qt по умолчанию растягивает вкладки на всю строку; здесь ширина ограничена,
+    кнопка закрытия рисуется отдельно, а пустое место остаётся перетаскиваемой
+    частью окна. При сбросе файлов класс определяет вкладку под курсором и
+    передаёт пути наружу, но сам ничего на диске не перемещает.
+    """
     closeRequested = Signal(int)
-    pathsDropped = Signal(object, int, object)  # paths, tab index, action
+    pathsDropped = Signal(object, int, object)   # пути, индекс табуляции, действие
 
     def __init__(self) -> None:
         super().__init__()
@@ -2998,7 +3049,12 @@ def _fit_rect(source: QSize, bounds: QSize) -> QRect:
 
 
 class WindowsTaskbarProgress:
-    """Optional Windows 7+ ITaskbarList3 progress integration."""
+    """Показывает прогресс долгих операций на кнопке приложения в Windows.
+
+    Тонкая обёртка над COM-интерфейсом ``ITaskbarList3`` создаётся только на
+    Windows и молча отключается, если API недоступен. Интерфейс не должен падать
+    лишь потому, что панель задач сегодня не в настроении.
+    """
 
     _TBPF_NORMAL = 0x2
     _TBPF_NOPROGRESS = 0x0
@@ -3010,6 +3066,8 @@ class WindowsTaskbarProgress:
             return
         try:
             class GUID(ctypes.Structure):
+                """Хранит GUID в том виде, в каком его ожидает WinAPI."""
+
                 _fields_ = [
                     ("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
                     ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8),
@@ -3083,7 +3141,7 @@ class WindowsTaskbarProgress:
 
 
 class MacDockProgress:
-    """Use the native Dock tile badge when the optional PyObjC bridge exists."""
+    """Показывает прогресс на значке Dock, если установлен мост PyObjC."""
 
     def __init__(self) -> None:
         self._tile = None
@@ -3103,20 +3161,20 @@ class MacDockProgress:
 
 
 def _safe_folder_name(title: str) -> str:
-    """Turn a shooting title into a filesystem-safe folder name."""
+    """Превращает название съёмки в безопасное имя папки."""
     cleaned = "".join(c if c not in '<>:"/\\|?*' else "_" for c in str(title or "").strip())
     cleaned = cleaned.rstrip(". ").strip()
     return cleaned or "shotsync"
 
 
 def _shotsync_photo_filename(photo: dict) -> str:
-    """Basename of a ShotSync photo payload, without any path components."""
+    """Достаёт из данных ShotSync имя файла и отбрасывает компоненты пути."""
     raw = str(photo.get("name") or "").replace("\\", "/")
     return Path(raw).name.strip()
 
 
 def _humanize_shotsync_network_error(error: str) -> str:
-    """Avoid exposing Qt's raw resolver and socket errors in the UI."""
+    """Переводит техническую сетевую ошибку Qt на человеческий язык."""
     low = (error or "").lower()
     if any(part in low for part in ("host", "network", "unreachable", "timeout", "connection", "refused")):
         return "Нет подключения к интернету."
@@ -3124,11 +3182,23 @@ def _humanize_shotsync_network_error(error: str) -> str:
 
 
 class Workspace(QMainWindow):
+    """Одна независимая рабочая вкладка с папкой фотографий.
+
+    ``Workspace`` связывает файловую модель, сетку, полноэкранный просмотр,
+    кэши, очереди декодирования, EXIF, AI и ShotSync. Он владеет состоянием
+    текущей папки и проверяет поколение каждого фонового результата: старый
+    поток не должен внезапно дорисовать кадр уже в новой папке.
+
+    Класс большой, потому что это координатор пользовательского сценария, а не
+    склад алгоритмов: декодирование, кэш, сеть и формирование XMP вынесены в
+    отдельные модули. Здесь остаётся дирижёр. Иногда с очень большим пультом.
+    """
+
     fullViewRequested = Signal(object)
     fullscreenRequested = Signal(object)
     gridRequested = Signal()
-    openFolderRequested = Signal(object)   # Path: open (or focus) a folder tab
-    shotsyncFolderChanged = Signal(bool)   # current folder is linked to ShotSync
+    openFolderRequested = Signal(object)    # Путь: открыть (или выделить) вкладку папки.
+    shotsyncFolderChanged = Signal(bool)    # текущая папка связана с ShotSync
     seriesModeChanged = Signal(bool)
     _cache_maintenance_started = False
 
@@ -3169,9 +3239,6 @@ class Workspace(QMainWindow):
         self.pending_full_request: Path | None = None
         self.pending_grid_full_request: Path | None = None
         self.populate_index = 0
-        # ``paths`` is the current view order.  Thumbnail scheduling only uses
-        # this order and never owns it, so sorting/filtering can replace the
-        # view later without changing the scheduler.
         self.thumb_index = 0
         self.thumb_priority: deque[Path] = deque()
         self.thumb_priority_set: set[Path] = set()
@@ -3198,8 +3265,6 @@ class Workspace(QMainWindow):
         self.all_paths: list[Path] = []
         self.preview_paths: set[Path] = set()
         self.preview_finished_paths: set[Path] = set()
-        # ``view_paths`` is the complete filtered order. ``paths`` is only
-        # the grid representation and may collapse adjacent AI series.
         self.view_paths: list[Path] = []
         self.view_generation = 0
         self.paths: list[Path] = []
@@ -3210,8 +3275,6 @@ class Workspace(QMainWindow):
         self.settings = _application_settings()
         self.destination_paths_provider: Callable[[], list[Path]] | None = None
 
-        # ShotSync cloud integration. The key is remembered between launches
-        # and validated lazily the first time the ShotSync disk is opened.
         self.shotsync_active = False
         self._shotsync_checked = False
         self._shotsync_shootings: list[dict] = []
@@ -3233,9 +3296,6 @@ class Workspace(QMainWindow):
         self.shotsync_client.shootingsFailed.connect(self._shotsync_shootings_failed)
         self.shotsync_client.avatarLoaded.connect(self._shotsync_avatar_loaded)
 
-        # A single socket is shared by every tab (see shotsync_hub). The hub
-        # keeps a live connection whenever a key is stored and pushes photo
-        # arrivals / mark changes back to whichever tab shows the folder.
         self.shotsync = shotsync_hub(SHOTSYNC_BASE_URL)
         self.shotsync.set_api_key(self.shotsync_client.api_key)
         self.shotsync.photoDownloaded.connect(self._on_shotsync_photo_downloaded)
@@ -3255,8 +3315,6 @@ class Workspace(QMainWindow):
         self.shotsync.marks_fetcher.finished.connect(self._on_shotsync_marks_fetched)
         self.shotsync.marks_fetcher.failed.connect(self._on_shotsync_marks_failed)
 
-        # Mark-syncer for the currently open folder, if it is a ShotSync
-        # selection copy. Recreated whenever the folder changes.
         self._shotsync_syncer = None
 
         quick_kind = self.settings.value("quick_mark_kind", "rating", str)
@@ -3294,8 +3352,6 @@ class Workspace(QMainWindow):
         self._folder_context_active = False
         self._pending_folder_grid_context: tuple[list[str], int] | None = None
         self.folder_cache: FolderCache | None = None
-        # Native AI and metadata dependencies are loaded only on their first
-        # use, keeping a direct file launch focused on first-frame latency.
         self._ai_pipeline = None
         self._metadata_pipeline = None
         self.ai_progress_total = 0
@@ -3304,14 +3360,11 @@ class Workspace(QMainWindow):
         self._ai_requested_generation = -1
         self._cache_ai_waiting = False
         self._cache_ai_paths: set[Path] = set()
-        # ShotSync upload progress, shown in the shared top status bar.
         self._upload_progress: tuple[int, int] | None = None
         self._receive_progress: tuple[int, int, int] | None = None
         self._selection_progress: tuple[int, int] | None = None
         self._shotsync_pending_marks = 0
         self._shotsync_marks_fetching = False
-        # The lower QMainWindow status bar is intentionally unused; ShotSync
-        # and all long-running work report through the top status panel.
         self.statusBar().hide()
         self.fast_fullscreen = False
         self.normal_geometry = None
@@ -3351,10 +3404,6 @@ class Workspace(QMainWindow):
         self._set_code_replacements(self.code_replacement_sets)
         self._install_grid_page_key_filters()
 
-        # Qt exposes mounted volumes on all supported platforms. Polling is
-        # intentional here: QStorageInfo has no cross-platform mount-change
-        # signal, while a short interval also catches card insertion into an
-        # already connected reader.
         self.volume_refresh_timer = QTimer(self)
         self.volume_refresh_timer.setInterval(VOLUME_REFRESH_INTERVAL_MS)
         self.volume_refresh_timer.timeout.connect(self._refresh_volume_buttons)
@@ -3384,22 +3433,13 @@ class Workspace(QMainWindow):
         self.ai_progress_timer.timeout.connect(self._update_ai_progress)
 
         self._create_actions()
-        # A direct OS file-open should spend its first CPU/I/O budget on the
-        # requested frame, not on scanning every sibling and opening SQLite.
-        # The grid catches up shortly afterwards, while folder launches retain
-        # their existing immediate population behaviour.
         initial_scan_delay = 350 if defer_initial_scan else 0
         QTimer.singleShot(initial_scan_delay, lambda: self.load_directory(self.current_dir))
         QTimer.singleShot(0, self._focus_grid_panel)
         QTimer.singleShot(0, self._restore_face_filter_chip)
-        # Maintenance is deliberately delayed and isolated from interactive
-        # cache work so startup and first-folder rendering keep priority.
         QTimer.singleShot(5_000, self._start_cache_maintenance)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        # Future callbacks run on worker threads. Mark shutdown before stopping
-        # executors so a completed cache lookup cannot enqueue a decode into an
-        # executor that has already been shut down.
         self.closing = True
         self._set_taskbar_progress(0, 0)
         self._taskbar_progress.close()
@@ -3458,14 +3498,14 @@ class Workspace(QMainWindow):
         return self.scheduler.visible_thumb_pending
 
     def _start_cache_maintenance(self) -> None:
-        """Queue startup cache cleanup after interactive startup has settled."""
+        """Запускает обслуживание кэша после срочных стартовых задач."""
         if self.closing or type(self)._cache_maintenance_started:
             return
         type(self)._cache_maintenance_started = True
         self.cache_maintenance_executor.submit(maintain_folder_caches)
 
     def set_workspace_active(self, active: bool) -> None:
-        """Run preview generation only for the tab currently on screen."""
+        """Разрешает строить превью только у видимой рабочей вкладки."""
         if self.workspace_active == active:
             return
         self.workspace_active = active
@@ -3488,12 +3528,17 @@ class Workspace(QMainWindow):
             self.thumb_timer.start()
 
     def _video_playback_changed(self, playing: bool) -> None:
-        """Never decode grid-video frames while a full video is playing."""
+        """Приостанавливает декодирование сетки, пока воспроизводится видео."""
         self.video_thumbnailer.set_active(self.workspace_active and not playing)
         if not playing and self.workspace_active:
             self._schedule_visible_thumb_priority()
 
     def _build_grid_page(self) -> QWidget:
+        """Собирает основную страницу: дерево папок, сетку и служебные панели.
+
+        Метод большой, потому что здесь один раз связываются виджеты и сигналы.
+        Рабочая логика загрузки и обработки файлов живёт в отдельных методах.
+        """
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -3502,14 +3547,14 @@ class Workspace(QMainWindow):
         self.dir_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Drives)
         self.dir_model.setRootPath(QDir.rootPath())
 
-        # Create a custom model that correctly reports children only for folders with subdirectories
         class CleanDirModel(QFileSystemModel):
+            """Не рисует стрелку раскрытия у папки, в которой нет подпапок."""
+
             def __init__(self, parent=None):
                 super().__init__(parent)
                 self._new_folder_path: Path | None = None
 
             def hasChildren(self, parent=None):
-                # Only show expand arrows if the folder actually contains other folders
                 if not parent or not parent.isValid():
                     return super().hasChildren(parent)
                 path = self.filePath(parent)
@@ -3525,10 +3570,8 @@ class Workspace(QMainWindow):
                 default_flags = super().flags(index)
                 if not index.isValid():
                     return default_flags
-                # Разрешаем редактирование только для свежесозданной папки
                 if self._new_folder_path and self.filePath(index) == str(self._new_folder_path):
                     return default_flags | Qt.ItemFlag.ItemIsEditable
-                # Для всех остальных запрещаем
                 return default_flags & ~Qt.ItemFlag.ItemIsEditable
 
             def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
@@ -3537,23 +3580,21 @@ class Workspace(QMainWindow):
                     old_path = Path(old_path_str)
                     new_name = str(value).strip()
 
-                    # Если имя не изменилось или пустое, отменяем
                     if not new_name or new_name == old_path.name:
-                        self._new_folder_path = None # Сбрасываем в любом случае
+                        self._new_folder_path = None  # редактор больше не ждёт новое имя
                         return False
 
                     new_path = old_path.parent / new_name
                     if new_path.exists():
                         QMessageBox.warning(None, "Ошибка", "Папка с таким именем уже существует.")
-                        self._new_folder_path = None # Сбрасываем
+                        self._new_folder_path = None
                         return False
 
-                    # Переименовываем
                     if QDir().rename(old_path_str, str(new_path)):
-                        self._new_folder_path = None # Успех, сбрасываем
+                        self._new_folder_path = None
                         return True
 
-                    self._new_folder_path = None # Ошибка, сбрасываем
+                    self._new_folder_path = None
                     return False
                 return super().setData(index, value, role)
         
@@ -3564,12 +3605,8 @@ class Workspace(QMainWindow):
         self.dir_tree = DirectoryTree()
         self.dir_tree.setModel(self.dir_model)
         self.dir_tree.setSelectionMode(QTreeView.SelectionMode.ExtendedSelection)
-        # QFileSystemModel loads children asynchronously; enable its explicit
-        # name-column sort instead of retaining the filesystem enumeration
-        # order as folders arrive.
         self.dir_tree.setSortingEnabled(True)
         self.dir_tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
-        # Включаем возможность редактирования элементов дерева
         self.dir_tree.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers)
         self._folder_name_editor: FolderNameEditor | None = None
         self._set_tree_root_for_path(self.current_dir.anchor or QDir.rootPath())
@@ -3618,9 +3655,6 @@ class Workspace(QMainWindow):
         self.drive_button_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         sidebar_layout.addLayout(self.drive_button_layout)
 
-        # Persistent "disk" that opens the ShotSync cloud instead of a local
-        # volume. It shares the exclusive drive-button group so selecting it
-        # visually deselects the local volumes and vice versa.
         self.shotsync_button = QToolButton()
         self.shotsync_button.setObjectName("driveButton")
         self.shotsync_button.setCheckable(True)
@@ -3637,7 +3671,6 @@ class Workspace(QMainWindow):
 
         self._refresh_volume_buttons()
 
-        # Панель дерева папок с действиями в заголовке.
         directory_panel = QWidget()
         directory_panel.setObjectName("directoryPanel")
         directory_layout = QVBoxLayout(directory_panel)
@@ -3651,7 +3684,6 @@ class Workspace(QMainWindow):
         directory_header.addWidget(directory_title)
         directory_header.addStretch()
 
-        # Кнопка "На уровень вверх"
         self.up_button = QToolButton()
         self.up_button.setObjectName("directoryAction")
         self.up_button.setIcon(_fomantic_icon("arrow-up", 20, "#e6e6e6"))
@@ -3659,8 +3691,7 @@ class Workspace(QMainWindow):
         self.up_button.setToolTip("На уровень вверх")
         self.up_button.clicked.connect(self._go_up_directory)
         directory_header.addWidget(self.up_button)
-        
-        # Кнопка "Создать папку"
+
         self.new_folder_button = QToolButton()
         self.new_folder_button.setObjectName("directoryAction")
         self.new_folder_button.setIcon(_fomantic_icon("folder-plus", 20, "#e6e6e6"))
@@ -3670,9 +3701,7 @@ class Workspace(QMainWindow):
         directory_header.addWidget(self.new_folder_button)
         directory_layout.addLayout(directory_header)
         directory_layout.addWidget(self.dir_tree, 1)
-        
-        # The sidebar body swaps between the local folder browser and the
-        # ShotSync cloud panel depending on which "disk" is selected.
+
         self.sidebar_stack = QStackedWidget()
 
         local_page = QWidget()
@@ -3790,9 +3819,6 @@ class Workspace(QMainWindow):
         self.media_filter.setItemIcon(2, _fomantic_icon("film", 10, "#a8b0bd"))
         self.media_filter.setFixedWidth(118)
         self.file_type_filter = FilterComboBox()
-        # The combined option is the neutral/default state: it must not hide
-        # videos or other supported image formats. The dedicated JPG/RAW
-        # options below are the actual file-type filters.
         for label, value in (("JPG и RAW", None), ("Только JPG", "jpg"), ("Только RAW", "raw")):
             self.file_type_filter.addItem(label, value)
         self.file_type_filter.setItemIcon(0, _fomantic_icon("images", 10, "#a8b0bd"))
@@ -3824,7 +3850,6 @@ class Workspace(QMainWindow):
         self.search_edit.setPlaceholderText("Поиск")
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setFixedWidth(112)
-        # Match the native height of the neighbouring combo-box controls.
         self.search_edit.setFixedHeight(self.media_filter.sizeHint().height())
         for control in (self.rating_filter, self.color_filter, self.media_filter, self.file_type_filter, self.camera_filter, self.shot_filter, self.sort_combo):
             control.currentIndexChanged.connect(self._apply_view)
@@ -4004,7 +4029,7 @@ class Workspace(QMainWindow):
         return page
 
     def _build_shotsync_action_page(self) -> QWidget:
-        """Empty-state shown for a cloud shooting that has no local folder yet."""
+        """Строит заглушку для облачной съёмки, ещё не загруженной на диск."""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(40, 40, 40, 40)
@@ -4049,6 +4074,7 @@ class Workspace(QMainWindow):
         return page
 
     def _create_actions(self) -> None:
+        """Создаёт действия рабочей вкладки и привязывает горячие клавиши."""
         self._hotkey_actions: dict[str, QAction] = {}
 
         def add_hotkey(identifier: str, callback: Callable, target: QWidget | None = None, context: Qt.ShortcutContext | None = None) -> None:
@@ -4063,11 +4089,9 @@ class Workspace(QMainWindow):
         add_hotkey("full_view", self._open_selected)
         add_hotkey("open_in_editor", self._open_in_editor)
         add_hotkey("grid", self.show_grid)
-        # Scoped to the full view so Shift+Arrow keeps extending the grid selection.
         add_hotkey("strip_collapse", lambda: self.full_view.cycle_strip(1), target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         add_hotkey("strip_expand", lambda: self.full_view.cycle_strip(-1), target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
-        # Navigation keys are intentionally not exposed in the preferences.
         escape = QAction("Back", self)
         escape.setShortcut(QKeySequence(Qt.Key.Key_Escape))
         escape.triggered.connect(self._handle_escape)
@@ -4093,7 +4117,7 @@ class Workspace(QMainWindow):
             action.setShortcut(_hotkey_sequence(self.settings, identifier))
 
     def _quick_transfer_destinations(self) -> list[Path]:
-        """Last used destination first, then open tabs and the remaining history."""
+        """Собирает цели переноса: последнюю, открытые вкладки и историю."""
         raw_history = self.settings.value("quick_transfer/recent_destinations", [], list)
         history = [Path(value) for value in raw_history if isinstance(value, str) and Path(value).is_dir()]
         tabs = self.destination_paths_provider() if self.destination_paths_provider else []
@@ -4111,6 +4135,7 @@ class Workspace(QMainWindow):
         self.settings.setValue("quick_transfer/recent_destinations", [str(destination), *(str(path) for path in history)][:9])
 
     def _show_quick_transfer(self, *, move: bool) -> None:
+        """Запрашивает цель быстрого копирования или перемещения выделения."""
         sources = [path for path in self._file_panel_paths() if path.exists()]
         if not sources:
             return
@@ -4125,9 +4150,9 @@ class Workspace(QMainWindow):
             ),
             self,
         )
-        # A WindowShortcut QAction can otherwise consume the repeated shortcut
-        # before this modal dialog receives its key press.  The dialog owns
-        # both quick-transfer shortcuts until it closes.
+        # Иначе QAction с оконным контекстом перехватит повторное сочетание
+        # раньше диалога. Пока он открыт, оба сочетания быстрого переноса
+        # принадлежат именно ему.
         quick_actions = [self._hotkey_actions[name] for name in ("quick_copy", "quick_move")]
         enabled = [action.isEnabled() for action in quick_actions]
         for action in quick_actions:
@@ -4245,12 +4270,12 @@ class Workspace(QMainWindow):
             self._go_up_directory()
 
     def _go_up_directory(self) -> None:
-        """Перейти на уровень вверх от текущей директории"""
+        """Переходит в родительскую папку текущего каталога."""
         if self.current_dir and self.current_dir.parent != self.current_dir:
             self.load_directory(self.current_dir.parent)
 
     def _expand_tree_path(self, index) -> None:
-        """Раскрыть все родительские узлы, чтобы индекс точно стал видимым."""
+        """Раскрывает родителей каталога, чтобы нужная строка стала видимой."""
         parents = []
         current = index.parent()
         while current.isValid():
@@ -4260,7 +4285,7 @@ class Workspace(QMainWindow):
             self.dir_tree.expand(parent)
 
     def _begin_directory_inline_rename(self, path: Path, index=None, attempts_left: int = 20) -> None:
-        """Запустить inline-rename по индексу модели с несколькими повторами."""
+        """Запускает встроенное переименование, дождавшись готовности модели."""
         if index is None or not index.isValid():
             index = self.dir_model.index(str(path))
         if not index.isValid():
@@ -4306,6 +4331,7 @@ class Workspace(QMainWindow):
         editor.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _commit_folder_name(self) -> None:
+        """Проверяет новое имя папки и передаёт переименование файловой модели."""
         editor = self._folder_name_editor
         if editor is None:
             return
@@ -4329,9 +4355,6 @@ class Workspace(QMainWindow):
             except ValueError:
                 current_relative = None
             if current_relative is not None:
-                # SQLite cannot reliably move an open database on Windows.
-                # Close this workspace's cache before moving its path-hashed
-                # database, then reopen it at the renamed location.
                 self._flush_folder_cache(wait=True, close=True)
                 self.folder_cache = None
                 self.cache_ready = False
@@ -4368,12 +4391,11 @@ class Workspace(QMainWindow):
             editor.deleteLater()
 
     def _create_new_folder(self, parent_dir: Path | None = None) -> None:
-        """Создать новую папку в указанной или текущей директории."""
+        """Создаёт новую папку и сразу предлагает дать ей нормальное имя."""
         parent_dir = parent_dir or self.current_dir
         if not parent_dir:
             return
 
-        # Создаем временное имя для папки
         i = 1
         while True:
             temp_name = f"Новая папка {i}"
@@ -4383,7 +4405,6 @@ class Workspace(QMainWindow):
             i += 1
 
         try:
-            # Устанавливаем путь к новой папке в модели ПЕРЕД ее созданием
             self.dir_model._new_folder_path = temp_path
 
             parent_index = self.dir_model.index(str(parent_dir))
@@ -4400,11 +4421,11 @@ class Workspace(QMainWindow):
             )
 
         except OSError as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось создат�� папку: {e}")
-            self.dir_model._new_folder_path = None # Очищаем в случае ошибки
+            QMessageBox.critical(self, "Ошибка", f"Не удалось создать папку: {e}")
+            self.dir_model._new_folder_path = None  # повторный редактор уже не появится
 
     def _directory_editor_closed(self, _editor, _hint) -> None:
-        """Сбрасывать состояние новой папки даже при отмене inline-rename."""
+        """Сбрасывает состояние редактора даже после отмены переименования."""
         if self.dir_model._new_folder_path is None:
             return
         self.dir_model._new_folder_path = None
@@ -4500,7 +4521,7 @@ class Workspace(QMainWindow):
             self._reveal_favorite_in_tree(path)
 
     def _reveal_favorite_in_tree(self, path: Path, attempts_left: int = 20) -> None:
-        """Expand and select a favorite after QFileSystemModel has loaded it."""
+        """Раскрывает дерево и выбирает избранную папку после загрузки модели."""
         index = self.dir_model.index(str(path))
         if not index.isValid():
             if attempts_left > 0:
@@ -4528,6 +4549,7 @@ class Workspace(QMainWindow):
                 break
 
     def _show_directory_context_menu(self, position: QPoint) -> None:
+        """Строит контекстное меню папки с учётом корня и текущего выбора."""
         index = self.dir_tree.indexAt(position)
         if not index.isValid():
             return
@@ -4559,7 +4581,7 @@ class Workspace(QMainWindow):
         self._delete_paths(self._selected_paths(), permanent=permanent)
 
     def _file_panel_paths(self) -> list[Path]:
-        """Return the selected filesystem entries from the active file panel."""
+        """Возвращает пути, выбранные в активной файловой панели."""
         focus = QApplication.focusWidget()
         if self._is_directory_focus_widget(focus):
             selection = self.dir_tree.selectionModel()
@@ -4588,8 +4610,6 @@ class Workspace(QMainWindow):
             return
         mime = QMimeData()
         mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
-        # Explorer understands Preferred DropEffect, making Ctrl+X usable
-        # outside the application as well as in another RAWww tab.
         mime.setData(_PREFERRED_DROP_EFFECT_MIME, (2 if cut else 1).to_bytes(4, "little"))
         if cut:
             mime.setData("application/x-rawww-cut", b"1")
@@ -4605,7 +4625,7 @@ class Workspace(QMainWindow):
 
     @staticmethod
     def _renamed_transfer_target(target: Path) -> Path:
-        """Return the first non-existing ``name (N)`` variant of a target."""
+        """Подбирает свободное имя назначения в виде ``имя (N)``."""
         for number in range(2, 10_000):
             candidate = target.with_name(f"{target.stem} ({number}){target.suffix}")
             if not candidate.exists():
@@ -4636,7 +4656,7 @@ class Workspace(QMainWindow):
         return "cancel"
 
     def _receive_dropped_paths(self, paths: list[Path], destination: Path | None, action, progress: Callable[[int, int], None] | None = None) -> None:
-        """Copy external files or copy/move app files into a folder destination."""
+        """Копирует внешние файлы или переносит внутреннее перетаскивание в цель."""
         if destination is None:
             destination = self.current_dir
         if not destination.is_dir():
@@ -4645,16 +4665,12 @@ class Workspace(QMainWindow):
         if not sources:
             return
         move = action == Qt.DropAction.MoveAction
-        # Moving the folder currently being viewed must release its SQLite
-        # cache before relocating that cache alongside the folder.
         if move and self.current_dir in sources:
             self.load_directory(self.current_dir.parent)
         errors: list[str] = []
         changed = False
         moved_files: list[Path] = []
         moved_folders: list[tuple[Path, Path]] = []
-        # Avoid a delayed watcher reload after the grid has been reconciled
-        # below, just as delete does.
         if move and any(source.parent == self.current_dir for source in sources):
             self.folder_change_timer.stop()
             self._ignore_folder_changes_until = max(
@@ -4727,10 +4743,8 @@ class Workspace(QMainWindow):
                 if source.parent == self.current_dir
             ]
             if moved_from_current:
-                # Keep the grid stable instead of rebuilding every thumbnail.
                 self._remove_paths_from_grid(moved_from_current)
                 self.cache_flush_executor.submit(prune_folder_cache, self.current_dir)
-            # The current folder received files: its grid must discover them.
             if self.current_dir == destination:
                 self.folder_change_timer.stop()
                 self.load_directory(self.current_dir)
@@ -4738,7 +4752,7 @@ class Workspace(QMainWindow):
             QMessageBox.warning(self, "Копирование файлов", "Не удалось обработать некоторые объекты:\n" + "\n".join(errors))
 
     def _delete_paths(self, paths: list[Path], *, permanent: bool) -> None:
-        """Delete grid/tree entries, preserving selection copies from ShotSync."""
+        """Удаляет выбранные файлы или папки, учитывая локальные копии ShotSync."""
         targets = list(dict.fromkeys(path for path in paths if path.exists()))
         if not targets:
             return
@@ -4781,14 +4795,10 @@ class Workspace(QMainWindow):
             if dialog.exec() != QMessageBox.StandardButton.Yes:
                 return
 
-        # A current-folder delete must first release the open cache and watcher.
         deleting_current_folder = self.current_dir in targets
         if deleting_current_folder:
             self.load_directory(self.current_dir.parent)
 
-        # The watcher also reports changes made by this operation. The grid is
-        # reconciled below without clearing it, so a delayed full reload would
-        # only cause a second, distracting redraw.
         self.folder_change_timer.stop()
         self._ignore_folder_changes_until = max(
             self._ignore_folder_changes_until,
@@ -4823,8 +4833,6 @@ class Workspace(QMainWindow):
                 errors.append(f"кэш {folder.name}: {exc}")
 
         if deleted_files:
-            # Compact cache off the UI thread; it also removes rows for any
-            # sidecars or concurrent filesystem changes seen by the watcher.
             self.cache_flush_executor.submit(prune_folder_cache, self.current_dir)
 
         deleted = [*deleted_files, *deleted_folders]
@@ -4834,7 +4842,7 @@ class Workspace(QMainWindow):
             QMessageBox.warning(self, "Удаление", "Не удалось удалить:\n" + "\n".join(errors))
 
     def _remove_paths_from_grid(self, deleted: list[Path]) -> None:
-        """Reconcile a local delete without clearing/repopulating the grid."""
+        """Убирает удалённые пути из сетки без её полной пересборки."""
         removed = set(deleted)
         old_paths = list(self.paths)
         selected_rows = [
@@ -4871,9 +4879,6 @@ class Workspace(QMainWindow):
                 self.grid.takeItem(self.grid.row(item))
                 self.items_by_path.pop(path, None)
 
-        # Deleting a collapsed-series leader can promote a previously hidden
-        # neighbour. Reuse the existing cards wherever possible and only add
-        # the promoted card; nothing visible is cleared in either case.
         for row, path in enumerate(self.paths):
             item = self.items_by_path.get(path)
             if item is None:
@@ -4901,10 +4906,10 @@ class Workspace(QMainWindow):
         self.grid.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _refresh_volume_buttons(self) -> None:
-        """Synchronize the sidebar with volumes that are mounted and ready.
+        """Синхронизирует боковую панель со смонтированными дисками.
 
-        Empty card-reader slots have no mounted filesystem, so QStorageInfo
-        deliberately omits them. This also avoids showing inaccessible media.
+        Пустые кардридеры файловой системы не имеют, поэтому ``QStorageInfo`` их
+        не возвращает. Заодно в интерфейс не попадают недоступные носители.
         """
         volumes = _mounted_volume_paths()
         volume_keys = {_drive_key(path) for path in volumes}
@@ -4915,7 +4920,6 @@ class Workspace(QMainWindow):
 
         for key, button in existing.items():
             if key == SHOTSYNC_VOLUME_KEY:
-                # The ShotSync "disk" is persistent and never tied to a volume.
                 continue
             if key not in volume_keys:
                 self.drive_buttons.removeButton(button)
@@ -4961,8 +4965,6 @@ class Workspace(QMainWindow):
             else:
                 button.setChecked(key == _drive_key(current_root) if current_root else False)
 
-        # If removable media containing the open folder was unplugged, return
-        # to a valid local location instead of retaining a dead tree root.
         if not self.closing and not self.current_dir.is_dir():
             fallback = Path.home()
             self._set_tree_root_for_path(fallback)
@@ -5009,9 +5011,8 @@ class Workspace(QMainWindow):
                 for button in self.drive_buttons.buttons():
                     button.setChecked(button.property("volumeKey") == root_key)
 
-    # ----- ShotSync cloud disk ------------------------------------------
     def _shotsync_button_icon(self) -> QIcon:
-        """Load the ShotSync logo bundled with the app assets."""
+        """Загружает логотип ShotSync из ресурсов приложения."""
         logo_path = data_path("assets") / "shotsync.png"
         if logo_path.exists():
             px = QPixmap(str(logo_path)).scaled(
@@ -5024,7 +5025,7 @@ class Workspace(QMainWindow):
         return _fomantic_icon("cloud", 16, "#8fb8ff")
 
     def _activate_shotsync(self) -> None:
-        """Switch the sidebar to the ShotSync cloud panel."""
+        """Переключает боковую панель с папок на ShotSync."""
         self.shotsync_active = True
         self.shotsync_button.setChecked(True)
         for button in self.drive_buttons.buttons():
@@ -5033,7 +5034,6 @@ class Workspace(QMainWindow):
         self.sidebar_stack.setCurrentWidget(self.shotsync_panel)
 
         if self.shotsync_client.has_key():
-            # Validate the remembered key once per session, then reuse it.
             if not self._shotsync_checked:
                 self.shotsync_panel.show_checking()
                 self.shotsync_client.verify_session()
@@ -5055,7 +5055,7 @@ class Workspace(QMainWindow):
         self.shotsync_client.login(login, password)
 
     def _show_shotsync_login(self) -> bool:
-        """Open the shared sign-in form and return whether it completed."""
+        """Открывает форму входа ShotSync и проверяет введённые данные."""
         if self.shotsync_client.has_key():
             return True
         dialog = self._ensure_shotsync_login_dialog()
@@ -5123,14 +5123,14 @@ class Workspace(QMainWindow):
         self._refresh_shotsync_shortcuts()
 
     def _shotsync_session_check_failed(self, error: str) -> None:
-        """Open completed local selections when ShotSync cannot be reached."""
+        """Оставляет доступ к локальным отборам, когда ShotSync недоступен."""
         self._shotsync_checked = True
         self.shotsync_panel.show_logged_in({})
         self._show_local_shotsync_shootings(error)
         self._refresh_shotsync_shortcuts()
 
     def _sync_code_replacements(self) -> None:
-        """Pull the current web sets; mutations are posted immediately by the dialog."""
+        """Получает с сервера наборы кодов; изменения диалог отправляет сразу."""
         if not self.shotsync_client.has_key():
             return
         self.shotsync_client.request_json(
@@ -5139,17 +5139,16 @@ class Workspace(QMainWindow):
         )
 
     def _local_code_replacement_sets(self) -> list[dict]:
-        """Read the offline replacement library kept in the app settings."""
+        """Читает локальную библиотеку замен из настроек приложения."""
         sets = self.settings.value("code_replacements/local_sets", [], list)
         return [entry for entry in sets if isinstance(entry, dict)]
 
-    # ----- face sets sync ------------------------------------------------
     def _sync_face_sets(self) -> None:
-        """Pull the server's saved faces and reconcile them with the local library.
+        """Сверяет локальные наборы лиц с библиотекой пользователя в ShotSync.
 
-        Mirrors the code-replacements sync: while logged in the server is the
-        source of truth, so its people replace the local list (avatars kept),
-        local-only people are uploaded, and missing previews are downloaded.
+        После входа сервер считается источником истины. Локальные аватары при
+        объединении сохраняются, отсутствующие наборы отправляются на сервер, а
+        недостающие превью загружаются обратно.
         """
         if not self.shotsync_client.has_key():
             return
@@ -5170,7 +5169,7 @@ class Workspace(QMainWindow):
             self._fetch_face_preview(local_id, photo_url)
 
     def _push_face_set(self, entry: dict) -> None:
-        """Upload a local-only face set to the server and store its server id."""
+        """Отправляет локальный набор лиц в ShotSync и запоминает его серверный ID."""
         if entry.get("server_id") or not self.shotsync_client.has_key():
             return
         if not entry.get("embedding"):
@@ -5198,7 +5197,7 @@ class Workspace(QMainWindow):
         )
 
     def _fetch_face_preview(self, local_id: str, photo_url: str) -> None:
-        """Download a server face preview and cache it locally as a base64 avatar."""
+        """Загружает превью лица и сохраняет его локально как аватар Base64."""
         def done(ok: bool, data: bytes) -> None:
             if not ok or not data:
                 return
@@ -5237,9 +5236,8 @@ class Workspace(QMainWindow):
     def _shotsync_avatar_loaded(self, image) -> None:
         self.shotsync_panel.set_avatar(image)
 
-    # ----- live receive (feature 1) -------------------------------------
     def _refresh_shotsync_receiving(self) -> None:
-        """Reflect which shootings are currently being received in the panel."""
+        """Обновляет в панели признаки съёмок, принимаемых прямо сейчас."""
         self.shotsync_panel.set_receiving_ids(self.shotsync.receiving_ids())
 
     def _shotsync_folder_map(self) -> dict[str, str]:
@@ -5289,7 +5287,7 @@ class Workspace(QMainWindow):
             return set()
 
     def _shotsync_folder_modes(self) -> dict[int, str]:
-        """Return persisted local-folder modes, ignoring folders gone from disk."""
+        """Возвращает режимы локальных папок, отбрасывая исчезнувшие с диска."""
         folders = self._shotsync_folder_map()
         modes = self._stored_shotsync_modes()
         for shooting_id in self._legacy_shotsync_selection_ids():
@@ -5307,7 +5305,7 @@ class Workspace(QMainWindow):
         return result
 
     def _local_shotsync_shootings(self) -> list[dict]:
-        """Build ShotSync cards for completed local selection folders offline."""
+        """Строит карточки ShotSync по локальным папкам, доступным без сервера."""
         shootings: list[dict] = []
         for shooting_id, mode in self._shotsync_folder_modes().items():
             folder = self._local_shotsync_folder(shooting_id)
@@ -5338,7 +5336,7 @@ class Workspace(QMainWindow):
         return shootings
 
     def _show_local_shotsync_shootings(self, error: str) -> None:
-        """Keep the ShotSync panel useful without a server connection."""
+        """Показывает сохранённые съёмки, когда связи с ShotSync нет."""
         shootings = self._local_shotsync_shootings()
         self._shotsync_shootings = shootings
         self.shotsync_panel.set_offline_ids({int(shooting["id"]) for shooting in shootings})
@@ -5373,7 +5371,7 @@ class Workspace(QMainWindow):
         self._refresh_shotsync_current_shooting()
 
     def _refresh_shotsync_current_shooting(self) -> None:
-        """Bold the card whose linked folder is open in this workspace."""
+        """Выделяет карточку съёмки, открытой в этой рабочей вкладке."""
         shooting_id: int | None = None
         if self.folder_cache is not None and self.cache_ready:
             session = self.folder_cache.shotsync_session()
@@ -5390,7 +5388,7 @@ class Workspace(QMainWindow):
         self.shotsync_panel.set_current_shooting_id(shooting_id)
 
     def _shotsync_shooting_activated(self, shooting: dict) -> None:
-        """Open a known folder, otherwise show the two cloud-only actions."""
+        """Открывает локальную папку съёмки или предлагает облачные действия."""
         shooting_id = int(shooting.get("id") or 0)
         if not shooting_id:
             return
@@ -5436,14 +5434,13 @@ class Workspace(QMainWindow):
         self.shotsync.marks_fetcher.fetch(shooting_id, self.folder_cache)
 
     def _shotsync_remove_local_requested(self, shooting: dict) -> None:
-        """Delete a selection copy from disk without touching the server shooting."""
+        """Удаляет локальную копию отбора, не затрагивая съёмку на сервере."""
         shooting_id = int(shooting.get("id") or 0)
         title = str(shooting.get("title") or "Съёмка ShotSync")
         folder = self._local_shotsync_folder(shooting_id, title)
         if not shooting_id or folder is None:
             return
         resolved = folder.resolve()
-        # Never allow a malformed saved setting to turn this into a root delete.
         if resolved.parent == resolved:
             QMessageBox.warning(self, "ShotSync", "Нельзя удалить корневую папку диска.")
             return
@@ -5487,7 +5484,7 @@ class Workspace(QMainWindow):
             self.shotsync.downloader.start(shooting_id, str(shooting.get("title") or ""))
 
     def _shotsync_delete_server_requested(self, shooting: dict) -> None:
-        """Delete only an uploaded server shooting; keep the source folder."""
+        """Удаляет загруженную съёмку с сервера, сохраняя исходную папку."""
         shooting_id = int(shooting.get("id") or 0)
         folder = self._local_shotsync_folder(shooting_id, str(shooting.get("title") or ""))
         if not shooting_id or folder is None:
@@ -5542,15 +5539,12 @@ class Workspace(QMainWindow):
         QMessageBox.warning(self, "ShotSync", message)
 
     def _shotsync_receive_requested(self, shooting: dict) -> None:
-        """Toggle live receiving for a shooting, choosing a target folder."""
+        """Включает или выключает приём съёмки в выбранную локальную папку."""
         shooting_id = int(shooting.get("id") or 0)
         if not shooting_id:
             return
         if self.shotsync.is_receiving(shooting_id):
             self.shotsync.stop_receiving(shooting_id)
-            # Stopping live receive deliberately returns the shooting to the
-            # server-only state. Existing downloaded files stay on disk, but
-            # this folder is no longer treated as a ShotSync target.
             self._forget_shotsync_folder(shooting_id)
             self._refresh_shotsync_local_folders(self._shotsync_shootings)
             self._refresh_shotsync_tab_indicator()
@@ -5573,7 +5567,7 @@ class Workspace(QMainWindow):
         self.load_directory(folder)
 
     def _on_shotsync_photo_downloaded(self, shooting_id: int, folder: str, filename: str) -> None:
-        """A new original landed on disk; refresh the tab showing that folder."""
+        """Обновляет открытую папку после появления нового оригинала на диске."""
         if Path(folder) == self.current_dir:
             self.load_directory(self.current_dir)
 
@@ -5582,7 +5576,7 @@ class Workspace(QMainWindow):
         self._refresh_status_panel()
 
     def _on_shotsync_mark_updated(self, shooting_id: int, folder: str, photo: dict) -> None:
-        """Mirror an owner mark that arrived over the socket into this folder."""
+        """Переносит пришедшую через сокет метку владельца в локальную папку."""
         if Path(folder) != self.current_dir:
             return
         name = _shotsync_photo_filename(photo)
@@ -5596,7 +5590,7 @@ class Workspace(QMainWindow):
         )
 
     def _on_shotsync_photo_updated(self, shooting_id: int, photo: dict) -> None:
-        """Apply live server marks to the open ShotSync selection folder."""
+        """Применяет серверные метки к открытому локальному отбору ShotSync."""
         if self.folder_cache is None or not self.cache_ready:
             return
         session = self.folder_cache.shotsync_session()
@@ -5619,11 +5613,11 @@ class Workspace(QMainWindow):
         )
 
     def _on_shotsync_shooting_deleted(self, shooting_id: int) -> None:
-        """Remove a server-downloaded selection copy when its shooting is deleted."""
+        """Удаляет загруженную копию отбора после удаления съёмки на сервере."""
         self._remove_shotsync_selection_copy(int(shooting_id))
 
     def _reconcile_shotsync_selection_copies(self, shootings: list[dict]) -> None:
-        """Clean selection copies that were deleted while this app was offline."""
+        """Убирает локальные копии съёмок, удалённых за время работы без сети."""
         server_ids = {int(shooting.get("id") or 0) for shooting in shootings}
         for shooting_id, mode in self._shotsync_folder_modes().items():
             if mode == "selection_copy" and shooting_id not in server_ids:
@@ -5648,7 +5642,7 @@ class Workspace(QMainWindow):
     def _apply_external_selection(
         self, name: str, *, rating: int | None, color_label: str, comment: str
     ) -> None:
-        """Apply rating/color/comment to a single file by name and repaint it."""
+        """Обновляет рейтинг, цвет и комментарий файла и перерисовывает карточку."""
         detail = self.photo_details.setdefault(name, {})
         detail.update(rating=rating, color_label=color_label, comment=comment)
         for path, item in self.items_by_path.items():
@@ -5668,9 +5662,8 @@ class Workspace(QMainWindow):
             if self.stack.currentWidget() is self.full_view:
                 self.full_view.set_metadata(dict(detail), (self.current_path,))
 
-    # ----- selection: take a shooting locally (feature 2) ----------------
     def _shotsync_select_requested(self, shooting: dict) -> None:
-        """Download a shooting's previews into a local folder for selection."""
+        """Загружает превью съёмки в локальную папку для отбора."""
         shooting_id = int(shooting.get("id") or 0)
         if not shooting_id:
             return
@@ -5699,6 +5692,7 @@ class Workspace(QMainWindow):
         self._refresh_status_panel()
 
     def _on_shotsync_selection_ready(self, shooting_id: int, folder: str) -> None:
+        """Открывает готовый отбор ShotSync и восстанавливает его связь с сервером."""
         is_requested = shooting_id in self._requested_shotsync_selections
         is_resuming = shooting_id in self._resuming_shotsync_selections
         if not is_requested and not is_resuming:
@@ -5761,7 +5755,7 @@ class Workspace(QMainWindow):
         QMessageBox.warning(self, "ShotSync", f"Не удалось загрузить съёмку:\n{message}")
 
     def _attach_shotsync_syncer(self) -> None:
-        """If the open folder is a ShotSync selection, start syncing its marks."""
+        """Подключает синхронизацию меток, если открыта папка отбора ShotSync."""
         self._detach_shotsync_syncer()
         self._refresh_shotsync_shortcuts()
         if self.folder_cache is None or not self.cache_ready:
@@ -5787,9 +5781,8 @@ class Workspace(QMainWindow):
         self._shotsync_pending_marks = max(0, int(count))
         self._refresh_status_panel()
 
-    # ----- send folder to server + get marks (feature 3) -----------------
     def _shotsync_send_current_folder(self) -> None:
-        """Choose a source folder and create its ShotSync shooting."""
+        """Выбирает исходную папку и создаёт для неё съёмку в ShotSync."""
         if self.current_dir is None:
             return
         if not self.shotsync_client.has_key():
@@ -5802,13 +5795,11 @@ class Workspace(QMainWindow):
         self._show_shotsync_upload_popup()
 
     def _show_shotsync_upload_popup(self) -> None:
+        """Показывает немодальный прогресс отправки папки в ShotSync."""
         dialog = QDialog(self)
         self._shotsync_upload_popup = dialog
         dialog.setObjectName("shotsyncUploadPopup")
         dialog.setWindowTitle("Отправить на ShotSync")
-        # A real Qt.Popup closes itself when the native folder chooser gains
-        # focus. Use a tool window with the same compact visual treatment so
-        # the selected path can return to this form reliably.
         dialog.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         dialog.setMinimumWidth(440)
         layout = QVBoxLayout(dialog)
@@ -5896,7 +5887,7 @@ class Workspace(QMainWindow):
         self.shotsync.uploader.start(folder, title, original_datetimes, ai_faces_series)
 
     def _shotsync_upload_dialog(self) -> tuple[Path, str, bool] | None:
-        """Collect all creation settings instead of silently using this tab's folder."""
+        """Запрашивает все параметры новой съёмки, включая исходную папку."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Отправить на отбор")
         layout = QVBoxLayout(dialog)
@@ -5961,7 +5952,6 @@ class Workspace(QMainWindow):
         self.grid_content_stack.setCurrentWidget(self.grid)
         if self.shotsync_client.has_key():
             self.shotsync_client.fetch_shootings()
-        # The folder is now a ShotSync session; re-attach so marks sync live.
         if Path(folder) == self.current_dir:
             self._attach_shotsync_syncer()
             self._refresh_shotsync_shortcuts()
@@ -5973,7 +5963,7 @@ class Workspace(QMainWindow):
         QMessageBox.warning(self, "ShotSync", f"Не удалось отправить съёмку:\n{message}")
 
     def _shotsync_fetch_marks(self) -> None:
-        """Pull marks for the current ShotSync folder (the "Получить" action)."""
+        """Получает с сервера метки для открытой папки ShotSync."""
         if self.folder_cache is None or not self.cache_ready:
             return
         session = self.folder_cache.shotsync_session()
@@ -5992,7 +5982,6 @@ class Workspace(QMainWindow):
         self._shotsync_marks_fetching = False
         self._refresh_status_panel()
         self._xmp_export_after_cache_load = self._xmp_auto_enabled()
-        # Repaint the grid/details from the freshly written cache.
         if self.current_dir is not None:
             self.load_directory(self.current_dir)
 
@@ -6002,7 +5991,7 @@ class Workspace(QMainWindow):
         QMessageBox.warning(self, "ShotSync", f"Не удалось получить метки:\n{message}")
 
     def _refresh_shotsync_shortcuts(self) -> None:
-        """Enable/disable the ShotSync folder actions for the current folder."""
+        """Включает только те действия ShotSync, которые подходят текущей папке."""
         is_session = False
         if self.folder_cache is not None and self.cache_ready:
             is_session = self.folder_cache.shotsync_session() is not None
@@ -6012,7 +6001,7 @@ class Workspace(QMainWindow):
         self.shotsync_panel.set_folder_actions(can_send=can_send, is_session=is_session)
 
     def _refresh_shotsync_tab_indicator(self) -> None:
-        """Tell the tab host whether the open folder belongs to ShotSync."""
+        """Сообщает панели вкладок, связана ли открытая папка с ShotSync."""
         linked = any(
             self.shotsync.folder_for(shooting_id) == self.current_dir
             for shooting_id in self.shotsync.receiving_ids()
@@ -6026,6 +6015,11 @@ class Workspace(QMainWindow):
         self.shotsyncFolderChanged.emit(linked)
 
     def load_directory(self, directory: Path) -> None:
+        """Начинает асинхронную загрузку папки и сбрасывает состояние прошлого вида.
+
+        Результаты старых задач защищены поколением запроса: если пользователь
+        уже ушёл в другую папку, запоздавший ответ тихо выбрасывается.
+        """
         switching_directory = directory != self.current_dir
         if hasattr(self, "grid_content_stack"):
             self.grid_content_stack.setCurrentWidget(self.grid)
@@ -6058,8 +6052,6 @@ class Workspace(QMainWindow):
         self._cache_ai_waiting = False
         self._cache_ai_paths.clear()
         if hasattr(self, "ai_button"):
-            # The toolbar button opens an explanatory menu, so it must remain
-            # available while the folder cache is loading as well.
             self.ai_button.setEnabled(True)
             self._refresh_status_panel()
         self.cache_load_generation += 1
@@ -6073,9 +6065,6 @@ class Workspace(QMainWindow):
         self._refresh_shotsync_tab_indicator()
         self._refresh_shotsync_current_shooting()
         self._restore_series_mode(directory)
-        # A folder change starts navigation from the beginning.  Do not carry
-        # the remembered grid cursor/scroll position into the newly opened
-        # folder.
         self._pending_folder_grid_context = None if switching_directory else self._load_folder_grid_context(directory)
         self.settings.setValue("last_directory", str(directory))
         self.setWindowTitle(_workspace_title(directory))
@@ -6091,12 +6080,9 @@ class Workspace(QMainWindow):
         self.thumb_priority_set.clear()
         self.visible_thumb_pending.clear()
         
-        # Synchronize the left tree view with the current directory
         index = self.dir_model.index(str(directory))
         if index.isValid():
-            # Expand all parent directories to show the current folder in the tree
             self.dir_tree.expand(index.parent())
-            # Select and scroll to the current directory
             self.dir_tree.setCurrentIndex(index)
             self.dir_tree.scrollTo(index)
             
@@ -6106,8 +6092,6 @@ class Workspace(QMainWindow):
 
     @staticmethod
     def _folder_settings_prefix(directory: Path) -> str:
-        # Keep the setting portable and avoid QSettings treating path
-        # separators as nested groups.
         normalized = str(directory.expanduser().resolve()).casefold()
         return f"folder_settings/{sha1(normalized.encode()).hexdigest()}"
 
@@ -6146,7 +6130,7 @@ class Workspace(QMainWindow):
         scroll_bar.setValue(min(scroll_value, scroll_bar.maximum()))
 
     def _reset_grid_cursor(self) -> None:
-        """Start grid navigation at the first item in the current folder."""
+        """Ставит курсор навигации на первый элемент текущей папки."""
         if self.grid.count() == 0:
             return
         self.grid.setCurrentRow(0)
@@ -6178,7 +6162,7 @@ class Workspace(QMainWindow):
         )
 
     def _show_viewer_toast(self, message: str) -> None:
-        """Show a brief confirmation over the viewer page."""
+        """Ненадолго показывает поверх просмотрщика подтверждение действия."""
         parent = self.centralWidget() or self
         previous = getattr(self, "_viewer_toast", None)
         if previous is not None:
@@ -6215,18 +6199,16 @@ class Workspace(QMainWindow):
         self.bridge.directoryScanned.emit(request, directory, future)
 
     def _on_directory_scanned(self, request: WorkspaceRequest, directory: Path, future: Future) -> None:
+        """Принимает результат сканирования, если запрос всё ещё относится к этой папке."""
         if self.closing or not self.workspace_state.accepts(request):
             return
         self._folder_context_active = True
         try:
             self.all_paths = future.result()
-            # Separate subdirectories and image files
             subfolders = [p for p in self.all_paths if p.is_dir()]
             images = [p for p in self.all_paths if p.is_file()]
-            # Sort both groups alphabetically
             sorted_subfolders = sorted(subfolders, key=lambda p: p.name.lower())
             sorted_images = sorted(images, key=lambda p: p.name.lower())
-            # Combine: folders first, then images
             self.paths = sorted_subfolders + sorted_images
             self.view_paths = list(self.paths)
             self.preview_progress_total = len(images)
@@ -6273,8 +6255,6 @@ class Workspace(QMainWindow):
         self.visible_thumb_pending.clear()
         self._refresh_status_panel()
         self.populate_timer.start()
-        # Do not decode the first files before the in-memory cache has been
-        # deserialized.  Otherwise the sequential queue races cached previews.
 
     def _populate_next_items(self) -> None:
         if not self.workspace_active:
@@ -6295,7 +6275,7 @@ class Workspace(QMainWindow):
             self._refresh_status_panel()
 
     def _grid_item_for_path(self, path: Path) -> QListWidgetItem:
-        """Create one card while preserving any thumbnail already in RAM."""
+        """Создаёт карточку пути и повторно использует уже загруженную миниатюру."""
         item = QListWidgetItem(path.name)
         item.setData(Qt.ItemDataRole.UserRole, str(path))
         item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -6311,6 +6291,7 @@ class Workspace(QMainWindow):
         return item
 
     def _submit_next_thumbs(self) -> None:
+        """Дозированно добавляет следующую порцию миниатюр в фоновую очередь."""
         if not self.workspace_active:
             self.thumb_timer.stop()
             return
@@ -6319,9 +6300,6 @@ class Workspace(QMainWindow):
         if self.pending_full_request is not None or self.foreground_full_futures:
             return
         pending_thumbs = sum(1 for _, size in self.pending if size == THUMB_SIZE)
-        # Never keep feeding the top-to-bottom background scan while viewport
-        # work is waiting.  Also keep executor queues short so a scroll can
-        # affect the next submitted job instead of waiting behind stale work.
         if self.thumb_priority:
             if len(self.visible_thumb_pending) >= MAX_VISIBLE_THUMB_PENDING:
                 return
@@ -6382,11 +6360,12 @@ class Workspace(QMainWindow):
         )
 
     def _maybe_auto_start_ai_after_previews(self) -> bool:
-        """Auto-run AI once a view's previews are ready, when the option is on.
+        """Запускает AI-анализ после готовности превью, если включён авторежим.
 
-        Fires at most once per view generation, so re-scanning the folder after
-        photos are added triggers it again while it never re-runs mid-analysis.
-        Returns True when analysis was started.
+        Для одной версии содержимого папки запуск происходит не больше одного
+        раза. После повторного сканирования с новыми файлами анализ можно начать
+        снова, но уже выполняющееся задание не дублируется. Возвращает ``True``,
+        если новый анализ действительно стартовал.
         """
         if self.closing or self._auto_ai_generation == self.view_generation:
             return False
@@ -6402,7 +6381,7 @@ class Workspace(QMainWindow):
         return started
 
     def _show_ai_menu(self) -> None:
-        """Show the entry point for the AI analysis already available in the workspace."""
+        """Показывает меню запуска AI-анализа текущей папки."""
         menu = QMenu(self.ai_button)
         menu.setObjectName("toolbarPopup")
         content = QWidget(menu)
@@ -6444,6 +6423,7 @@ class Workspace(QMainWindow):
         return self.settings.value("xmp/auto_export", False, bool)
 
     def _xmp_replacements(self, detail: dict | None = None) -> dict[str, str]:
+        """Собирает активный словарь подстановок для экспорта комментария в XMP."""
         replacements = {
             str(code.get("code") or ""): str(code.get("value") or "")
             for group in self.code_replacement_sets if isinstance(group, dict)
@@ -6472,6 +6452,7 @@ class Workspace(QMainWindow):
         return replacements
 
     def _show_xmp_menu(self) -> None:
+        """Строит меню записи XMP для текущего файла или выделения."""
         menu = QMenu(self.xmp_button)
         menu.setObjectName("toolbarPopup")
         content = QWidget(menu)
@@ -6522,10 +6503,6 @@ class Workspace(QMainWindow):
         if payload is None or self.closing:
             return
         self._xmp_running.add(path)
-        # QFileSystemWatcher reports the directory change caused by our own
-        # sidecar write. The photo list is unchanged, so reloading it only
-        # disrupts selection and scrolling. Leave external changes alone once
-        # this small write window has elapsed.
         self._ignore_folder_changes_until = max(self._ignore_folder_changes_until, monotonic() + 2.0)
         future = self.xmp_executor.submit(_write_xmp_task, path, *payload)
         future.add_done_callback(lambda done, target=path: self.bridge.xmpWritten.emit((target, done)))
@@ -6543,7 +6520,7 @@ class Workspace(QMainWindow):
             self._start_xmp_write(path)
 
     def _show_utilities_menu(self) -> None:
-        """Show the reserved place for batch tools without implying availability."""
+        """Показывает место будущих пакетных инструментов без неработающих команд."""
         menu = QMenu(self.utilities_button)
         menu.setObjectName("toolbarPopup")
         content = QWidget(menu)
@@ -6573,9 +6550,6 @@ class Workspace(QMainWindow):
                 button.setEnabled(False)
                 button.setToolTip("Пока не реализовано")
             else:
-                # Let QMenu complete its close cycle before a modal dialog is
-                # created; otherwise Qt can warn that its transient window is
-                # not a top-level window.
                 button.clicked.connect(lambda _checked=False, target=callback: (menu.close(), QTimer.singleShot(0, target)))
             layout.addWidget(button)
 
@@ -6633,7 +6607,7 @@ class Workspace(QMainWindow):
         return any(self.shotsync.folder_for(shooting_id) == self.current_dir for shooting_id in self.shotsync.receiving_ids())
 
     def _folder_jpeg_paths(self) -> list[Path]:
-        """Every JPEG living directly in the current folder, sorted by name."""
+        """Возвращает JPEG из текущей папки, без подпапок и по порядку имён."""
         suffixes = {".jpg", ".jpeg"}
         return sorted(
             (
@@ -6692,6 +6666,7 @@ class Workspace(QMainWindow):
         dialog.exec()
 
     def _start_batch_resize(self, dialog: BatchResizeDialog, paths: list[Path], options: dict) -> None:
+        """Запускает пакетный экспорт после подтверждения параметров диалога."""
         output_dir = Path(options["output_dir"])
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -6728,7 +6703,7 @@ class Workspace(QMainWindow):
         dialog.accept()
 
     def _resolve_resize_targets(self, paths: list[Path], output_dir: Path) -> list[tuple[Path, Path]] | None:
-        """Pick non-destructive output paths and ask once per existing collision."""
+        """Подбирает безопасные выходные пути и один раз спрашивает о конфликтах."""
         targets: list[tuple[Path, Path]] = []
         planned: set[str] = set()
         overwrite_all = False
@@ -6769,7 +6744,7 @@ class Workspace(QMainWindow):
     def _rename_files_safely(
         self, names: dict[str, str], progress: Callable[[int, int], None] | None = None
     ) -> None:
-        """Use temporary sibling names so swaps and occupied targets are lossless."""
+        """Переименовывает через временные соседние файлы без потерь при обмене имён."""
         changes = {old: new for old, new in names.items() if old != new}
         if not changes:
             return
@@ -6870,11 +6845,9 @@ class Workspace(QMainWindow):
         self._refresh_status_panel()
 
     def _refresh_status_panel(self) -> None:
-        """Show one active operation and keep folder/selection counts in the toolbar."""
+        """Показывает активную операцию и счётчики папки или выделения."""
         if not hasattr(self, "status_label"):
             return
-        # Directory scanning already established these collections. Avoid
-        # thousands of filesystem stat calls whenever progress is repainted.
         visible_files = [
             path for path in self.view_paths
             if is_supported_media(path)
@@ -7025,7 +6998,7 @@ class Workspace(QMainWindow):
         self._apply_view()
 
     def _on_metadata_updated(self, results: object) -> None:
-        """Apply thumbnail-worker EXIF without reloading the whole folder cache."""
+        """Добавляет полученный в фоне EXIF, не перечитывая весь кэш папки."""
         if self.closing or not self.cache_ready or not isinstance(results, list):
             return
         changed_current = False
@@ -7089,6 +7062,7 @@ class Workspace(QMainWindow):
         self.camera_filter.setVisible(len(cameras) > 1)
 
     def _update_analysis_controls(self) -> None:
+        """Синхронизирует кнопки AI с готовностью моделей, кэша и текущего задания."""
         if not hasattr(self, "faces_panel_button"):
             return
         has_faces = any(detail.get("faces") for detail in self.photo_details.values())
@@ -7157,22 +7131,17 @@ class Workspace(QMainWindow):
         )
 
     def _prioritize_visible_thumbs(self) -> None:
+        """Продвигает видимые карточки и ближайший экран вперёд фоновой очереди."""
         if not self.workspace_active:
             return
         if self.folder_cache is None or not self.cache_ready or self.grid.count() == 0:
             return
-        # PhotoGrid intentionally keeps QListView's gridSize invalid so the
-        # delegate can distribute remainder pixels across columns. Use its
-        # actual per-card hint for viewport sampling; otherwise this routine
-        # returns early and thumbnail work falls back to top-to-bottom only.
         cell = self.grid.card_size_hint(0)
         if cell.width() <= 0 or cell.height() <= 0:
             return
 
         viewport = self.grid.viewport()
         visible_rows: set[int] = set()
-        # Sample the centre of every visible grid cell. This follows Qt's
-        # actual wrapping/layout without walking every item in a large folder.
         for y in range(cell.height() // 2, viewport.height(), cell.height()):
             for x in range(cell.width() // 2, viewport.width(), cell.width()):
                 item = self.grid.itemAt(QPoint(x, y))
@@ -7185,9 +7154,6 @@ class Workspace(QMainWindow):
         first = min(visible_rows)
         last = max(visible_rows)
         span = max(1, last - first + 1)
-        # One viewport of overscan in both directions prevents blank cards
-        # during ordinary scrolling. Visible cards are ordered from the centre
-        # out; overscan follows by distance from the visible range.
         centre = (first + last) / 2
         visible_order = sorted(visible_rows, key=lambda row: abs(row - centre))
         before = range(first - 1, max(-1, first - span - 1), -1)
@@ -7221,10 +7187,6 @@ class Workspace(QMainWindow):
             self.thumb_priority_set.discard(path)
             if (path, THUMB_SIZE) not in self.pending:
                 return path, True
-        # Background traversal is deliberately lazy and consults the current
-        # view order each time. It skips cards already loaded or pending, which
-        # also makes it safe for a future sort/filter rebuild to reset the
-        # cursor without duplicating work.
         while self.thumb_index < len(self.paths):
             path = self.paths[self.thumb_index]
             self.thumb_index += 1
@@ -7242,6 +7204,7 @@ class Workspace(QMainWindow):
         self.bridge.cacheLoaded.emit(generation, future)
 
     def _on_cache_loaded(self, generation: int, future: Future) -> None:
+        """Подключает загруженный кэш к текущему поколению содержимого папки."""
         if self.closing or generation != self.cache_load_generation:
             return
         try:
@@ -7264,9 +7227,6 @@ class Workspace(QMainWindow):
             if self._xmp_auto_enabled():
                 self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
         self._refresh_camera_filter()
-        # Series membership depends on embeddings, which are only available
-        # after the folder cache has loaded. Rebuild the grid now so a restored
-        # checked state reflects the actual collapsed-series view.
         self._apply_view()
         self._update_analysis_controls()
         self._refresh_ai_status()
@@ -7276,22 +7236,12 @@ class Workspace(QMainWindow):
             and self.current_path.parent == self.current_dir
             and not is_supported_video(self.current_path)
         ):
-            # A file launch opens Full View before the folder is scanned, so the
-            # requested photo could not be decoded yet (_submit_decode bails
-            # while folder_cache is None) and the deferred load_directory
-            # cancelled any in-flight decode. Now that the cache is ready,
-            # decode the shown photo so it reaches full resolution instead of
-            # staying on the thumbnail fallback.
             full_size = self._full_preview_size()
             if self._cache_get((self.current_path, full_size)) is None:
                 self._show_best_cached_full(self.current_path, full_size)
                 self._promote_current_full_task(self.current_path, full_size)
                 self._submit_decode(self.current_path, full_size, full_priority=True)
                 self._preload_neighbors(self.current_path)
-            # The preview strip was built empty because the folder had not been
-            # scanned when Full View opened. Rebuild it now so it shows the
-            # neighbours and scrolls to the current photo without needing a
-            # manual left/right keypress.
             self._refresh_full_view_navigation(self.current_path)
         if ENABLE_EXIF_METADATA and self.folder_cache is not None:
             self.metadata_pipeline.scan(
@@ -7315,6 +7265,7 @@ class Workspace(QMainWindow):
         self._fetch_pending_shotsync_marks()
 
     def _apply_view(self, *_args) -> None:
+        """Перестраивает видимый список по фильтрам, поиску и режиму серий."""
         if not hasattr(self, "rating_filter"):
             return
         rating = self.rating_filter.currentData()
@@ -7326,10 +7277,9 @@ class Workspace(QMainWindow):
         needle = self.search_edit.text().strip().casefold()
 
         def visible(path: Path) -> bool:
-            # Always keep directories - never filter out folders, no matter what
+            """Проверяет один путь по всем активным фильтрам сетки."""
             if path.is_dir():
                 return True
-            # All filters only apply to actual image files
             if media == "video" and not is_supported_video(path):
                 return False
             if media == "image" and is_supported_video(path):
@@ -7401,11 +7351,10 @@ class Workspace(QMainWindow):
         return collapsed
 
     def _grid_paths_with_series(self, paths: list[Path]) -> list[Path]:
+        """Разворачивает выбранные серии, сохраняя экранный порядок сетки."""
         self.series_cards = {}
         if not self.series_toggle.isChecked():
             return list(paths)
-        # Folders are navigation targets, not photos. Keep them at the top
-        # and exclude them completely from AI-series grouping.
         result: list[Path] = [path for path in paths if path.is_dir()]
         group: list[Path] = []
 
@@ -7463,16 +7412,12 @@ class Workspace(QMainWindow):
             self.comment_edit.clear()
 
     def _update_selection(self, **changes) -> None:
+        """Применяет метаданные к выделению, кэшу, XMP и открытому просмотрщику."""
         selected_paths = self._selected_paths()
         paths = list(selected_paths)
         if self.current_path is not None and self.stack.currentWidget() is self.full_view:
-            # The grid retains the series leader as its selection. In the
-            # viewer, metadata belongs exclusively to the opened series frame.
             paths = [self.current_path]
         elif {"rating", "color_label"}.intersection(changes):
-            # A collapsed series is represented by one leader card, so a mark
-            # on that card belongs to every hidden frame. Once expanded, each
-            # visible card is an independent target.
             targets: list[Path] = []
             for path in paths:
                 series = self.series_cards.get(path) or {}
@@ -7494,8 +7439,6 @@ class Workspace(QMainWindow):
                     color_label=detail.get("color_label", ""),
                     comment=detail.get("comment", ""),
                 )
-            # If this folder is a ShotSync selection, ship the mark back to the
-            # server (durably queued; retried automatically while offline).
             if self._shotsync_syncer is not None:
                 self._shotsync_syncer.queue_mark(path.name, detail=dict(detail), changes=changes)
             if self._xmp_auto_enabled():
@@ -7531,7 +7474,7 @@ class Workspace(QMainWindow):
         self._update_selection(comment=self.comment_edit.text().strip())
 
     def _show_comment_dialog(self) -> None:
-        """Edit a comment without letting a hotkey steal focus from the grid."""
+        """Редактирует комментарий так, чтобы горячие клавиши не забрали ввод."""
         selected = self._selected_paths()
         in_full_view = self.stack.currentWidget() is self.full_view
         if not in_full_view and not selected:
@@ -7602,7 +7545,7 @@ class Workspace(QMainWindow):
         self._update_selection(**{kind: None if current == value else value})
 
     def _toggle_full_view_mark_indicator(self) -> None:
-        """Apply M on an unmarked photo, or clear every mark on the next click."""
+        """Ставит быструю метку клавишей M, а повторным нажатием снимает её."""
         if self.current_path is None or self.stack.currentWidget() is not self.full_view:
             return
         detail = self.photo_details.get(self.current_path.name, {})
@@ -7612,7 +7555,7 @@ class Workspace(QMainWindow):
         self._apply_quick_mark()
 
     def _load_face_sets(self) -> list[dict]:
-        """Load globally saved people independently of the current folder cache."""
+        """Загружает общую библиотеку лиц независимо от кэша открытой папки."""
         raw = self.settings.value("face_sets", "", str)
         try:
             entries = json.loads(raw) if raw else []
@@ -7646,7 +7589,7 @@ class Workspace(QMainWindow):
         )
 
     def _current_face_avatar(self, face: dict, size: int = 80) -> QPixmap:
-        """Prefer the largest decoded frame; the on-screen image can be 640px fallback."""
+        """Берёт аватар из самого крупного доступного декодированного кадра."""
         if self.current_path is not None:
             candidates = [
                 (variant, decoded) for (path, variant), decoded in self.decode_cache.memory.items()
@@ -7658,6 +7601,7 @@ class Workspace(QMainWindow):
         return self.full_view.face_avatar(face, size)
 
     def _add_face_to_set(self, face: object) -> None:
+        """Добавляет найденное лицо в новый или существующий набор человека."""
         if not isinstance(face, dict) or not isinstance(face.get("embedding"), list):
             return
         embedding = face["embedding"]
@@ -7690,6 +7634,7 @@ class Workspace(QMainWindow):
         return next((entry for entry in self.face_sets if entry.get("id") == face_id), None)
 
     def _show_face_sets(self, toast_message: str | None = None) -> None:
+        """Открывает библиотеку людей и позволяет пересобрать или удалить наборы."""
         dialog = QDialog(self)
         dialog.setObjectName("faceSetsDialog")
         dialog.setWindowTitle("Наборы лиц")
@@ -7712,6 +7657,7 @@ class Workspace(QMainWindow):
         layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
 
         def rebuild() -> None:
+            """Пересобирает строки людей после изменения библиотеки лиц."""
             while body_layout.count():
                 child = body_layout.takeAt(0)
                 if child.widget() is not None:
@@ -7825,12 +7771,12 @@ class Workspace(QMainWindow):
             action = menu.addAction("★" * rating)
             action.triggered.connect(lambda _checked=False, value=rating: self._apply_mark_to_face(face_id, "rating", value))
         menu.addSeparator()
-        for label, value in (("Красная", "red"), ("Жёлтая", "yellow"), ("Зелёная", "green"), ("Синяя", "blue"), ("Фиол��товая", "purple")):
+        for label, value in (("Красная", "red"), ("Жёлтая", "yellow"), ("Зелёная", "green"), ("Синяя", "blue"), ("Фиолетовая", "purple")):
             action = menu.addAction(label)
             action.setIcon(_color_swatch_icon(value))
             action.triggered.connect(lambda _checked=False, value=value: self._apply_mark_to_face(face_id, "color_label", value))
         menu.addSeparator()
-        remove_rating = menu.addAction("У��рать рейтинг")
+        remove_rating = menu.addAction("Убрать рейтинг")
         remove_rating.setIcon(_fomantic_icon("ban", 12))
         remove_rating.triggered.connect(lambda: self._apply_mark_to_face(face_id, "rating", None))
         remove = menu.addAction("Убрать метку")
@@ -7938,6 +7884,7 @@ class Workspace(QMainWindow):
         self.scheduler.submit_video_thumbnail(path, visible_priority=visible_priority)
 
     def _on_decoded(self, payload: object) -> None:
+        """Маршрутизирует готовый кадр в карточку, просмотрщик или RAM-кэш."""
         decoded, max_size = payload
         self.visible_thumb_pending.discard((decoded.path, max_size))
         if not self.workspace_active:
@@ -7965,9 +7912,6 @@ class Workspace(QMainWindow):
                 self.full_view.set_image(decoded, fallback=max_size == THUMB_SIZE)
         if max_size > THUMB_SIZE and decoded.path == self.current_path:
             self.thumb_timer.start()
-        # Full-size frames and their preloaded neighbours do not change
-        # thumbnail progress. Updating it here used to scan the whole folder
-        # and call the OS taskbar API after every full-view decode.
         if max_size == THUMB_SIZE:
             self._refresh_status_panel()
 
@@ -8008,7 +7952,7 @@ class Workspace(QMainWindow):
             self.open_full(Path(item.data(Qt.ItemDataRole.UserRole)))
 
     def _open_in_editor(self) -> None:
-        """Open the active image in the configured external editor."""
+        """Открывает активное изображение в выбранном внешнем редакторе."""
         path = self.current_path if self.stack.currentWidget() is self.full_view else None
         if path is None:
             item = self.grid.currentItem()
@@ -8045,15 +7989,13 @@ class Workspace(QMainWindow):
 
     @staticmethod
     def _photoshop_command(path: Path) -> list[str] | None:
-        """Build a launch command for the default Adobe Photoshop installation."""
+        """Ищет стандартную установку Photoshop и собирает команду запуска."""
         if sys.platform == "darwin":
             return ["open", "-a", "Adobe Photoshop", str(path)]
         if sys.platform != "win32":
             executable = shutil.which("photoshop")
             return [executable, str(path)] if executable else None
 
-        # Photoshop commonly registers this application path; the directory
-        # fallback also covers installations that do not add it to PATH.
         try:
             import winreg
 
@@ -8076,7 +8018,7 @@ class Workspace(QMainWindow):
         return [executable, str(path)] if executable else None
 
     def _open_grid_audio(self, path: Path) -> None:
-        """The grid microphone follows the web viewer: open and play at once."""
+        """Открывает аудиозаметку из сетки и сразу начинает воспроизведение."""
         self.open_full(path)
         QTimer.singleShot(0, self.full_view._toggle_audio)
 
@@ -8104,10 +8046,6 @@ class Workspace(QMainWindow):
         if not value:
             return
         if self.stack.currentWidget() is not self.grid_page:
-            # Full View owns the current photo. A grid selection that changes
-            # in the background (for example while the folder populates after a
-            # file launch) must not hijack current_path, otherwise the launched
-            # photo's decode is dropped in _on_decoded and Full View stays blank.
             return
         path = Path(value)
         self.current_path = path
@@ -8119,7 +8057,7 @@ class Workspace(QMainWindow):
         self.grid_full_request_timer.start(70)
 
     def open_full(self, path: Path) -> None:
-        # If this is a directory, navigate into it instead of opening it as an image
+        """Переключает рабочую вкладку в полный просмотр выбранного файла."""
         if path.is_dir():
             self.load_directory(path)
             return
@@ -8156,9 +8094,6 @@ class Workspace(QMainWindow):
         self._show_best_cached_full(path, full_size)
         in_series = len(self._series_for_path(path)) > 1
         if in_series:
-            # Show the compact decode first. In a series this gives immediate
-            # visual feedback while the full-resolution frame is still being
-            # decoded or read from a slow card.
             self._submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=True)
             self.pending_full_request = path
             self.full_request_timer.start(55)
@@ -8172,11 +8107,9 @@ class Workspace(QMainWindow):
             self._preload_neighbors(path)
 
     def _request_original_zoom(self, _position: object) -> None:
-        """Load the source only on demand; repeated 100% views reuse RAM."""
+        """Загружает оригинал только для масштаба 100 % и повторно использует RAM-кэш."""
         if self.current_path is None or is_supported_video(self.current_path):
             return
-        # A 100% inspection is explicitly user-driven: do not let queued
-        # thumbnails or screen-sized neighbour decodes delay it.
         self._suspend_thumbnail_work()
         original_key = (self.current_path, ORIGINAL_SIZE)
         for key, future in list(self.pending.items()):
@@ -8185,7 +8118,6 @@ class Workspace(QMainWindow):
         self._submit_decode(self.current_path, ORIGINAL_SIZE, full_priority=True)
 
     def show_grid(self) -> None:
-        # Leaving full view must not keep a video playing in the background.
         self.full_view.stop_video()
         self.full_view.stop_audio()
         self.stack.setCurrentWidget(self.grid_page)
@@ -8198,7 +8130,7 @@ class Workspace(QMainWindow):
         self.settings.setValue("thumbnail_size", size)
 
     def _restore_grid_context(self) -> None:
-        """Return to the card reached in full view without changing its scale."""
+        """Возвращает сетку к карточке, на которой закончился полный просмотр."""
         path = self.workspace_state.current_photo or self.current_path
         if path is None:
             return
@@ -8258,6 +8190,7 @@ class Workspace(QMainWindow):
             self.open_full(targets[index])
 
     def _refresh_full_view_navigation(self, current: Path) -> None:
+        """Обновляет соседей, ленты и предзагрузку вокруг текущего кадра."""
         strip_paths = self._photo_mode_paths()
         series = self._series_for_path(current)
         strip_current = current if current in strip_paths else series[0]
@@ -8294,7 +8227,7 @@ class Workspace(QMainWindow):
         self._prioritize_full_strip_thumbs(current, strip_paths, series)
 
     def _prioritize_full_strip_thumbs(self, current: Path, strip_paths: list[Path], series: list[Path]) -> None:
-        """Use the existing grid thumbnail queue for the currently useful strips."""
+        """Продвигает миниатюры актуальных лент в общей очереди сетки."""
         try:
             index = strip_paths.index(current)
         except ValueError:
@@ -8303,7 +8236,7 @@ class Workspace(QMainWindow):
         self._prioritize_strip_thumbs(nearby)
 
     def _prioritize_visible_full_strip_thumbs(self) -> None:
-        """Schedule previews as soon as either viewer strip is scrolled."""
+        """Сразу ставит видимые элементы прокрученной ленты в очередь превью."""
         if self.stack.currentWidget() is not self.full_view:
             return
         self._prioritize_strip_thumbs(
@@ -8311,7 +8244,7 @@ class Workspace(QMainWindow):
         )
 
     def _prioritize_strip_thumbs(self, paths: list[Path]) -> None:
-        """Put strip items ahead of the background scan, preserving UI order."""
+        """Ставит элементы ленты перед фоновым сканированием в экранном порядке."""
         if not self.cache_ready:
             return
         for path in reversed(list(dict.fromkeys(paths))):
@@ -8325,7 +8258,7 @@ class Workspace(QMainWindow):
             self.thumb_timer.start()
 
     def _suspend_thumbnail_work(self) -> None:
-        """Give the current full-size decode exclusive scheduling priority."""
+        """Даёт декодированию текущего полного кадра исключительный приоритет."""
         self.thumb_timer.stop()
         self.visible_thumb_timer.stop()
         for key, future in list(self.pending.items()):
@@ -8334,8 +8267,7 @@ class Workspace(QMainWindow):
                 self.visible_thumb_pending.discard(key)
 
     def _photo_mode_paths(self) -> list[Path]:
-        """Build the strip order, expanding the same series as the grid."""
-        # Filter out directories - only show actual image files in the viewer strip
+        """Строит порядок ленты, раскрывая ту же серию, что выбрана в сетке."""
         image_only_paths = [p for p in self.view_paths if p.is_file()]
         if not self.series_toggle.isChecked():
             return list(image_only_paths)
@@ -8393,8 +8325,6 @@ class Workspace(QMainWindow):
             primary, secondary = after, before
         else:
             primary, secondary = before, after
-        # Alternate around the current image while giving the navigation
-        # direction the first slot at every distance.
         neighbors = [
             neighbor
             for distance in range(FULL_PRELOAD_RADIUS)
@@ -8405,7 +8335,7 @@ class Workspace(QMainWindow):
             self._submit_decode(neighbor, full_size, full_priority=True)
 
     def _full_preload_paths(self, path: Path) -> list[Path]:
-        """Prefer adjacent frames while navigating inside an expanded series."""
+        """Выбирает соседние кадры для упреждающей загрузки внутри серии."""
         series = self._series_for_path(path)
         if len(series) > 1 and path in series:
             return series
@@ -8436,12 +8366,10 @@ class Workspace(QMainWindow):
                 future.cancel()
 
     def _promote_current_full_task(self, path: Path, full_size: int) -> None:
-        """Move a queued neighbour decode onto the current-image worker."""
+        """Повышает приоритет кадра, который из соседнего стал текущим."""
         key = (path, full_size)
         future = self.pending.get(key)
         if future is not None:
-            # A running background decode cannot move between executors. Start
-            # a foreground duplicate rather than making the current photo wait.
             future.cancel()
             if self.pending.get(key) is future:
                 self.pending.pop(key, None)
@@ -8518,8 +8446,6 @@ class Workspace(QMainWindow):
         cache = self.folder_cache
         if cache is None:
             return
-        # Preview rows are committed as they are written.  Closing still runs
-        # off the UI thread because SQLite may checkpoint its WAL file.
         future = self.cache_flush_executor.submit(_flush_and_close, cache, close)
         if wait:
             future.result()
@@ -8534,7 +8460,15 @@ class Workspace(QMainWindow):
 
 
 class MainWindow(QMainWindow):
-    """Application shell that owns independently stateful folder workspaces."""
+    """Верхняя оболочка приложения, которая управляет рабочими вкладками.
+
+    Окно восстанавливает сессию, принимает повторные запуски из Проводника,
+    переключает полноэкранный режим и хранит общие действия. Содержимое папок
+    ему не принадлежит — каждая вкладка держит собственный ``Workspace``.
+    """
+
+    """Оболочка приложения, которая владеет независимыми рабочими пространствами папок с отслеживанием состояния.
+    """
 
     def __init__(self, open_target: Path | None = None) -> None:
         super().__init__()
@@ -8619,9 +8553,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self._create_actions()
         if open_target is not None and open_target.exists():
-            # An OS open request is a direct navigation, not a regular
-            # application restore.  Building restored tabs first would make a
-            # file launch flash the grid before Full View takes over.
             self._open_launch_target(open_target)
         else:
             self._restore_workspaces()
@@ -8629,6 +8560,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(10_000, lambda: self._check_for_updates(interactive=False))
 
     def _check_for_updates(self, *, interactive: bool) -> None:
+        """Проверяет обновление в фоне и показывает результат по правилам режима."""
         if self._update_check_running:
             return
         self._update_check_running = True
@@ -8647,7 +8579,6 @@ class MainWindow(QMainWindow):
                 elif interactive:
                     QMessageBox.information(self, "Обновления", "У вас установлена актуальная версия Контрольки.")
             except Exception:
-                # A background check must never interrupt the photo workflow.
                 if interactive:
                     QMessageBox.warning(
                         self,
@@ -8686,7 +8617,7 @@ class MainWindow(QMainWindow):
             webbrowser.open(str(release.get("landing_url") or "https://shotsync.ru/ctrlka/"))
 
     def _open_launch_target(self, target: Path) -> None:
-        """Open a folder in a workspace tab or a file directly in Full View."""
+        """Открывает папку во вкладке, а файл — сразу в полном просмотре."""
         if target.is_dir():
             self._open_folder_tab(target)
             return
@@ -8695,19 +8626,15 @@ class MainWindow(QMainWindow):
         self._open_folder_tab(target.parent, defer_initial_scan=True)
         workspace = self.workspace_stack.currentWidget()
         if isinstance(workspace, Workspace):
-            # Do this before the native window is shown.  The first presented
-            # frame is therefore Full View rather than a briefly visible grid.
             workspace.open_full(target)
 
     def open_external_target(self, target: Path | None) -> None:
-        """Handle a path sent by a later file-manager activation."""
+        """Обрабатывает путь, переданный повторным запуском из файлового менеджера."""
         if target is None or not target.exists():
             self.activateWindow()
             self.raise_()
             return
         if target.is_dir():
-            # An external activation represents a new navigation request, so
-            # it gets its own tab even if that folder is already open.
             self._add_workspace(target)
         elif target.is_file():
             self._add_workspace(target.parent, defer_initial_scan=True)
@@ -8724,6 +8651,7 @@ class MainWindow(QMainWindow):
         *,
         defer_initial_scan: bool = False,
     ) -> None:
+        """Создаёт рабочую вкладку и подключает её к общим действиям окна."""
         workspace = Workspace(
             directory,
             defer_initial_scan=defer_initial_scan,
@@ -8762,7 +8690,7 @@ class MainWindow(QMainWindow):
         ]
 
     def _open_folder_tab(self, folder: Path, *, defer_initial_scan: bool = False) -> None:
-        """Focus an existing tab for ``folder`` or open a new one."""
+        """Активирует уже открытую вкладку папки или создаёт новую."""
         folder = Path(folder)
         for index in range(self.workspace_stack.count()):
             workspace = self.workspace_stack.widget(index)
@@ -8780,6 +8708,7 @@ class MainWindow(QMainWindow):
         workspace._receive_dropped_paths(paths, workspace.current_dir, action)
 
     def _create_actions(self) -> None:
+        """Создаёт общие действия окна: вкладки, кэши, справку и обновления."""
         next_tab = QAction("Next workspace", self)
         next_tab.setShortcut(QKeySequence("Ctrl+Right"))
         next_tab.triggered.connect(lambda: self._select_relative_workspace(1))
@@ -8815,7 +8744,7 @@ class MainWindow(QMainWindow):
             workspace._sync_code_replacements()
 
     def _clear_all_caches(self) -> None:
-        """Close active cache databases before removing their files."""
+        """Закрывает активные базы кэша перед удалением их файлов."""
         for index in range(self.workspace_stack.count()):
             workspace = self.workspace_stack.widget(index)
             if not isinstance(workspace, Workspace):
@@ -8832,6 +8761,7 @@ class MainWindow(QMainWindow):
                 workspace.load_directory(workspace.current_dir)
 
     def _show_help_menu(self) -> None:
+        """Показывает меню справки, обновлений и сведений о приложении."""
         menu = QMenu(self.sender() if isinstance(self.sender(), QWidget) else self)
         menu.setObjectName("helpPopup")
         content = QWidget(menu)
@@ -8881,7 +8811,7 @@ class MainWindow(QMainWindow):
             self.tabs.setTabText(index, title)
 
     def _set_workspace_shotsync_icon(self, workspace: Workspace, linked: bool) -> None:
-        """Show a small cloud marker without altering the folder's tab title."""
+        """Показывает облачный значок, не меняя название папки на вкладке."""
         index = self.workspace_stack.indexOf(workspace)
         if index < 0:
             return
@@ -8937,9 +8867,6 @@ class MainWindow(QMainWindow):
     def _update_tab_geometry(self) -> None:
         if not hasattr(self, "tabs") or self.tabs.count() == 0:
             return
-        # App mark, new-tab action, spacer, settings and three window buttons
-        # occupy the rest of the title strip. The tabs themselves shrink before
-        # any scrolling affordance is introduced.
         available = max(72, self.width() - 220)
         tab_width = max(72, min(220, available // self.tabs.count()))
         self.tabs.set_tab_width(tab_width)
@@ -8980,12 +8907,7 @@ class MainWindow(QMainWindow):
         if has_full_view:
             workspace.full_view.begin_fast_resize()
         if not self.isVisible():
-            # ``main`` will show this native window fullscreen as its first
-            # presentation.  Scheduling a transition here would expose the
-            # normal window for one event-loop turn.
             return
-        # Let the hidden title bar lay out and present the first frame before
-        # Windows performs the (unavoidable) native fullscreen transition.
         QTimer.singleShot(0, lambda view=workspace, full=has_full_view: self._commit_full_view(view, full))
 
     def _leave_full_view(self) -> None:
@@ -9016,8 +8938,6 @@ class MainWindow(QMainWindow):
         self._grid_fullscreen = True
         self._was_maximized_before_grid_fullscreen = self.isMaximized()
         self._geometry_before_grid_fullscreen = self.geometry()
-        # The grid keeps all of its UI, including tabs and side panels; only
-        # the native window enters fullscreen so Windows hides the taskbar.
         self.showFullScreen()
 
     def _leave_grid_fullscreen(self) -> None:
@@ -9039,7 +8959,7 @@ def _workspace_title(directory: Path) -> str:
 
 
 def _set_windows_app_user_model_id() -> None:
-    """Give source runs the same Windows taskbar identity as the packaged app."""
+    """Даёт запуску из исходников тот же ID панели задач, что и сборке."""
     if sys.platform != "win32":
         return
     try:
@@ -9049,7 +8969,7 @@ def _set_windows_app_user_model_id() -> None:
 
 
 def _mounted_volume_paths() -> list[Path]:
-    """Return only mounted, accessible filesystem roots reported by Qt."""
+    """Возвращает доступные смонтированные корни файловой системы по данным Qt."""
     paths: dict[str, Path] = {}
     for volume in QStorageInfo.mountedVolumes():
         if not volume.isValid() or not volume.isReady():
@@ -9061,7 +8981,7 @@ def _mounted_volume_paths() -> list[Path]:
 
 
 def _volume_root_for_path(path: Path, volumes: list[Path]) -> Path | None:
-    """Find the mounted volume that owns *path*, including nested mountpoints."""
+    """Находит смонтированный том для ``path``, включая вложенные точки монтирования."""
     try:
         resolved = path.resolve()
     except OSError:
@@ -9077,20 +8997,20 @@ def _volume_root_for_path(path: Path, volumes: list[Path]) -> Path | None:
 
 
 def _volume_label(path: Path) -> str:
-    """Use a filesystem label when present, otherwise a portable root label."""
+    """Возвращает метку тома или, если её нет, понятное имя корня."""
     storage = QStorageInfo(str(path))
     name = storage.displayName().strip()
     return f"{name} ({path})" if name else str(path)
 
 
 def _volume_button_text(path: Path) -> str:
-    """Short root label for the compact volume-button row."""
+    """Готовит короткую подпись диска для компактной кнопки."""
     drive = path.drive.rstrip("\\/")
     return drive or path.name or str(path)
 
 
 def _removable_volume_icon() -> QIcon:
-    """Create a compact SD-card icon for removable volume buttons."""
+    """Рисует компактный значок SD-карты для кнопки съёмного носителя."""
     pixmap = QPixmap(32, 32)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -9110,9 +9030,8 @@ def _removable_volume_icon() -> QIcon:
 
 
 def _is_removable_volume(path: Path) -> bool:
-    """Identify removable media with the native mechanism of each OS."""
+    """Определяет съёмный носитель средствами текущей операционной системы."""
     if sys.platform == "win32":
-        # DRIVE_REMOVABLE covers USB sticks and cards exposed by card readers.
         return ctypes.windll.kernel32.GetDriveTypeW(str(path)) == 2
     if sys.platform.startswith("linux"):
         return _linux_volume_is_removable(path)
@@ -9122,7 +9041,7 @@ def _is_removable_volume(path: Path) -> bool:
 
 
 def _linux_volume_is_removable(path: Path) -> bool:
-    """Map a mount point to its sysfs block device and read ``removable``."""
+    """Находит для точки монтирования устройство sysfs и читает флаг ``removable``."""
     try:
         mount_path = str(path.resolve())
         for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
@@ -9132,8 +9051,6 @@ def _linux_volume_is_removable(path: Path) -> bool:
             if len(fields) < 5 or fields[4] != mount_path or not source.startswith("/dev/"):
                 continue
             block = Path("/sys/class/block", Path(source).name)
-            # Partition nodes (sdb1, mmcblk0p1) do not contain this property;
-            # their resolved parent block device does.
             for device in (block, block.resolve().parent):
                 removable = device / "removable"
                 if removable.is_file():
@@ -9145,7 +9062,7 @@ def _linux_volume_is_removable(path: Path) -> bool:
 
 
 def _macos_volume_is_removable(path: Path) -> bool:
-    """Ask diskutil once when a volume button is created on macOS."""
+    """Один раз запрашивает у ``diskutil``, является ли том съёмным."""
     try:
         result = subprocess.run(
             ["diskutil", "info", "-plist", str(path)],
@@ -9162,7 +9079,6 @@ def _macos_volume_is_removable(path: Path) -> bool:
 def _scan_directory(directory: Path) -> list[Path]:
     try:
         entries = []
-        # Collect both subdirectories and supported image files
         for entry in directory.iterdir():
             if entry.is_dir() or (entry.is_file() and is_supported_media(entry)):
                 entries.append(entry)
@@ -9178,14 +9094,11 @@ def _build_photo_view(
     sort_key: Callable[[Path], object] | None = None,
     reverse: bool = False,
 ) -> list[Path]:
-    """Build the ordered, filtered view consumed by grid and navigation.
+    """Строит отсортированный и отфильтрованный список для сетки и навигации.
 
-    The source collection stays untouched, allowing future UI controls to
-    rebuild the view without rescanning the directory or coupling their rules
-    to thumbnail scheduling.
+    Исходная коллекция остаётся нетронутой: фильтры можно переключать без нового
+    сканирования папки и без смешивания правил интерфейса с очередью миниатюр.
     """
-    # Folders form a permanent top section of the grid. Filtering, photo
-    # sorting and series logic below apply to image files only.
     folders = sorted((path for path in paths if path.is_dir()), key=lambda path: path.name.casefold())
     photos = [path for path in paths if not path.is_dir()]
     visible = photos if predicate is None else [path for path in photos if predicate(path)]
@@ -9202,6 +9115,13 @@ def _flush_and_close(cache: FolderCache, close: bool) -> None:
 
 
 class _StartupWindowTrace(QObject):
+    """Диагностирует лишние нативные окна в первые секунды запуска.
+
+    В обычном режиме почти ничего не делает; при включённой трассировке помогает
+    поймать короткую вспышку окна, которая обычно исчезает ровно перед тем, как
+    разработчик успевает сказать «ну вот же она».
+    """
+
     _EVENTS = {
         QEvent.Type.Show,
         QEvent.Type.Hide,
@@ -9265,10 +9185,7 @@ class _StartupWindowTrace(QObject):
 
 
 def main() -> None:
-    # Mandatory for frozen (PyInstaller) Windows builds that use
-    # ProcessPoolExecutor. Without this, each spawned worker re-launches the
-    # GUI, producing an endless cascade of windows. It is a no-op in normal
-    # (non-frozen) runs and when not a multiprocessing child.
+    """Настраивает окружение Qt, единственный экземпляр и запускает приложение."""
     import multiprocessing
 
     multiprocessing.freeze_support()

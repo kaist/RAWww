@@ -1,13 +1,7 @@
-"""Application-wide ShotSync coordinator shared by every tab.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-There is exactly **one** hub per process (see :func:`shotsync_hub`).  It owns the
-single live WebSocket and the download receiver, and it persists which shootings
-are being received (and to which folder) between launches.
-
-Individual :class:`~rawww.app.Workspace` tabs connect to the hub's signals to
-refresh themselves when a file arrives or a mark changes, and drive it through
-:meth:`start_receiving` / :meth:`stop_receiving`.
-"""
+"""Общий координатор соединения ShotSync для всех вкладок приложения."""
 
 from __future__ import annotations
 
@@ -25,15 +19,20 @@ _RECEIVERS_SETTING = "shotsync/receivers"
 
 
 class ShotSyncHub(QObject):
-    """Owns the shared socket + receiver and the receive-folder mapping."""
+    """Координирует весь обмен с ShotSync.
+
+    Хаб владеет единственным сокетом, загрузчиками и привязкой принимаемых
+    съёмок к локальным папкам. Вкладки подписываются на его сигналы и не плодят
+    собственные соединения — серверу и без этого есть чем заняться.
+    """
 
     connectionChanged = Signal(bool)
-    receivingChanged = Signal()                # the set of received shootings changed
-    photoDownloaded = Signal(int, str, str)    # shooting_id, folder, filename
-    markUpdated = Signal(int, str, dict)       # shooting_id, folder, photo payload
-    photoUpdated = Signal(int, dict)           # shooting_id, photo payload
-    shootingDeleted = Signal(int)              # shooting_id
-    ackReceived = Signal(dict)                 # server reply to a mark we sent
+    receivingChanged = Signal()  # изменился набор принимаемых съёмок
+    photoDownloaded = Signal(int, str, str)  # съёмка, папка и имя нового файла
+    markUpdated = Signal(int, str, dict)  # съёмка, папка и новые метки фотографии
+    photoUpdated = Signal(int, dict)  # съёмка и обновлённые данные фотографии
+    shootingDeleted = Signal(int)  # идентификатор удалённой съёмки
+    ackReceived = Signal(dict)  # ответ сервера на отправленную нами метку
     receiveProgress = Signal(int, int, int, int)
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
@@ -55,7 +54,6 @@ class ShotSyncHub(QObject):
         self.receiver.markUpdated.connect(self.markUpdated)
         self.receiver.syncProgress.connect(self.receiveProgress)
 
-    # ----- credential ----------------------------------------------------
     def set_api_key(self, key: str | None) -> None:
         self.socket.set_api_key(key)
         self.receiver.set_api_key(key)
@@ -75,7 +73,6 @@ class ShotSyncHub(QObject):
     def send_json(self, payload: dict) -> bool:
         return self.socket.send_json(payload)
 
-    # ----- receive management --------------------------------------------
     def start_receiving(self, shooting_id: int, folder: Path, name: str) -> None:
         self.receiver.start_receiving(shooting_id, folder, name)
         self.receiver.sync_existing(shooting_id)
@@ -100,7 +97,6 @@ class ShotSyncHub(QObject):
         self.stop_receiving(shooting_id)
         self.shootingDeleted.emit(shooting_id)
 
-    # ----- persistence ---------------------------------------------------
     def _restore_targets(self) -> None:
         raw = self._settings.value(_RECEIVERS_SETTING, "", str)
         if not raw:
@@ -139,7 +135,7 @@ _HUB: ShotSyncHub | None = None
 
 
 def shotsync_hub(base_url: str) -> ShotSyncHub:
-    """Return the process-wide hub, creating it on first use."""
+    """Возвращает общий хаб процесса, лениво создавая его при первом обращении."""
     global _HUB
     if _HUB is None:
         _HUB = ShotSyncHub(base_url)

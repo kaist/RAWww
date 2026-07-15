@@ -1,4 +1,7 @@
-"""Modal dialogs split out of app.py."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Модальные диалоги, вынесенные из главного окна ради его душевного здоровья."""
 
 from __future__ import annotations
 
@@ -19,7 +22,7 @@ from .version import __version__ as APP_VERSION
 
 
 class HelpDialog(QDialog):
-    """A read-only, current shortcut reference opened from the title bar."""
+    """Показывает справку только для чтения и открывает ссылки с клавиатуры."""
 
     def __init__(self, settings: QSettings, parent=None) -> None:
         super().__init__(parent)
@@ -65,7 +68,13 @@ class HelpDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    """Application settings presented in the same visual language as the shell."""
+    """Собирает настройки интерфейса, горячих клавиш, AI, XMP и интеграций.
+
+    Диалог читает исходные значения из ``QSettings``, даёт отредактировать их в
+    тематических разделах и сохраняет согласованным набором после подтверждения.
+    Внешние компоненты получают изменения уже через вызывающий код, поэтому
+    половина интерфейса не успевает обновиться раньше второй.
+    """
 
     def __init__(self, settings: QSettings, client: ShotSyncClient, changed: Callable[[list[dict]], None], login_requested: Callable[[], bool], update_requested: Callable[[], None], cache_size_provider: Callable[[], int], clear_cache_requested: Callable[[], None], parent=None) -> None:
         super().__init__(parent)
@@ -109,6 +118,7 @@ class SettingsDialog(QDialog):
         layout.addLayout(buttons)
 
     def _behavior_tab(self) -> QWidget:
+        """Собирает настройки поведения просмотра, файлов и фонового анализа."""
         tab = QWidget()
         tab.setObjectName("behaviorTabPage")
         layout = QVBoxLayout(tab)
@@ -268,6 +278,7 @@ class SettingsDialog(QDialog):
         self.explorer_integration_button.setText("Удалить из Проводника" if is_registered() else "Добавить в Проводник")
 
     def _toggle_explorer_integration(self) -> None:
+        """Регистрирует или удаляет команды Контрольки в Проводнике Windows."""
         from .windows_integration import is_registered, register, unregister
 
         if not getattr(sys, "frozen", False):
@@ -297,6 +308,7 @@ class SettingsDialog(QDialog):
         self._refresh_explorer_integration_button()
 
     def _hotkeys_tab(self) -> QWidget:
+        """Собирает редактор горячих клавиш и проверяет конфликты."""
         tab = QWidget()
         tab.setObjectName("settingsTabPage")
         layout = QVBoxLayout(tab)
@@ -344,6 +356,7 @@ class SettingsDialog(QDialog):
             editor.setKeySequence(QKeySequence(HOTKEY_DEFAULTS[identifier][1]))
 
     def _interface_tab(self) -> QWidget:
+        """Собирает настройки внешнего вида сетки и полноэкранного режима."""
         tab = QWidget()
         tab.setObjectName("settingsTabPage")
         layout = QVBoxLayout(tab)
@@ -396,6 +409,7 @@ class SettingsDialog(QDialog):
         return tab
 
     def _about_tab(self) -> QWidget:
+        """Собирает сведения о версии, лицензии и полезные ссылки."""
         tab = QWidget()
         tab.setObjectName("settingsTabPage")
         layout = QVBoxLayout(tab)
@@ -443,7 +457,7 @@ class SettingsDialog(QDialog):
             value /= 1024
 
     def _set_rating_color_scheme(self, color_on_plain_digits: bool) -> None:
-        """Switch all number pairs together, leaving other custom keys alone."""
+        """Меняет цифровые сочетания рейтинга, не затрагивая остальные клавиши."""
         for number in range(6):
             rating = f"rating_{number}"
             color = f"color_{number}"
@@ -468,6 +482,7 @@ class SettingsDialog(QDialog):
         return tab
 
     def _save(self) -> None:
+        """Проверяет значения и сохраняет настройки одним согласованным набором."""
         if not self.code_replacements_editor.commit_pending_code():
             return
         sequences = {identifier: editor.keySequence() for identifier, editor in self.hotkey_edits.items()}
@@ -505,7 +520,13 @@ class SettingsDialog(QDialog):
 
 
 class QuickTransferDialog(QDialog):
-    """A small destination picker designed to be operated without a mouse."""
+    """Выбирает папку быстрого переноса с полноценным управлением клавиатурой.
+
+    Список собирается из последней цели, открытых вкладок и истории. Диалог
+    поддерживает поиск, стрелки и цифровые сочетания, а наружу возвращает только
+    выбранный путь и режим копирования или перемещения. Файлы он не трогает:
+    пользователь ещё может передумать, а ``Workspace`` проверит конфликты имён.
+    """
 
     def __init__(self, operation: str, destinations: list[Path], hotkey: QKeySequence, accepted: Callable, parent=None) -> None:
         super().__init__(parent)
@@ -535,8 +556,6 @@ class QuickTransferDialog(QDialog):
             item = QListWidgetItem(f"{number}.  {destination}")
             item.setData(Qt.ItemDataRole.UserRole, destination)
             self.destinations.addItem(item)
-        # QListWidget consumes Enter before the dialog sees it, so handle the
-        # list's activation signal as well as the dialog-level shortcut.
         self.destinations.itemActivated.connect(lambda item: self._choose_item(item, True))
         layout.addWidget(self.destinations)
         self.repeat_shortcut = QShortcut(hotkey, self)
@@ -627,7 +646,12 @@ class QuickTransferDialog(QDialog):
 
 
 class BatchRenameDialog(QDialog):
-    """Preview a filename template against the current, already sorted photo view."""
+    """Настраивает пакетное переименование и показывает будущие имена файлов.
+
+    Предпросмотр строится в том же порядке, что видит пользователь в сетке,
+    проверяет пустые имена и конфликты до изменения диска. Само переименование
+    выполняет ``Workspace`` — диалог лишь возвращает проверенный план.
+    """
 
     renameRequested = Signal(object)
     _token_pattern = re.compile(
@@ -857,6 +881,7 @@ class BatchRenameDialog(QDialog):
         super().accept()
 
     def _update_preview(self) -> None:
+        """Пересчитывает таблицу будущих имён по текущему шаблону."""
         self._before_list.clear()
         self._after_list.clear()
         template = self.template_edit.text()
@@ -891,6 +916,7 @@ class BatchRenameDialog(QDialog):
         self.validation_label.style().polish(self.validation_label)
 
     def _render_stem(self, template: str, path: Path, index: int) -> str:
+        """Подставляет в шаблон имя, номер и EXIF-поля одного файла."""
         detail = self.details.get(path.name, {})
         raw_datetime = detail.get("original_datetime")
         try:
@@ -934,6 +960,13 @@ class BatchRenameDialog(QDialog):
 
 
 class BatchResizeDialog(QDialog):
+    """Настраивает пакетное изменение размера и заранее показывает результат.
+
+    Диалог только собирает параметры и проверяет их согласованность. Файлы
+    обрабатывает рабочая вкладка в отдельных процессах, поэтому окно не обязано
+    героически зависать до конца всей съёмки.
+    """
+
     startRequested = Signal(object)
 
     def __init__(self, source_dir: Path, settings: QSettings, parent=None) -> None:
@@ -1112,7 +1145,7 @@ class BatchResizeDialog(QDialog):
 
 
 class ShrinkJpegDialog(QDialog):
-    """Re-compress every JPEG in the current folder in place at a chosen quality."""
+    """Настраивает пересжатие JPEG текущей папки с выбранным качеством."""
 
     startRequested = Signal(object)
 

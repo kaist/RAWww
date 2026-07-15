@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor
@@ -20,7 +23,6 @@ def _decode_visible(paths: list[Path], *, with_ai: bool) -> tuple[float, list[fl
         pipeline = AiPipeline() if with_ai else None
         if pipeline:
             pipeline.scan(paths, cache, background)
-        # Exclude process spawn/import time from the visible latency comparison.
         visible.submit(decode_pixels, paths[0], 256).result()
         latencies = []
         started_all = perf_counter()

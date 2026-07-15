@@ -1,4 +1,7 @@
-"""XMP sidecar generation shared by the local selection workflow."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Создание XMP-файлов с метками и описанием фотографии."""
 
 from __future__ import annotations
 
@@ -13,7 +16,7 @@ _TAG_RE = re.compile(r"#(\w+)")
 
 
 def sidecar_path(photo_path: Path) -> Path:
-    """Return the standard XMP sidecar path (``photo.NEF`` -> ``photo.xmp``)."""
+    """Возвращает стандартный путь XMP: ``photo.NEF`` → ``photo.xmp``."""
     return photo_path.with_suffix(".xmp")
 
 
@@ -22,7 +25,7 @@ def extract_tags(text: str) -> list[str]:
 
 
 def expand_comment(text: str, replacements: dict[str, str]) -> str:
-    """Expand ShotSync comment markers and move hashtags to XMP keywords."""
+    """Подставляет коды ShotSync и убирает хэштеги из текста описания."""
     expanded = _CODE_RE.sub(
         lambda match: replacements.get(next(value for value in match.groups() if value is not None), match.group(0)),
         text or "",
@@ -31,7 +34,7 @@ def expand_comment(text: str, replacements: dict[str, str]) -> str:
 
 
 def named_face_regions(detail: dict, face_sets: Iterable[dict], *, threshold: float = 0.42) -> list[dict]:
-    """Match detected faces to saved people and convert top-left boxes to centres."""
+    """Сопоставляет найденные лица с людьми и переводит рамки к центру XMP."""
     people = [person for person in face_sets if str(person.get("name") or "").strip()]
     regions: list[dict] = []
     for face in detail.get("faces") or []:
@@ -56,7 +59,7 @@ def named_face_regions(detail: dict, face_sets: Iterable[dict], *, threshold: fl
 
 
 def build_xmp(detail: dict, face_sets: Iterable[dict], replacements: dict[str, str]) -> str | None:
-    """Build an interoperable XMP packet, or ``None`` if there is nothing to export."""
+    """Строит совместимый XMP-пакет или возвращает ``None`` для пустых данных."""
     rating = detail.get("rating")
     color_label = str(detail.get("color_label") or "").strip()
     raw_comment = str(detail.get("comment") or "").strip()
@@ -69,8 +72,6 @@ def build_xmp(detail: dict, face_sets: Iterable[dict], replacements: dict[str, s
         normalized_rating = int(rating) if rating is not None else None
     except (TypeError, ValueError):
         normalized_rating = None
-    # Rating 0 is the application's "no rating" value and must not create a
-    # sidecar by itself (nor overwrite an imported rating with a zero).
     rating_block = f"<xmp:Rating>{normalized_rating}</xmp:Rating>" if normalized_rating and normalized_rating > 0 else ""
     label_block = f"<xmp:Label>{escape(color_label)}</xmp:Label>" if color_label else ""
     description_block = f'<dc:description><rdf:Alt><rdf:li xml:lang="x-default">{escape(comment)}</rdf:li></rdf:Alt></dc:description>' if comment else ""
@@ -95,7 +96,7 @@ def build_xmp(detail: dict, face_sets: Iterable[dict], replacements: dict[str, s
 
 
 def write_sidecar(photo_path: Path, xmp: str | None) -> Path | None:
-    """Atomically update a sidecar, deleting it when no metadata is exportable."""
+    """Атомарно обновляет sidecar-файл или удаляет его при пустых метаданных."""
     target = sidecar_path(photo_path)
     if xmp is None:
         target.unlink(missing_ok=True)

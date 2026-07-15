@@ -1,9 +1,14 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 import unittest
 
 from rawww.updater import is_newer, version_key
 
 
 class VersionComparisonTests(unittest.TestCase):
+    """Проверяет сравнение локальной и доступной версий приложения."""
+
     def test_compares_dotted_versions_with_missing_parts(self):
         self.assertTrue(is_newer("1.2.1", "1.2"))
         self.assertFalse(is_newer("1.2", "1.2.0"))

@@ -1,4 +1,7 @@
-"""Reusable leaf widgets split out of app.py (shared by app.py and dialogs.py)."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Небольшие переиспользуемые виджеты для главного окна и диалогов."""
 
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ from .theme import _fomantic_icon
 
 
 class SettingsCheckBox(QCheckBox):
-    """A settings checkbox with an explicit check mark in the selected state."""
+    """Флажок настроек с явно нарисованной галочкой в выбранном состоянии."""
 
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)
@@ -35,7 +38,14 @@ class SettingsCheckBox(QCheckBox):
 
 
 class CodeReplacementsEditor(QWidget):
-    """Replacement-code editor embedded in the application settings."""
+    """Редактирует локальные и серверные наборы кодов замены.
+
+    Виджет встроен в настройки и управляет полным жизненным циклом наборов:
+    загрузкой, созданием, переименованием, удалением, импортом и экспортом.
+    При наличии авторизации изменения отправляются в ShotSync, без сети остаются
+    в ``QSettings``. После каждой успешной операции вызывается ``changed``, чтобы
+    открытые редакторы комментариев сразу увидели новый словарь.
+    """
 
     def __init__(self, client: ShotSyncClient, settings: QSettings, changed: Callable[[list[dict]], None], login_requested: Callable[[], bool], parent=None) -> None:
         super().__init__(parent)
@@ -94,6 +104,7 @@ class CodeReplacementsEditor(QWidget):
         return self.sets[index] if 0 <= index < len(self.sets) else None
 
     def _load(self, *, select_id: int | None = None, focus_new: bool = False) -> None:
+        """Загружает наборы с сервера или из настроек и обновляет выбор."""
         if not self.client.has_key():
             self.sets = self._local_sets()
             self._ensure_default_local_set()
@@ -146,7 +157,7 @@ class CodeReplacementsEditor(QWidget):
         self._changed(self.sets)
 
     def _ensure_default_local_set(self) -> None:
-        """A new offline editor is immediately ready for its first code."""
+        """Создаёт первый локальный набор, чтобы редактор не встречал пустотой."""
         if self.sets:
             return
         self.sets = [{"id": -1, "name": "По умолчанию", "codes": []}]
@@ -156,7 +167,7 @@ class CodeReplacementsEditor(QWidget):
         self._login_requested()
 
     def _authentication_succeeded(self, _user: dict, _key: str) -> None:
-        """Refresh this open dialog as soon as the shared login succeeds."""
+        """Обновляет открытый редактор сразу после успешного общего входа."""
         if self.isVisible():
             self._load()
 
@@ -168,6 +179,7 @@ class CodeReplacementsEditor(QWidget):
         self._changed(self.sets)
 
     def _render_table(self) -> None:
+        """Перестраивает строки кодов активного набора и подключает редакторы."""
         active = self._active_set()
         codes = active.get("codes", []) if active else []
         self.table.blockSignals(True)
@@ -200,7 +212,7 @@ class CodeReplacementsEditor(QWidget):
             field.setFocus()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        """Mirror the web editor's Tab flow in the table's trailing row."""
+        """Повторяет переход Tab из веб-редактора в последней строке таблицы."""
         if event.type() != QEvent.Type.KeyPress or watched not in (self.table.cellWidget(self.table.rowCount() - 1, 0), self.table.cellWidget(self.table.rowCount() - 1, 1)):
             return super().eventFilter(watched, event)
         code = self.table.cellWidget(self.table.rowCount() - 1, 0)
@@ -335,7 +347,13 @@ class CodeReplacementsEditor(QWidget):
 
 
 class CodeCompletingLineEdit(QLineEdit):
-    """Comment editor that inserts ShotSync-compatible ``{code}`` markers."""
+    """Однострочный комментарий с дополнением кодов вида ``{code}``.
+
+    Внутри хранится исходная строка, совместимая с ShotSync, а поверх неё
+    рисуются понятные плашки со значениями. Стандартный ``QLineEdit`` остаётся
+    моделью ввода, поэтому клавиатура, выделение и буфер обмена работают как
+    обычно; подсказки лишь помогают вставить код и ничего не подменяют тайком.
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -349,16 +367,12 @@ class CodeCompletingLineEdit(QLineEdit):
         self._model = QStringListModel(self)
         self._completer = QCompleter(self._model, self)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
-        # The model is already filtered by code *and* expansion value below;
-        # don't let QCompleter discard value-only matches a second time.
         self._completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
         self.setCompleter(self._completer)
         self.textEdited.connect(self._remember_raw)
         self.textEdited.connect(self._offer_codes)
         self._completer.activated.connect(self._insert_code)
         self._suggestion_popup = QListWidget(self)
-        # Popup steals focus and immediately triggers QTextEdit.focusOutEvent;
-        # ToolTip is a frameless non-activating top-level suggestion surface.
         self._suggestion_popup.setWindowFlags(Qt.WindowType.ToolTip)
         self._suggestion_popup.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._suggestion_popup.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -372,10 +386,10 @@ class CodeCompletingLineEdit(QLineEdit):
         self.setToolTip(self._raw)
         self.update()
 
-    def text(self) -> str:  # noqa: N802 - matches QLineEdit's Qt API
+    def text(self) -> str:  # noqa: N802 — имя совпадает с API QLineEdit
         return self._raw
 
-    def setText(self, text: str) -> None:  # noqa: N802 - matches QLineEdit's Qt API
+    def setText(self, text: str) -> None:  # noqa: N802 — имя совпадает с API QLineEdit
         self._raw = str(text or "")
         self._showing_preview = False
         super().setText(self._raw)
@@ -396,11 +410,11 @@ class CodeCompletingLineEdit(QLineEdit):
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
-        """Paint web-style replacement chips over the raw QLineEdit text.
+        """Рисует плашки замен поверх исходного текста ``QLineEdit``.
 
-        QLineEdit remains the editing model (and thus retains native keyboard,
-        clipboard and completer behaviour); the raw marker is merely hidden by
-        a value chip while its actual contents are unchanged.
+        Само поле остаётся моделью редактирования и сохраняет обычное поведение
+        клавиатуры, буфера обмена и автодополнения. Исходный маркер лишь скрыт
+        под плашкой; его содержимое при этом не меняется.
         """
         super().paintEvent(event)
         if not self._raw:
@@ -438,7 +452,6 @@ class CodeCompletingLineEdit(QLineEdit):
                 painter.drawText(chip.adjusted(5, 0, -5, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, value)
                 x += width + 2
             if cursor_x is None and match.start() < raw_cursor <= match.end():
-                # A replacement is an atomic visual token, just as in /v/.
                 cursor_x = x
             last = match.end()
         tail = self._raw[last:]
@@ -479,7 +492,7 @@ class CodeCompletingLineEdit(QLineEdit):
         self.setCursorPosition(self._start + len(insertion))
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        """Treat visible replacement chips as atomic when editing."""
+        """При редактировании удаляет видимую плашку замены только целиком."""
         key = event.key()
         if key not in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
             super().keyPressEvent(event)

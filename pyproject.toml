@@ -1,10 +1,11 @@
 [project]
 name = "rawww"
 dynamic = ["version"]
-description = "Add your description here"
+description = "Контролька — приложение для просмотра и отбора фотографий"
 readme = "README.md"
+license = "GPL-3.0-or-later"
 authors = [
-    { name = "kaist", email = "igor.kaist@gmail.com" }
+    { name = "Игорь Заломский", email = "igor@zalomskij.ru" }
 ]
 requires-python = ">=3.12"
 dependencies = [

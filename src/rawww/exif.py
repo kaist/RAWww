@@ -1,3 +1,12 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Получение и нормализация метаданных через долгоживущий ExifTool.
+
+Один процесс ExifTool обслуживает пакет запросов: запускать его на каждый
+кадр было бы надёжно, но слишком похоже на наказание за любовь к RAW.
+"""
+
 from __future__ import annotations
 
 import atexit
@@ -27,10 +36,19 @@ METADATA_BATCH_SIZE = 32
 
 
 class ExifToolError(RuntimeError):
+    """Ошибка протокола или ответа фонового процесса ExifTool."""
+
     pass
 
 
 class ExifToolClient:
+    """Держит один долгоживущий процесс ExifTool для пакетных запросов.
+
+    Протокол ``-stay_open`` экономит запуск отдельного процесса на каждый
+    снимок. Доступ защищён блокировкой: перемешать ответы двух пакетов было бы
+    быстро, эффектно и совершенно бесполезно.
+    """
+
     def __init__(self, executable: str | Path = BUNDLED_EXIFTOOL) -> None:
         self.executable = str(executable)
         self.process: subprocess.Popen | None = None
@@ -197,7 +215,7 @@ def capture_settings(exif: dict) -> dict:
 
 
 def camera_details(exif: dict) -> dict:
-    """Return camera identity; the serial is stored but never displayed."""
+    """Возвращает сведения о камере; серийный номер хранится, но не показывается."""
     result = {}
     model = first_tag(exif, "EXIF:Model", "Model", "UniqueCameraModel")
     serial = first_tag(exif, "EXIF:SerialNumber", "SerialNumber", "InternalSerialNumber")
@@ -241,7 +259,7 @@ atexit.register(_close_client)
 
 
 class MetadataPipeline:
-    """Background EXIF queue, deliberately independent from AI progress."""
+    """Фоновая очередь EXIF, намеренно независимая от прогресса ИИ."""
 
     def __init__(self) -> None:
         self.workers: ProcessPoolExecutor | None = None
@@ -250,6 +268,7 @@ class MetadataPipeline:
         self._shutting_down = False
 
     def scan(self, paths: list[Path], cache: FolderCache, on_complete=None) -> None:
+        """Ставит отсутствующие EXIF-записи в отдельную фоновую очередь."""
         missing = cache.missing_metadata_paths(paths)
         if not missing:
             return

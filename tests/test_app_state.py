@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 import os
@@ -18,6 +21,8 @@ from rawww.theme import apply_theme
 
 
 class _Settings:
+    """Минимальная память настроек для тестов без настоящего QSettings."""
+
     def __init__(self) -> None:
         self.values = []
 
@@ -26,6 +31,8 @@ class _Settings:
 
 
 class _Signal:
+    """Простая запись подключённых обработчиков вместо сигнала Qt."""
+
     def __init__(self) -> None:
         self.values = []
 
@@ -34,11 +41,15 @@ class _Signal:
 
 
 class _ToastHost(QMainWindow):
+    """Тестовое окно, на котором проверяется размещение уведомлений."""
+
     _show_viewer_toast = Workspace._show_viewer_toast
     _clear_viewer_toast = Workspace._clear_viewer_toast
 
 
 class _WindowShowRecorder(QObject):
+    """Запоминает показ нативных окон во время тестового запуска."""
+
     def __init__(self) -> None:
         super().__init__()
         self.shown = []
@@ -54,6 +65,8 @@ class _WindowShowRecorder(QObject):
 
 
 class AppStateTests(unittest.TestCase):
+    """Проверяет восстановление и изменение состояния интерфейса приложения."""
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])

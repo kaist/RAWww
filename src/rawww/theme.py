@@ -1,10 +1,7 @@
-"""Application theming: icon/font loading, generated icons, and the Qt stylesheet.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-Split out of ``app.py`` to keep the presentation layer separate from the
-application logic. ``FOMANTIC_ICON_FAMILY`` is a module global populated by
-``_load_fomantic_icons``; read it as ``theme.FOMANTIC_ICON_FAMILY`` so callers
-observe the value set at startup.
-"""
+"""Оформление приложения: шрифты, иконки и таблица стилей Qt."""
 
 from __future__ import annotations
 
@@ -44,12 +41,15 @@ FOMANTIC_ICON_CODES = {
 FOMANTIC_ICON_FAMILY = ""
 
 def apply_theme(app: QApplication) -> None:
+    """Загружает шрифты и применяет общую таблицу стилей ко всему приложению.
+
+    Стили собраны здесь намеренно: геометрия виджетов остаётся в их классах, а
+    цветовая кухня — в одном месте. Иначе поиск нужного оттенка серого быстро
+    превращается в отдельную исследовательскую программу.
+    """
+
     app.setStyle("Fusion")
     _load_viewer_fonts()
-    # Keep the UI independent of Windows' legacy bitmap font fallbacks
-    # (Fixedsys, MS Serif, GOST plotter fonts, …). They are not application
-    # fonts and some Windows installations cannot create DirectWrite faces
-    # for their bold/scaled variants.
     interface_font = QFont(app.font())
     interface_font.setFamily("Lato")
     app.setFont(interface_font)
@@ -1643,7 +1643,7 @@ def _load_viewer_fonts() -> None:
     _load_fomantic_icons()
 
 def _fomantic_icon(name: str, size: int = 18, color: str = "#d6d6d6") -> QIcon:
-    """Render a glyph from the same Fomantic icon font as the /v viewer."""
+    """Рисует глиф из того же шрифта Fomantic, что использует веб-просмотрщик."""
     glyph = FOMANTIC_ICON_CODES.get(name, "")
     if not glyph or not FOMANTIC_ICON_FAMILY:
         return QIcon()
@@ -1660,7 +1660,7 @@ def _fomantic_icon(name: str, size: int = 18, color: str = "#d6d6d6") -> QIcon:
     return QIcon(pixmap)
 
 def _color_swatch_icon(color: str | None) -> QIcon:
-    """Return a compact colored square for the color filter choices."""
+    """Возвращает компактный цветной квадрат для выбора цветового фильтра."""
     pixmap = QPixmap(18, 18)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -1672,7 +1672,7 @@ def _color_swatch_icon(color: str | None) -> QIcon:
     return QIcon(pixmap)
 
 def _chrome_icon(kind: str) -> QIcon:
-    """Small, consistent icons inspired by the web viewer's camera avatar."""
+    """Рисует небольшие единообразные значки для элементов оконной рамки."""
     pixmap = QPixmap(32, 32)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
@@ -1711,9 +1711,9 @@ def _chrome_icon(kind: str) -> QIcon:
     return QIcon(pixmap)
 
 def _application_icon() -> QIcon:
-    """Load the branded icon used by Windows and the custom title bar."""
+    """Загружает основной значок приложения для Windows и заголовка окна."""
     return QIcon(str(data_path("assets") / "ctrlka-icon.ico"))
 
 def _title_bar_icon() -> QIcon:
-    """Load the transparent mark for the custom title bar."""
+    """Загружает прозрачный логотип для собственной строки заголовка."""
     return QIcon(str(data_path("assets") / "ctrlka-mark.png"))

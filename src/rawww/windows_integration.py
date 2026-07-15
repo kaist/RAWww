@@ -1,4 +1,7 @@
-"""Per-user Windows Explorer integration for the packaged application."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Интеграция собранного приложения с проводником Windows."""
 
 from __future__ import annotations
 
@@ -64,7 +67,7 @@ def unregister(extensions: tuple[str, ...] = DEFAULT_EXTENSIONS) -> None:
 
 
 def is_registered() -> bool:
-    """Check the folder command, which is installed with every registration."""
+    """Проверяет команду Проводника, создаваемую при регистрации приложения."""
     import winreg
 
     path = f"{_BASE}\\Directory\\shell\\{VERB}\\command"

@@ -1,3 +1,12 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Фоновый конвейер AI: CLIP-эмбеддинги и распознавание лиц.
+
+Модели и подготовка изображений живут в рабочих процессах, а этот модуль
+связывает их с UI, не заставляя главный поток заниматься машинным зрением.
+"""
+
 from __future__ import annotations
 
 import json
@@ -31,6 +40,8 @@ _clip_session = None
 
 @dataclass
 class _AiJob:
+    """Состояние одного пакетного задания AI от подготовки до записи в кэш."""
+
     folder: Path
     paths: tuple[Path, ...]
     cache_root: Path | None
@@ -55,7 +66,8 @@ def _load_rgb(source: str | tuple[str, bytes]) -> Image.Image:
 
 
 def prepare_analysis_batch(paths: list[str]) -> list[tuple[str, bytes]]:
-    """Extract one reusable detector-sized JPEG per source without touching disk."""
+    """Готовит по одному JPEG подходящего размера для каждого детектора, не записывая его на диск.
+    """
     import rawpy
 
     lower_background_priority()
@@ -172,7 +184,18 @@ def recognize_face_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[str
 
 
 class AiPipeline:
-    """Folder-independent AI jobs that never use the interactive decode pool."""
+    """Управляет фоновым AI-анализом всех изображений рабочей папки.
+
+    Конвейер отдельно готовит источники, считает CLIP-эмбеддинги и распознаёт
+    лица, а результаты записывает в ``FolderCache`` небольшими порциями. Модели
+    и пулы создаются лениво: обычный просмотр фотографий не должен оплачивать
+    память за AI, которым пользователь ещё не воспользовался.
+
+    Каждое сканирование оформлено как ``_AiJob`` с собственным поколением,
+    прогрессом и флагом отмены. Интерактивные декодеры просмотрщика не участвуют
+    в анализе, поэтому листать кадры можно даже пока нейросети заняты своим
+    важным совещанием в фоне.
+    """
 
     def __init__(self) -> None:
         self.job_workers = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-jobs")
@@ -220,6 +243,7 @@ class AiPipeline:
             raise
 
     def _job_prepared(self, job: _AiJob, future: Future) -> None:
+        """Принимает подготовленный кэш и запускает вычисления актуального задания."""
         try:
             cache, embedding_paths, face_paths = future.result()
             embedding_names = {str(path) for path in embedding_paths}
@@ -295,6 +319,7 @@ class AiPipeline:
             self._future_finished(job, future)
 
     def _dispatch_analysis_sources(self, job, sources, embedding_names, face_names) -> None:
+        """Раздаёт подготовленные изображения моделям и связывает результаты с файлами."""
         embedding_sources = [source for source in sources if source[0] in embedding_names]
         face_sources = [source for source in sources if source[0] in face_names]
         if (
@@ -351,7 +376,7 @@ class AiPipeline:
             self.face_workers = ProcessPoolExecutor(max_workers=1, mp_context=process_context)
 
     def release_analysis_workers(self) -> None:
-        """Release source decoders and loaded ONNX models after all runs."""
+        """Освобождает декодеры и модели ONNX после завершения всех запусков."""
         source_workers, self.source_workers = self.source_workers, None
         embedding_workers, self.embedding_workers = self.embedding_workers, None
         face_workers, self.face_workers = self.face_workers, None

@@ -1,12 +1,7 @@
-"""Tests for per-photo AI (embeddings + faces) exchange with ShotSync.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-Covers the client side of cases 1 and 2:
-
-* upload attaches cached AI and computes only what is missing (case 1);
-* download seeds the folder cache with the server's AI results (case 2).
-
-Both use in-memory cache stand-ins so no QtGui/libGL or real models are needed.
-"""
+"""Проверки обмена результатами AI-анализа с ShotSync."""
 
 from __future__ import annotations
 
@@ -24,6 +19,8 @@ from rawww.shotsync_upload import _AiAttacher  # noqa: E402
 
 
 class _FakeAiCache:
+    """Кэш-заглушка с управляемыми результатами AI для теста загрузки."""
+
     def __init__(self, embeddings=None, faces=None):
         self._embeddings = dict(embeddings or {})
         self._faces = dict(faces or {})
@@ -44,6 +41,8 @@ class _FakeAiCache:
 
 
 class _NoLock:
+    """Пустой контекст блокировки для однопоточного теста."""
+
     def __enter__(self):
         return self
 
@@ -52,6 +51,8 @@ class _NoLock:
 
 
 class AiAttacherTests(unittest.TestCase):
+    """Проверяет добавление эмбеддингов и лиц к отправляемой фотографии."""
+
     def test_uses_cached_values_without_computing(self):
         cache = _FakeAiCache(embeddings={"a.jpg": b"EMB"}, faces={"a.jpg": "[]"})
 
@@ -79,8 +80,8 @@ class AiAttacherTests(unittest.TestCase):
         embedding, faces_json = attacher.resolve(Path("/imgs/a.jpg"), b"preview")
         self.assertEqual(embedding, b"NEW")
         self.assertEqual(json.loads(faces_json), faces)
-        self.assertEqual(cache.stored_embeddings, [("/imgs/a.jpg", b"NEW")])
-        self.assertEqual(cache.stored_faces, [("/imgs/a.jpg", json.dumps(faces))])
+        self.assertEqual(cache.stored_embeddings, [(str(Path("/imgs/a.jpg")), b"NEW")])
+        self.assertEqual(cache.stored_faces, [(str(Path("/imgs/a.jpg")), json.dumps(faces))])
 
     def test_empty_faces_result_is_authoritative(self):
         cache = _FakeAiCache()
@@ -92,7 +93,7 @@ class AiAttacherTests(unittest.TestCase):
         )
         _embedding, faces_json = attacher.resolve(Path("/imgs/a.jpg"), b"preview")
         self.assertEqual(faces_json, "[]")
-        self.assertEqual(cache.stored_faces, [("/imgs/a.jpg", "[]")])
+        self.assertEqual(cache.stored_faces, [(str(Path("/imgs/a.jpg")), "[]")])
 
     def test_face_failure_leaves_faces_unknown(self):
         cache = _FakeAiCache(embeddings={"a.jpg": b"E"})
@@ -100,7 +101,7 @@ class AiAttacherTests(unittest.TestCase):
         attacher = _AiAttacher(
             cache, _NoLock(),
             embed_fn=lambda sources: [],
-            faces_fn=lambda sources: [],  # nothing returned -> detection failed
+            faces_fn=lambda sources: [],  # детектор не дал достоверного результата
         )
         embedding, faces_json = attacher.resolve(Path("/imgs/a.jpg"), b"preview")
         self.assertEqual(embedding, b"E")
@@ -109,6 +110,8 @@ class AiAttacherTests(unittest.TestCase):
 
 
 class _RecordingCache:
+    """Записывает сохранённые AI-результаты для последующей проверки."""
+
     def __init__(self):
         self.embeddings: list = []
         self.faces: list = []
@@ -121,6 +124,8 @@ class _RecordingCache:
 
 
 class StoreServerAiTests(unittest.TestCase):
+    """Проверяет перенос серверного AI-анализа в локальный кэш."""
+
     def test_seeds_embedding_and_faces_from_server(self):
         cache = _RecordingCache()
         folder = Path("/local")

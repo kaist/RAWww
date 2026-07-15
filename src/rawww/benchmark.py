@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 import argparse
@@ -12,6 +15,7 @@ from .imaging import PixelImage, decode_pixels, decode_thumbnail_pixels, is_supp
 
 
 def main() -> None:
+    """Измеряет скорость декодирования превью и извлечения EXIF."""
     parser = argparse.ArgumentParser(description="Benchmark Контролька decode and cache performance.")
     parser.add_argument("folder", type=Path)
     parser.add_argument("--limit", type=int, default=30)
@@ -87,7 +91,7 @@ def _decode_many(paths: list[Path], size: int) -> list[PixelImage]:
 
 
 def _decode_thumbnail_and_exif(path: Path, size: int) -> tuple[PixelImage, list[tuple[str, str]]]:
-    """Benchmark-only approximation of a thumbnail worker that blocks on EXIF."""
+    """Приблизительно воспроизводит старый путь миниатюры, блокировавшийся на EXIF."""
     return decode_thumbnail_pixels(path, size), extract_metadata_batch([str(path)])
 
 

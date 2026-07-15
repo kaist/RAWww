@@ -1,13 +1,7 @@
-"""Asynchronous decode scheduling extracted from ``Workspace``.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-The scheduler owns the process/thread pools and the in-flight bookkeeping
-(``pending`` futures, the visible-thumbnail set and the foreground full-frame
-futures). Decode results are still delivered through the host's ``DecodeBridge``
-signals; the host (``Workspace``) remains the single source of truth for the
-current directory/path, the folder cache and the workspace-active flag, which
-the completion callbacks read live so that stale results are discarded exactly
-as before.
-"""
+"""Асинхронный планировщик декодирования изображений для рабочей вкладки."""
 
 from __future__ import annotations
 
@@ -27,7 +21,7 @@ from .imaging import (
 
 
 class DecodeHost(Protocol):
-    """Live workspace state the completion callbacks read on the UI thread."""
+    """Описывает данные рабочей вкладки, нужные обработчикам завершения."""
 
     closing: bool
     current_dir: Path
@@ -40,6 +34,13 @@ class DecodeHost(Protocol):
 
 
 class DecodeScheduler:
+    """Распределяет декодирование между срочной и фоновой очередями.
+
+    Открытый кадр и видимые карточки получают исполнителей первыми, полный обход
+    папки догоняет их позже. Перед публикацией результат сверяется с состоянием
+    вкладки: пользователь всегда листает быстрее, чем хотелось бы старой задаче.
+    """
+
     def __init__(
         self,
         host: DecodeHost,
@@ -80,6 +81,7 @@ class DecodeScheduler:
         full_priority: bool,
         visible_priority: bool = False,
     ) -> None:
+        """Ставит декодирование в нужную очередь с подавлением одинаковых заданий."""
         if self._host.closing:
             return
         key = (path, max_size)
@@ -105,12 +107,10 @@ class DecodeScheduler:
                 )
             )
             return
-        # Full-view images deliberately bypass the disk cache. They are decoded
-        # from the source on demand and live only in the bounded RAM LRU.
         self._submit_process_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
 
     def submit_video_thumbnail(self, path: Path, *, visible_priority: bool) -> None:
-        """Use RAM, then SQLite, before falling back to Qt frame decoding."""
+        """Ищет кадр видео в RAM и SQLite, затем обращается к Qt-декодеру."""
         key = (path, self._thumb_size)
         preview = self._host.decode_cache.thumbnail_get(path)
         if preview is not None:
@@ -160,6 +160,7 @@ class DecodeScheduler:
         full_priority: bool,
         visible_priority: bool = False,
     ) -> None:
+        """Отправляет CPU-декодирование в процесс и регистрирует callback результата."""
         if self._host.closing:
             return
         key = (path, max_size)
@@ -178,8 +179,6 @@ class DecodeScheduler:
             decoder = decode_original_pixels if max_size == self._original_size else (decode_pixels if full_priority else decode_thumbnail_pixels)
             future = executor.submit(decoder, path) if max_size == self._original_size else executor.submit(decoder, path, max_size)
         except RuntimeError:
-            # Shutdown may begin between the guard above and submit because
-            # cache callbacks execute on worker threads.
             if self._host.closing:
                 return
             raise
@@ -196,6 +195,7 @@ class DecodeScheduler:
         visible_priority: bool,
         future: Future,
     ) -> None:
+        """Завершает поиск в дисковом кэше или запускает настоящее декодирование."""
         key = (path, max_size)
         if self.pending.get(key) is future:
             self.pending.pop(key, None)
@@ -255,13 +255,12 @@ class DecodeScheduler:
         return self.visible_thumb_decode_executor
 
     def abandon_preview_decode_work(self) -> None:
-        """Let a newly opened folder start decoding without an old queue ahead.
+        """Освобождает новую папку от очереди декодирования предыдущей.
 
-        ``Future.cancel`` cannot stop a RAW decode that is already executing.
-        Retiring the executors still cancels all queued work, while fresh
-        executors let the new folder's visible cards begin immediately.
-        Running old workers are allowed to finish and their results are
-        discarded by the folder checks in the completion callbacks.
+        ``Future.cancel`` не умеет остановить уже начатое декодирование RAW.
+        Поэтому старые пулы отправляются на завершение, а для новой папки сразу
+        создаются свежие. Запоздавшие результаты отбрасываются проверкой папки в
+        обработчике завершения — прошлому каталогу не дадут украсить новый.
         """
         for attribute in (
             "current_decode_executor",
@@ -274,7 +273,7 @@ class DecodeScheduler:
                 setattr(self, attribute, None)
 
     def cancel_pending(self) -> None:
-        """Cancel queued work and drop all in-flight bookkeeping."""
+        """Отменяет задания в очередях и очищает учёт незавершённой работы."""
         pending, self.pending = self.pending, {}
         self.foreground_full_futures.clear()
         self.visible_thumb_pending.clear()

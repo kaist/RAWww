@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 import argparse
@@ -22,6 +25,8 @@ except ImportError:  # pragma: no cover
 
 @dataclass
 class StageTimes:
+    """Замеры отдельных стадий декодирования одного файла."""
+
     raw_thumb_ms: float
     pillow_ms: float
     qimage_ms: float
@@ -31,6 +36,7 @@ class StageTimes:
 
 
 def main() -> None:
+    """Профилирует стадии конвейера на файлах переданной папки."""
     parser = argparse.ArgumentParser(description="Profile Контролька pipeline stages.")
     parser.add_argument("folder", type=Path)
     parser.add_argument("--limit", type=int, default=20)
@@ -61,6 +67,7 @@ def main() -> None:
 
 
 def _profile_path(cache: FolderCache, path: Path, size: int) -> StageTimes:
+    """Замеряет декодирование, кодирование и запись кэша для одного файла."""
     raw_thumb_ms = 0.0
     pillow_ms = 0.0
 

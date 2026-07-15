@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 import argparse
@@ -19,6 +22,7 @@ except ImportError:  # pragma: no cover
 
 
 def main() -> None:
+    """Сравнивает доступные декодеры на одном изображении и сохраняет результаты."""
     parser = argparse.ArgumentParser()
     parser.add_argument("folder", type=Path)
     parser.add_argument("--limit", type=int, default=10)

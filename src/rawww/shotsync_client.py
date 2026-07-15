@@ -1,20 +1,7 @@
-"""Networking layer for the ShotSync (shotsync.ru) integration.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-The client talks to the ShotSync REST API using Qt's own
-``QNetworkAccessManager`` so the desktop app gains no extra third-party
-dependency. Every call is asynchronous and reports back through Qt signals so
-the UI thread is never blocked while waiting on the network.
-
-API contract (confirmed against the shotsync server):
-
-* ``POST /api/users/login/`` with JSON ``{"login", "password"}``
-  -> ``{"ok": true, "user": {...}, "key": "..."}`` on success,
-     ``{"ok": false, "error": "..."}`` on failure (HTTP 200 either way).
-* ``GET /api/users/me/`` with header ``X-Api-Key``
-  -> ``{"ok": true, "user": {...}}``.
-* ``GET /api/shootings/`` with header ``X-Api-Key``
-  -> ``{"ok": true, "shootings": [...]}``.
-"""
+"""Асинхронный HTTP-клиент интеграции с ShotSync."""
 
 from __future__ import annotations
 
@@ -35,16 +22,21 @@ API_KEY_HEADER = b"X-Api-Key"
 
 
 class ShotSyncClient(QObject):
-    """Asynchronous wrapper around the ShotSync HTTP API."""
+    """Выполняет HTTP-запросы ShotSync, не блокируя поток интерфейса.
 
-    loginSucceeded = Signal(dict, str)  # user payload, api key
-    loginFailed = Signal(str)           # human readable error
-    sessionVerified = Signal(dict)      # user payload (from /me)
-    sessionInvalid = Signal(str)        # stored key no longer works
-    sessionCheckFailed = Signal(str)    # network error; retain the stored key
-    shootingsLoaded = Signal(list)      # list of shooting payloads
+    Клиент хранит ключ API, создаёт запросы через ``QNetworkAccessManager`` и
+    приводит ответы разных методов к единым callback-сигнатурам. Виджеты не
+    разбирают статусы и сетевые ошибки сами — этой кухни им и так хватает.
+    """
+
+    loginSucceeded = Signal(dict, str)  # профиль пользователя и ключ API
+    loginFailed = Signal(str)  # понятное пользователю описание ошибки
+    sessionVerified = Signal(dict)  # профиль пользователя из /me
+    sessionInvalid = Signal(str)  # сохранённый ключ больше не работает
+    sessionCheckFailed = Signal(str)  # сетевая ошибка; ключ пока сохраняем
+    shootingsLoaded = Signal(list)  # список съёмок
     shootingsFailed = Signal(str)
-    avatarLoaded = Signal(QImage)       # decoded profile avatar
+    avatarLoaded = Signal(QImage)  # декодированный аватар профиля
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -52,7 +44,6 @@ class ShotSyncClient(QObject):
         self._api_key: str = ""
         self._manager = QNetworkAccessManager(self)
 
-    # ----- key management ------------------------------------------------
     @property
     def api_key(self) -> str:
         return self._api_key
@@ -64,14 +55,13 @@ class ShotSyncClient(QObject):
         return bool(self._api_key)
 
     def logout(self) -> None:
-        """Forget the current key locally.
+        """Удаляет локальный ключ и завершает клиентский сеанс.
 
-        The server issues throwaway keys, so simply dropping it is enough to
-        end the session from the client's point of view.
+        Ключ выдаётся отдельно для входа, поэтому дополнительный запрос выхода
+        серверу не требуется.
         """
         self._api_key = ""
 
-    # ----- request helpers ----------------------------------------------
     def _url(self, path: str) -> QUrl:
         return QUrl(f"{self._base_url}/{path.lstrip('/')}")
 
@@ -113,7 +103,6 @@ class ShotSyncClient(QObject):
             message = reply.errorString()
         return message or fallback
 
-    # ----- public API ----------------------------------------------------
     def login(self, login: str, password: str) -> None:
         request = self._request("/api/users/login/")
         request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
@@ -150,11 +139,11 @@ class ShotSyncClient(QObject):
         reply.finished.connect(lambda: self._handle_avatar(reply))
 
     def request_json(self, path: str, callback, *, method: str = "GET", payload: dict | None = None) -> None:
-        """Call an authenticated JSON endpoint without blocking the UI.
+        """Вызывает авторизованный JSON-метод без блокировки интерфейса.
 
-        ``callback`` receives ``(ok, payload, error)``.  It deliberately
-        lives here rather than in a widget so every ShotSync feature uses the
-        same key, redirect policy and error handling.
+        ``callback`` получает ``(ok, payload, error)``. Общая реализация нужна,
+        чтобы все возможности ShotSync одинаково работали с ключом, редиректами
+        и ошибками, а не изобретали собственный интернет в каждом виджете.
         """
         if not self._api_key:
             callback(False, {}, "Требуется авторизация в ShotSync.")
@@ -170,7 +159,7 @@ class ShotSyncClient(QObject):
         reply.finished.connect(lambda: self._finish_json_request(reply, callback))
 
     def upload_file(self, path: str, file_path: str, callback) -> None:
-        """POST a code-import file as ``file`` to an authenticated endpoint."""
+        """Отправляет файл полем ``file`` на авторизованный адрес импорта кодов."""
         if not self._api_key:
             callback(False, {}, "Требуется авторизация в ShotSync.")
             return
@@ -195,10 +184,11 @@ class ShotSyncClient(QObject):
     def post_multipart(
         self, path: str, fields: dict[str, str], photo: tuple[str, bytes, str] | None, callback
     ) -> None:
-        """POST text ``fields`` plus an optional ``photo`` to a JSON endpoint.
+        """Отправляет текстовые поля и необязательный файл через multipart POST.
 
-        ``photo`` is ``(filename, data, content_type)``. Used to sync a face set
-        (its embedding/name/bbox as fields and its avatar crop as ``photo``).
+        ``photo`` имеет вид ``(filename, data, content_type)``. Этот путь нужен,
+        например, синхронизации лиц: имя, рамка и эмбеддинг идут полями, а
+        вырезанный аватар — файлом.
         """
         if not self._api_key:
             callback(False, {}, "Требуется авторизация в ShotSync.")
@@ -227,7 +217,7 @@ class ShotSyncClient(QObject):
         reply.finished.connect(lambda: self._finish_json_request(reply, callback))
 
     def fetch_bytes(self, url: str, callback) -> None:
-        """Download ``url`` (e.g. a face preview) and report ``(ok, data)``."""
+        """Загружает байты по ``url`` и передаёт в callback пару ``(ok, data)``."""
         if not url:
             callback(False, b"")
             return
@@ -255,7 +245,6 @@ class ShotSyncClient(QObject):
         reply.deleteLater()
         callback(ok, data, error)
 
-    # ----- reply handlers ------------------------------------------------
     def _handle_login(self, reply: QNetworkReply) -> None:
         reply.deleteLater()
         data = self._parse_json(reply)
@@ -279,9 +268,6 @@ class ShotSyncClient(QObject):
             self.sessionVerified.emit(user)
             return
         if network_error:
-            # A lost connection says nothing about the validity of the saved
-            # key. Keep it, so local selections and queued marks remain usable
-            # and sync can resume after the network returns.
             self.sessionCheckFailed.emit(error)
             return
         self._api_key = ""

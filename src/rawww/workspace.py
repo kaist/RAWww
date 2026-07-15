@@ -1,4 +1,7 @@
-"""UI-independent state and request identity for one folder workspace."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Состояние рабочей вкладки и идентификаторы её асинхронных запросов."""
 
 from __future__ import annotations
 
@@ -9,7 +12,7 @@ from uuid import uuid4
 
 @dataclass(frozen=True)
 class WorkspaceRequest:
-    """Identifies a result that may update one workspace's UI."""
+    """Помечает фоновый результат поколением и владельцем рабочей вкладки."""
 
     workspace_id: str
     directory_generation: int
@@ -17,7 +20,7 @@ class WorkspaceRequest:
 
 @dataclass
 class WorkspaceState:
-    """State owned by a tab, deliberately independent of Qt widgets."""
+    """Хранит состояние рабочей вкладки отдельно от конкретных виджетов Qt."""
 
     directory: Path
     workspace_id: str = field(default_factory=lambda: uuid4().hex)

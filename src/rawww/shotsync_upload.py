@@ -1,18 +1,7 @@
-"""Feature 3: send a local folder to ShotSync and pull marks back.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-Two independent helpers, both driven by ``QNetworkAccessManager`` so they share
-the Qt event loop and need no extra dependency:
-
-* :class:`FolderUploader` — creates a shooting, encodes every local image to a
-  1920px JPEG preview (in a small thread pool) and uploads them with bounded
-  concurrency, reporting progress. On success the local folder is tagged as a
-  ShotSync session so the mark-syncer (feature 2) takes over.
-* :class:`MarksFetcher` — implements the "Получить" action: pulls current marks
-  for a shooting and writes them into the folder cache.
-
-Both keep the whole flow off the server's originals: the client generates the
-previews itself via the same imaging path used for thumbnails.
-"""
+"""Отправка локальной папки в ShotSync и получение меток с сервера."""
 
 from __future__ import annotations
 
@@ -32,7 +21,7 @@ from PySide6.QtNetwork import (
     QNetworkRequest,
 )
 
-if TYPE_CHECKING:  # avoid importing the GUI/QtGui stack at module load
+if TYPE_CHECKING:   # избегайте импорта стека GUI/QtGui при загрузке модуля
     from .cache import FolderCache
 
 API_KEY_HEADER = b"X-Api-Key"
@@ -42,16 +31,15 @@ MAX_INFLIGHT_UPLOADS = 3
 
 
 def encode_preview(path: Path, max_size: int = PREVIEW_MAX_SIZE) -> bytes:
-    """Encode ``path`` to a downscaled sRGB JPEG and return the bytes.
+    """Декодирует файл и возвращает уменьшенное JPEG-превью в sRGB.
 
-    Runs in a worker thread. Reuses the app's own imaging pipeline
-    (:func:`rawww.imaging.decode_pixels`) instead of calling Pillow's
-    ``Image.open`` directly — that path handles camera RAW (CR3/NEF/ARW/…) via
-    ``rawpy``/the embedded preview, applies EXIF orientation and sRGB
-    conversion, and matches exactly what the user sees as a thumbnail. Pillow
-    alone cannot decode RAW and raised "cannot identify image file".
+    Функция работает в фоновом потоке и использует общий конвейер
+    ``decode_pixels``. Благодаря этому RAW проходит через ``rawpy`` или встроенное
+    превью, учитывает ориентацию EXIF и выглядит так же, как карточка в приложении.
+    Прямой ``Pillow.Image.open`` здесь не подходит: большинство RAW он попросту
+    не понимает, и в данном случае честно признаётся в этом исключением.
     """
-    from PIL import Image  # local import keeps startup cheap
+    from PIL import Image   # местный импорт делает стартап дешевым
 
     from .imaging import decode_pixels
 
@@ -65,7 +53,7 @@ def encode_preview(path: Path, max_size: int = PREVIEW_MAX_SIZE) -> bytes:
 
 
 def exif_original_datetime(path: Path) -> str | None:
-    """Read the capture time from the source file's EXIF metadata."""
+    """Возвращает исходное время съёмки из EXIF или ``None``."""
     from .exif import extract_metadata_batch
 
     results = extract_metadata_batch([str(path)])
@@ -80,13 +68,12 @@ def exif_original_datetime(path: Path) -> str | None:
 
 
 class _AiAttacher:
-    """Resolve the CLIP embedding and faces to send with an AI shooting upload.
+    """Добавляет к загрузке CLIP-эмбеддинг и найденные лица.
 
-    Values already computed by the app's AI pipeline are read straight from the
-    folder cache; anything missing is computed here (reusing the encoded preview
-    so RAW sources are not decoded twice) and written back to the cache so it is
-    reused next time. Model calls are serialized through ``lock`` because the
-    encode pool runs several tasks at once.
+    Готовые значения берутся из кэша папки. Недостающие вычисляются по уже
+    созданному превью, чтобы не декодировать RAW второй раз, и сохраняются для
+    следующих запусков. Вызовы моделей защищены блокировкой: кодировщиков может
+    быть несколько, а тяжёлые модели любят порядок и личное пространство.
     """
 
     def __init__(self, cache: "FolderCache", lock: threading.Lock, embed_fn=None, faces_fn=None) -> None:
@@ -106,7 +93,7 @@ class _AiAttacher:
         return self._embed_fn, self._faces_fn
 
     def resolve(self, path: Path, preview_bytes: bytes) -> tuple[bytes, str | None]:
-        """Return ``(embedding_q8, faces_json)``; ``faces_json`` is ``None`` if unknown."""
+        """Возвращает эмбеддинг и JSON лиц; ``None`` означает, что лица не проверялись."""
         name = path.name
         embedding = self._embeddings.get(name) or b""
         faces_json = self._faces.get(name)
@@ -130,13 +117,14 @@ class _AiAttacher:
 
 
 class _EncodeSignals(QObject):
-    # path, jpeg bytes, EXIF original_datetime, embedding q8 bytes, faces JSON
+    """Сигналы результата одной фоновой подготовки превью."""
+
     done = Signal(object, bytes, object, bytes, str)
-    failed = Signal(object, str)     # path, error
+    failed = Signal(object, str)      # путь, ошибка
 
 
 class _EncodeTask(QRunnable):
-    """Encode one preview off the UI thread."""
+    """Готовит одно превью вне потока интерфейса и возвращает результат сигналом."""
 
     def __init__(self, path: Path, original_datetime: str | None, attacher: "_AiAttacher | None" = None) -> None:
         super().__init__()
@@ -145,10 +133,10 @@ class _EncodeTask(QRunnable):
         self.attacher = attacher
         self.signals = _EncodeSignals()
 
-    def run(self) -> None:  # noqa: D401 - QRunnable entry point
+    def run(self) -> None:  # noqa: D401 — точка входа QRunnable
         try:
             data = encode_preview(self.path)
-        except Exception as exc:  # noqa: BLE001 - report a readable message
+        except Exception as exc:  # noqa: BLE001 — сообщаем понятную причину ошибки
             self.signals.failed.emit(self.path, str(exc))
             return
         original_datetime = self.original_datetime or exif_original_datetime(self.path)
@@ -158,17 +146,24 @@ class _EncodeTask(QRunnable):
             try:
                 embedding, resolved = self.attacher.resolve(self.path, data)
                 faces_json = resolved if resolved is not None else ""
-            except Exception:  # noqa: BLE001 - AI is best-effort; upload still proceeds
+            except Exception:  # noqa: BLE001 — ошибка AI не должна отменять загрузку
                 embedding, faces_json = b"", ""
         self.signals.done.emit(self.path, data, original_datetime, embedding, faces_json)
 
 
 class FolderUploader(QObject):
-    """Create a shooting and upload 1920px previews of every image in a folder."""
+    """Создаёт съёмку ShotSync и отправляет превью файлов выбранной папки.
 
-    progress = Signal(int, int)          # done, total
-    finished = Signal(int, str)          # shooting_id, folder
-    failed = Signal(str)                 # error message
+    Сначала создаётся серверная съёмка, затем изображения кодируются в пуле
+    потоков и загружаются ограниченными параллельными порциями. При включённом AI
+    к каждому файлу добавляются эмбеддинг и лица. Класс ведёт общий прогресс,
+    закрывает кэш после завершения и прерывает всю операцию при сетевой ошибке,
+    чтобы половина очереди не продолжала жить самостоятельной жизнью.
+    """
+
+    progress = Signal(int, int)           # сделано, всего
+    finished = Signal(int, str)  # идентификатор съёмки и папка
+    failed = Signal(str)                  # сообщение об ошибке
     deleteFinished = Signal(int)
     deleteFailed = Signal(str)
 
@@ -178,11 +173,7 @@ class FolderUploader(QObject):
         self._api_key = ""
         self._manager = QNetworkAccessManager(self)
         self._pool = QThreadPool(self)
-        # Encoding is CPU-bound; a couple of workers keeps the UI responsive
-        # without starving the rest of the app.
         self._pool.setMaxThreadCount(max(2, (QThreadPool.globalInstance().maxThreadCount() or 4) // 2))
-        # Serializes model inference across the encode workers when an AI
-        # shooting has to compute embeddings/faces that were not cached yet.
         self._ai_lock = threading.Lock()
         self._reset()
 
@@ -194,7 +185,7 @@ class FolderUploader(QObject):
         return self._folder is not None
 
     def delete_shooting(self, shooting_id: int) -> None:
-        """Delete an already uploaded shooting from the server."""
+        """Удаляет ранее загруженную съёмку с сервера."""
         if self.busy:
             self.deleteFailed.emit("Дождитесь завершения текущей отправки.")
             return
@@ -234,7 +225,6 @@ class FolderUploader(QObject):
         self._total = 0
         self._failed = False
 
-    # ----- public API ----------------------------------------------------
     def start(
         self,
         folder: Path,
@@ -242,7 +232,7 @@ class FolderUploader(QObject):
         original_datetimes: dict[str, str | None] | None = None,
         ai_faces_series: bool = False,
     ) -> None:
-        """Begin uploading ``folder`` as a new shooting named ``title``."""
+        """Начинает загрузку ``folder`` как новой съёмки с названием ``title``."""
         if self.busy:
             self.failed.emit("Отправка уже выполняется.")
             return
@@ -251,7 +241,6 @@ class FolderUploader(QObject):
             return
         from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, is_supported_image, is_supported_video
 
-        # Only still images are uploaded; videos are skipped entirely.
         candidates = sorted(
             p
             for p in folder.iterdir()
@@ -274,7 +263,6 @@ class FolderUploader(QObject):
         self._total = len(images)
         self._create_shooting()
 
-    # ----- shooting creation --------------------------------------------
     def _create_shooting(self) -> None:
         request = QNetworkRequest(QUrl(f"{self._base_url}/api/shootings/create/"))
         request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
@@ -295,11 +283,8 @@ class FolderUploader(QObject):
             self._abort("Не удалось создать съёмку на сервере.")
             return
         self._shooting_id = shooting_id
-        # For AI shootings, prepare the folder cache so each upload can carry
-        # the embedding and faces (from cache, or computed once and cached).
         if self._ai_faces_series:
             self._open_ai_cache()
-        # Kick off encoding for every image; uploads start as bytes arrive.
         for path in self._pending:
             task = _EncodeTask(path, self._original_datetimes.get(path.name), self._attacher)
             task.signals.done.connect(self._on_encoded)
@@ -315,7 +300,7 @@ class FolderUploader(QObject):
             names = {p.name for p in self._pending}
             self._cache = FolderCache(self._folder, live_names=names, load_from_disk=True)
             self._attacher = _AiAttacher(self._cache, self._ai_lock)
-        except Exception:  # noqa: BLE001 - fall back to server-side AI on any cache error
+        except Exception:  # noqa: BLE001 — при ошибке кэша AI посчитает сервер
             self._close_cache(flush=False)
             self._attacher = None
 
@@ -337,7 +322,6 @@ class FolderUploader(QObject):
         part.setBody(QByteArray(value))
         multipart.append(part)
 
-    # ----- encode -> upload pipeline ------------------------------------
     def _on_encoded(
         self, path: Path, data: bytes, original_datetime: str | None,
         embedding: bytes, faces_json: str,
@@ -361,6 +345,7 @@ class FolderUploader(QObject):
         self, path: Path, data: bytes, original_datetime: str | None,
         embedding: bytes = b"", faces_json: str = "",
     ) -> None:
+        """Формирует multipart-запрос одной фотографии и запускает отправку."""
         multipart = QHttpMultiPart(QHttpMultiPart.ContentType.FormDataType)
         part = QHttpPart()
         part.setHeader(
@@ -371,8 +356,6 @@ class FolderUploader(QObject):
         part.setBody(QByteArray(data))
         multipart.append(part)
 
-        # The generated preview intentionally has no EXIF. Preserve the
-        # source file's EXIF capture timestamp in a separate form field.
         if original_datetime:
             datetime_part = QHttpPart()
             datetime_part.setHeader(
@@ -382,9 +365,6 @@ class FolderUploader(QObject):
             datetime_part.setBody(QByteArray(str(original_datetime).encode("utf-8")))
             multipart.append(datetime_part)
 
-        # Client-computed AI: the server stores these as-is and skips its own
-        # embedding/face detection for this photo. An empty faces list ("[]")
-        # is authoritative ("no faces found"), so it is still sent.
         if embedding:
             self._append_field(multipart, "image_embedding_q8", base64.b64encode(embedding))
         if faces_json:
@@ -395,7 +375,7 @@ class FolderUploader(QObject):
         )
         request.setRawHeader(API_KEY_HEADER, self._api_key.encode("utf-8"))
         reply = self._manager.post(request, multipart)
-        multipart.setParent(reply)  # tie multipart lifetime to the reply
+        multipart.setParent(reply)   # привязать многочастное время жизни к ответу
         self._inflight += 1
         reply.finished.connect(lambda: self._on_uploaded(reply, path))
 
@@ -413,9 +393,6 @@ class FolderUploader(QObject):
         if not photo_id:
             self._abort(f"Сервер не вернул идентификатор для «{path.name}».")
             return
-        # The server stores a JPEG preview (and may therefore rename a RAW
-        # source to .jpg). Keep the original local filename as the key used by
-        # the selection UI and store the returned server id alongside it.
         self._uploaded_mapping.append((path.name, photo_id, self._shooting_id))
         self._done += 1
         self.progress.emit(self._done, self._total)
@@ -424,7 +401,6 @@ class FolderUploader(QObject):
         else:
             self._pump()
 
-    # ----- completion ----------------------------------------------------
     def _complete(self) -> None:
         folder = self._folder
         shooting_id = self._shooting_id
@@ -433,8 +409,6 @@ class FolderUploader(QObject):
             from .cache import FolderCache
 
             names = {p.name for p in self._pending}
-            # Reuse the AI cache opened for this run when present; otherwise a
-            # plain (non-AI) upload opens its own to tag the folder.
             cache = self._cache
             if cache is None:
                 cache = FolderCache(folder, live_names=names, load_from_disk=True)
@@ -454,8 +428,6 @@ class FolderUploader(QObject):
         self._failed = True
         self._close_cache(flush=True)
         shooting_id = self._shooting_id
-        # A shooting is created before the first preview is encoded. Remove it
-        # on any later failure so partial uploads never remain in the account.
         if shooting_id and self._api_key:
             request = QNetworkRequest(
                 QUrl(f"{self._base_url}/api/shootings/{shooting_id}/delete/")
@@ -464,15 +436,18 @@ class FolderUploader(QObject):
             reply = self._manager.post(request, QByteArray())
             reply.finished.connect(reply.deleteLater)
         self.failed.emit(message)
-        # Do not reset _failed here: callbacks from uploads already in flight
-        # must become no-ops. start() resets the state for the next operation.
         self._folder = None
 
 
 class MarksFetcher(QObject):
-    """Pull current marks for a shooting and write them into a folder cache."""
+    """Получает актуальные метки съёмки и записывает их в кэш папки.
 
-    finished = Signal(int)               # number of marks applied
+    Используется для ручной команды «Получить»: серверный рейтинг, цвет и
+    комментарий сопоставляются локальным файлам по ID фотографии. Результат
+    сообщается сигналом, а интерфейс уже решает, что и как перерисовать.
+    """
+
+    finished = Signal(int)                # количество выставленных оценок
     failed = Signal(str)
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
@@ -505,7 +480,7 @@ class MarksFetcher(QObject):
         self.finished.emit(applied)
 
     def _apply_marks(self, payload: dict, cache: "FolderCache") -> int:
-        """Write each returned mark into ``cache``; return how many applied."""
+        """Записывает полученные метки в ``cache`` и возвращает их количество."""
         applied = 0
         for mark in payload.get("marks", []):
             name = ""

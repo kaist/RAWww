@@ -1,19 +1,7 @@
-"""ShotSync "take a shooting for selection" feature (feature 2).
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-Two pieces cooperate here:
-
-* :class:`SelectionDownloader` pulls the shooting's photo list from the server
-  and downloads the 1920px previews into a local folder under the app data
-  directory, seeding the folder cache with the server photo ids and the marks
-  that already exist.  This turns a cloud shooting into an ordinary local
-  folder the rest of the app can open as a tab.
-
-* :class:`SelectionMarkSyncer` watches marks the user makes inside such a
-  folder and ships them back to the server over the shared socket.  Every mark
-  is written to a durable on-disk queue first, so nothing is lost while the
-  connection is down; the queue is drained (and cleared on ``photo.ack``) as
-  soon as the socket is live again.
-"""
+"""Загрузка съёмки ShotSync для локального отбора и отправка меток обратно."""
 
 from __future__ import annotations
 
@@ -30,7 +18,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 
 from .shotsync_receiver import safe_filename
 
-if TYPE_CHECKING:  # avoid importing the GUI/QtGui stack at module load
+if TYPE_CHECKING:   # избегайте импорта стека GUI/QtGui при загрузке модуля
     from .cache import FolderCache
 
 API_KEY_HEADER = b"X-Api-Key"
@@ -40,14 +28,14 @@ RETRY_MAX_MS = 30_000
 
 
 def selection_root() -> Path:
-    """Directory that holds locally downloaded selection folders."""
+    """Каталог, в котором хранятся локально загруженные папки выбора."""
     from .cache import cache_root
 
     return cache_root().parent.parent / SELECTION_DIR
 
 
 def selection_folder(shooting_id: int, title: str) -> Path:
-    """Stable local folder for a given shooting."""
+    """Стабильная локальная папка для данной съемки."""
     safe = "".join(c if c not in '<>:"/\\|?*' else "_" for c in str(title or "").strip())
     safe = safe.rstrip(". ").strip()
     suffix = f"-{safe}" if safe else ""
@@ -55,18 +43,23 @@ def selection_folder(shooting_id: int, title: str) -> Path:
 
 
 class SelectionDownloader(QObject):
-    """Downloads every preview of a shooting into a local folder."""
+    """Скачивает съёмку ShotSync в локальную папку для отбора.
 
-    progress = Signal(int, int, int)          # shooting_id, done, total
-    finished = Signal(int, str)               # shooting_id, folder
-    failed = Signal(int, str)                 # shooting_id, human message
+    Сначала получает список фотографий и серверные AI-данные, затем параллельно,
+    но с ограничением, загружает превью. Соответствие локальных имён серверным ID
+    записывается в ``FolderCache``: оно понадобится обратной отправке меток.
+    Незавершённый запуск можно продолжить — существующие файлы не качаются снова.
+    """
+
+    progress = Signal(int, int, int)  # съёмка, выполнено, всего
+    finished = Signal(int, str)  # съёмка и локальная папка
+    failed = Signal(int, str)  # съёмка и понятное описание ошибки
 
     def __init__(self, base_url: str, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._base_url = base_url.rstrip("/")
         self._api_key = ""
         self._manager = QNetworkAccessManager(self)
-        # Per-run state keyed by shooting_id so concurrent downloads are safe.
         self._runs: dict[int, dict] = {}
 
     def set_api_key(self, key: str | None) -> None:
@@ -75,7 +68,6 @@ class SelectionDownloader(QObject):
     def is_running(self, shooting_id: int) -> bool:
         return int(shooting_id) in self._runs
 
-    # ----- list fetch ----------------------------------------------------
     def start(self, shooting_id: int, title: str) -> None:
         shooting_id = int(shooting_id)
         if shooting_id in self._runs:
@@ -87,9 +79,9 @@ class SelectionDownloader(QObject):
             "title": title,
             "total": 0,
             "done": 0,
-            "mapping": [],   # (name, photo_id, shooting_id)
-            "selection": [], # (name, rating, color_label, comment, original_datetime)
-            "ai": [],        # (name, image_embedding_q8 base64, faces list)
+            "mapping": [],    # (имя, photo_id,shoot_id)
+            "selection": [],  # (имя, рейтинг, color_label, комментарий, original_datetime)
+            "ai": [],         # (имя, image_embedding_q8 base64, список лиц)
             "queue": [],
             "inflight": 0,
             "retrying": 0,
@@ -125,7 +117,6 @@ class SelectionDownloader(QObject):
         run["queue"] = [(photo, 0) for photo in photos]
         self._pump(shooting_id)
 
-    # ----- per-photo download --------------------------------------------
     def _pump(self, shooting_id: int) -> None:
         run = self._runs.get(shooting_id)
         if run is None:
@@ -137,8 +128,8 @@ class SelectionDownloader(QObject):
             self._finalize(shooting_id)
 
     def _download_photo(self, shooting_id: int, photo: dict, attempt: int = 0) -> None:
+        """Загружает одно превью с повторной попыткой и безопасным локальным именем."""
         run = self._runs[shooting_id]
-        # Prefer the 1920px preview; fall back to original then mini.
         url = photo.get("thumb_url") or photo.get("url") or photo.get("mini_url")
         photo_id = int(photo.get("id") or 0)
         name = _unique_local_name(
@@ -156,8 +147,6 @@ class SelectionDownloader(QObject):
             photo.get("comment") or "",
             photo.get("original_datetime") or None,
         ))
-        # Keep the server's AI results so the local cache reuses them instead
-        # of recomputing embeddings/faces after the previews are downloaded.
         faces = photo.get("faces")
         run["ai"].append((
             name,
@@ -215,6 +204,7 @@ class SelectionDownloader(QObject):
             self._finalize(shooting_id)
 
     def _finalize(self, shooting_id: int) -> None:
+        """Фиксирует соответствия в кэше и завершает успешно скачанный отбор."""
         run = self._runs.pop(shooting_id, None)
         if run is None:
             return
@@ -242,7 +232,7 @@ class SelectionDownloader(QObject):
                 cache.store_photo_metadata(metadata)
             self._store_server_ai(cache, folder, run["ai"])
             cache.close(flush=True)
-        except Exception as exc:  # noqa: BLE001 - surface a readable message
+        except Exception as exc:  # noqa: BLE001 — превращаем исключение в понятное сообщение
             self.failed.emit(shooting_id, f"Не удалось сохранить кэш: {exc}")
             return
         self.finished.emit(shooting_id, str(folder))
@@ -253,13 +243,12 @@ class SelectionDownloader(QObject):
 
     @staticmethod
     def _store_server_ai(cache: "FolderCache", folder: Path, entries: list[tuple]) -> None:
-        """Seed the folder cache with the AI results the server sent.
+        """Сохраняет в кэш папки результаты AI, присланные сервером.
 
-        Embeddings are stored whenever present. Faces are stored when the
-        server clearly ran AI for the photo (it returned an embedding or a
-        non-empty face list); an empty list is then kept as an authoritative
-        "no faces", so local detection is not re-run. Rows are keyed by the
-        downloaded file so their stamp matches ``missing_ai_paths`` later.
+        Эмбеддинг записывается, если он пришёл. Список лиц считается достоверным,
+        когда сервер явно выполнял анализ: даже пустой список означает «лиц нет»
+        и не требует повторного локального поиска. Записи привязываются к уже
+        загруженному файлу, чтобы проверка ``missing_ai_paths`` увидела верный штамп.
         """
         embeddings: list[tuple[str, bytes]] = []
         faces_records: list[tuple[str, str]] = []
@@ -279,7 +268,6 @@ class SelectionDownloader(QObject):
         if faces_records:
             cache.store_face_analysis(faces_records)
 
-    # ----- helpers -------------------------------------------------------
     def _request(self, url: str) -> QNetworkRequest:
         request = QNetworkRequest(QUrl(url))
         request.setAttribute(
@@ -295,7 +283,7 @@ class SelectionDownloader(QObject):
 
 
 def _unique_local_name(name: str, used_names: set[str]) -> str:
-    """Avoid overwriting two server photos that share a filename."""
+    """Подбирает уникальное локальное имя для одноимённых файлов сервера."""
     if name not in used_names:
         return name
     path = Path(name)
@@ -308,22 +296,28 @@ def _unique_local_name(name: str, used_names: set[str]) -> str:
 
 
 class SelectionMarkSyncer(QObject):
-    """Ships local marks for one selection folder back to the server."""
+    """Надёжно отправляет метки локального отбора обратно в ShotSync.
 
-    pendingChanged = Signal(int)              # number of queued (unsent) marks
+    Каждое изменение сначала попадает в дисковую очередь ``FolderCache`` и лишь
+    затем уходит через общий WebSocket. Подтверждение сервера удаляет запись;
+    ошибка или разрыв соединения оставляет её для следующей попытки. Поэтому
+    закрытие вкладки и даже приложения не съедает ещё не доставленный рейтинг.
+    """
+
+    pendingChanged = Signal(int)  # число меток, ещё не подтверждённых сервером
 
     def __init__(self, hub, cache: FolderCache, shooting_id: int, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._hub = hub
         self._cache = cache
         self._shooting_id = int(shooting_id)
-        self._inflight: dict[str, tuple[int, str]] = {}   # request_id -> (photo_id, kind)
+        self._inflight: dict[str, tuple[int, str]] = {}  # запрос -> (фотография, вид метки)
         hub.ackReceived.connect(self._on_ack)
         hub.connectionChanged.connect(self._on_connection)
         self.flush()
 
     def detach(self) -> None:
-        """Stop listening; called when the folder/tab goes away."""
+        """Отключает сигналы хаба перед закрытием папки или вкладки."""
         try:
             self._hub.ackReceived.disconnect(self._on_ack)
             self._hub.connectionChanged.disconnect(self._on_connection)
@@ -334,7 +328,7 @@ class SelectionMarkSyncer(QObject):
         return self._cache.pending_shotsync_count()
 
     def queue_mark(self, name: str, *, detail: dict, changes: dict) -> None:
-        """Persist and try to send marks implied by ``changes`` for one file."""
+        """Сохраняет изменившиеся метки файла в очередь и запускает отправку."""
         photo_id = self._cache.shotsync_photo_id(name)
         if not photo_id:
             return
@@ -361,7 +355,7 @@ class SelectionMarkSyncer(QObject):
         self.flush()
 
     def flush(self) -> None:
-        """Send every queued mark that is not already in flight."""
+        """Отправляет все ожидающие метки, которые ещё не ждут подтверждения."""
         if not self._hub.connected:
             return
         for mark in self._cache.pending_shotsync_marks():
@@ -393,7 +387,6 @@ class SelectionMarkSyncer(QObject):
         if data.get("ok"):
             self._cache.clear_shotsync_mark(photo_id, kind)
             self.pendingChanged.emit(self.pending_count())
-        # On failure the mark stays queued and will be retried on next flush.
 
     def _on_connection(self, connected: bool) -> None:
         if connected:

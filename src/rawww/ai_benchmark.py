@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 import argparse
@@ -17,6 +20,7 @@ from .imaging import decode_pixels, is_supported_image
 
 
 def main() -> None:
+    """Сравнивает время подготовки, эмбеддингов и поиска лиц на выбранной папке."""
     default = Path(str(QSettings("Контролька", "Контролька").value("last_directory", Path.cwd())))
     parser = argparse.ArgumentParser(description="Benchmark Контролька photo processing stages.")
     parser.add_argument("folder", type=Path, nargs="?", default=default)

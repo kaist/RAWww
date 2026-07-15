@@ -1,3 +1,12 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Дисковый кэш папок с превью, метаданными и результатами анализа.
+
+SQLite хранит состояние каждой папки отдельно: так повреждение одного кэша не
+превращает всю фототеку в археологическую экспедицию.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -88,16 +97,19 @@ CREATE TABLE IF NOT EXISTS shotsync_pending (
 
 @dataclass(frozen=True)
 class FileStamp:
+    """Короткий отпечаток файла для проверки актуальности записи кэша."""
+
     size: int
     mtime_ns: int
 
 
 class FolderCache:
-    """Disk-backed preview cache for one image folder.
+    """Дисковый кэш превью и метаданных для одной папки с изображениями.
 
-    The database is opened lazily so the application can still initialize it
-    off the UI thread.  Its location is centralised rather than kept beside
-    the images.
+    SQLite-база лежит в общем каталоге кэша, а не рядом с фотографиями. Открытие
+    можно отложить и выполнить в фоне, чтобы большая папка не замораживала Qt.
+    В одной базе хранятся варианты превью, EXIF, пользовательские метки,
+    результаты AI и служебное соответствие ShotSync.
     """
 
     def __init__(
@@ -189,17 +201,17 @@ class FolderCache:
 
 
     def flush(self) -> None:
-        """Commit pending work; writes are normally committed immediately."""
+        """Фиксирует накопленные изменения; обычно записи сохраняются сразу."""
         with self._lock:
             if self._db is not None:
                 self._db.commit()
 
     def prune_deleted_entries(self, *, vacuum: bool = False) -> None:
-        """Remove rows for files no longer present in the folder.
+        """Удаляет записи файлов, которых больше нет в папке.
 
-        This is deliberately usable by a short-lived background cache object:
-        deleting source files should release their thumbnails and AI data even
-        when the folder is not opened again during this application session.
+        Метод подходит и короткоживущему фоновому экземпляру: удалённые исходники
+        освобождают свои превью и AI-данные, даже если папку больше не откроют в
+        текущем сеансе.
         """
         with self._lock:
             db = self._db_or_raise()
@@ -210,7 +222,7 @@ class FolderCache:
                 db.execute("VACUUM")
 
     def has_deleted_entries(self) -> bool:
-        """Whether any cached record belongs to a file no longer on disk."""
+        """Принадлежит ли какая-либо кэшированная запись файлу, которого больше нет на диске."""
         with self._lock:
             db = self._db_or_raise()
             db.execute("CREATE TEMP TABLE live_names (name TEXT PRIMARY KEY)")
@@ -260,7 +272,8 @@ class FolderCache:
         self._store_ai_results("image_embeddings", "embedding", results)
 
     def load_image_embeddings(self) -> dict[str, bytes]:
-        """Return normalized CLIP vectors used by the viewer's series UI."""
+        """Возвращает нормализованные векторы CLIP, используемые пользовательским интерфейсом серии просмотра.
+        """
         with self._lock:
             db = self._db_or_raise()
             return {
@@ -273,7 +286,7 @@ class FolderCache:
         self._store_ai_results("face_analysis", "faces_json", results)
 
     def load_face_analysis(self) -> dict[str, str]:
-        """Return the raw per-file faces JSON produced by the AI pipeline."""
+        """Возвращает сохранённый AI-конвейером JSON отдельно для каждого файла."""
         with self._lock:
             db = self._db_or_raise()
             return {
@@ -299,7 +312,7 @@ class FolderCache:
         return details
 
     def load_photo_details(self, *, include_metadata: bool = True) -> dict[str, dict]:
-        """Return cached EXIF/AI metadata and the user's local selection state."""
+        """Возвращает кэшированные метаданные EXIF/AI и состояние локального выбора пользователя."""
         import json
 
         details: dict[str, dict] = {}
@@ -341,12 +354,12 @@ class FolderCache:
             db.commit()
 
     def rename_photo_names(self, names: dict[str, str]) -> None:
-        """Move cached data to renamed files without losing a name swap/cycle.
+        """Переносит кэш при переименовании, не ломаясь на обмене имён и циклах.
 
-        The database keys are filenames, so updating ``a.jpg`` directly to
-        ``b.jpg`` would violate a primary key when both files participate in a
-        batch rename.  A transaction with private temporary names makes the
-        update safe for swaps and arbitrary cycles.
+        Имена файлов служат ключами базы. Прямое обновление ``a.jpg`` в ``b.jpg``
+        конфликтует, если оба участвуют в одной операции. Поэтому транзакция
+        сначала выдаёт всем строкам временные имена, а уже затем назначает
+        окончательные — обмены и произвольные циклы проходят без потерь.
         """
         changes = {str(old): str(new) for old, new in names.items() if old != new}
         if not changes:
@@ -382,9 +395,8 @@ class FolderCache:
                 db.rollback()
                 raise
 
-    # ----- ShotSync selection session (feature 2) ------------------------
     def set_shotsync_session(self, shooting_id: int, title: str) -> None:
-        """Mark this folder as a synced copy of a server shooting."""
+        """Связывает папку с синхронизированной съёмкой ShotSync."""
         with self._lock:
             db = self._db_or_raise()
             db.execute(
@@ -395,7 +407,7 @@ class FolderCache:
             db.commit()
 
     def shotsync_session(self) -> tuple[int, str] | None:
-        """Return ``(shooting_id, title)`` if this is a ShotSync folder."""
+        """Возвращает ``(shooting_id, title)``, если папка связана с ShotSync."""
         with self._lock:
             row = self._db_or_raise().execute(
                 "SELECT shooting_id, title FROM shotsync_session WHERE id = 1"
@@ -403,7 +415,7 @@ class FolderCache:
         return (int(row[0]), row[1] or "") if row else None
 
     def clear_shotsync_session(self) -> None:
-        """Turn this folder back into an ordinary local folder."""
+        """Удаляет связь с ShotSync и снова делает папку обычной локальной."""
         with self._lock:
             db = self._db_or_raise()
             db.execute("DELETE FROM shotsync_session")
@@ -412,7 +424,7 @@ class FolderCache:
             db.commit()
 
     def set_shotsync_photos(self, mapping: list[tuple[str, int, int]]) -> None:
-        """Store ``(name, photo_id, shooting_id)`` rows in bulk."""
+        """Пакетно сохраняет строки ``(name, photo_id, shooting_id)``."""
         if not mapping:
             return
         rows = _unique_shotsync_mapping(mapping)
@@ -426,7 +438,7 @@ class FolderCache:
             db.commit()
 
     def replace_shotsync_photos(self, mapping: list[tuple[str, int, int]]) -> None:
-        """Replace the server mapping after a full shooting refresh."""
+        """Полностью заменяет соответствие локальных файлов фотографиям сервера."""
         rows = _unique_shotsync_mapping(mapping)
         with self._lock:
             db = self._db_or_raise()
@@ -452,7 +464,8 @@ class FolderCache:
         return int(row[0]) if row else None
 
     def shotsync_local_name_for_photo_id(self, photo_id: int) -> str | None:
-        """Return the local filename mapped to a server photo id, if known."""
+        """Возвращает локальное имя файла, сопоставленное с идентификатором фотографии сервера, если оно известно.
+        """
         with self._lock:
             row = self._db_or_raise().execute(
                 "SELECT name FROM shotsync_photos WHERE photo_id = ?", (int(photo_id),)
@@ -462,7 +475,7 @@ class FolderCache:
     def enqueue_shotsync_mark(
         self, *, photo_id: int, shooting_id: int, kind: str, payload_json: str
     ) -> None:
-        """Persist a mark to send. Coalesced per (photo_id, kind)."""
+        """Ставит метку в очередь, объединяя повторы по ``(photo_id, kind)``."""
         with self._lock:
             db = self._db_or_raise()
             db.execute(
@@ -474,7 +487,7 @@ class FolderCache:
             db.commit()
 
     def pending_shotsync_marks(self) -> list[dict]:
-        """Return queued marks (oldest first) awaiting delivery."""
+        """Возвращает ожидающие отправки метки, начиная с самых старых."""
         with self._lock:
             rows = self._db_or_raise().execute(
                 """SELECT photo_id, kind, shooting_id, payload_json
@@ -521,7 +534,7 @@ class FolderCache:
                 db.commit()
 
     def load_from_disk(self) -> None:
-        """Open the central on-disk database and discard entries for deleted files."""
+        """Открывает центральную базу и удаляет записи исчезнувших файлов."""
         with self._lock:
             if self._db is not None:
                 return
@@ -529,9 +542,6 @@ class FolderCache:
             try:
                 db = self._open_database()
             except sqlite3.DatabaseError:
-                # Everything in this database is derived from source photos.
-                # A torn/corrupt cache after an unclean shutdown is cheaper and
-                # safer to rebuild than to attempt to salvage.
                 for suffix in ("", "-wal", "-shm"):
                     (Path(f"{self.path}{suffix}")).unlink(missing_ok=True)
                 db = self._open_database()
@@ -546,8 +556,6 @@ class FolderCache:
                 "INSERT OR REPLACE INTO cache_info (id, folder_path) VALUES (1, ?)",
                 (_folder_identity(self.folder),),
             )
-            # Transcription was removed; discard its obsolete derived table
-            # from caches created by older Контролька versions.
             db.execute("DROP TABLE IF EXISTS audio_transcripts")
             self._remove_deleted_entries(db)
             db.commit()
@@ -577,7 +585,8 @@ class FolderCache:
 
 
 def _unique_shotsync_mapping(mapping: list[tuple[str, int, int]]) -> list[tuple[str, int, int]]:
-    """Keep one row per local filename before SQLite's primary-key insert."""
+    """Оставляет по одной строке на локальное имя перед вставкой по ключу SQLite.
+    """
     rows: dict[str, tuple[str, int, int]] = {}
     for name, photo_id, shooting_id in mapping:
         rows[str(name)] = (str(name), int(photo_id), int(shooting_id))
@@ -585,9 +594,6 @@ def _unique_shotsync_mapping(mapping: list[tuple[str, int, int]]) -> list[tuple[
 
 
 def cache_root() -> Path:
-    # GenericDataLocation deliberately does not include Qt's application name.
-    # That name changes between `uv run`, an installed console script, and a
-    # packaged executable, whereas the cache location must stay stable.
     if PORTABLE:
         return work_path() / "cache" / CACHE_DIRECTORY
     location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
@@ -609,14 +615,14 @@ def _folder_identity(folder: Path) -> str:
 
 
 def remove_folder_cache(folder: Path, *, cache_root: Path | None = None) -> None:
-    """Delete a folder's disposable cache database and its SQLite sidecars."""
+    """Удаляет кэш папки вместе со служебными файлами SQLite."""
     path = cache_path(folder, cache_root)
     for suffix in ("", "-wal", "-shm"):
         Path(f"{path}{suffix}").unlink(missing_ok=True)
 
 
 def cache_size(root: Path | None = None) -> int:
-    """Return the size of all disposable cache files in bytes."""
+    """Возвращает суммарный размер файлов кэша в байтах."""
     root = root or cache_root()
     if not root.is_dir():
         return 0
@@ -631,7 +637,7 @@ def cache_size(root: Path | None = None) -> int:
 
 
 def clear_cache(root: Path | None = None) -> None:
-    """Remove every disposable folder cache while keeping the cache root."""
+    """Удаляет кэши всех папок, но сохраняет сам корневой каталог кэша."""
     root = root or cache_root()
     if not root.is_dir():
         return
@@ -646,11 +652,11 @@ def clear_cache(root: Path | None = None) -> None:
 
 
 def relocate_folder_caches(old_folder: Path, new_folder: Path, *, cache_dir: Path | None = None) -> int:
-    """Move cache databases for a renamed folder and all cached descendants.
+    """Переносит кэши переименованной папки и всех её закэшированных потомков.
 
-    Cache filenames are hashes of absolute folder paths. Moving the database
-    to its new hash and updating ``cache_info`` preserves previews and AI data
-    instead of treating the renamed folder as completely new.
+    Имя базы — хэш абсолютного пути. После переименования файл получает новый
+    хэш, а запись ``cache_info`` обновляется, поэтому превью и результаты AI не
+    приходится считать заново.
     """
     root = cache_dir or cache_root()
     if not root.is_dir():
@@ -683,8 +689,6 @@ def relocate_folder_caches(old_folder: Path, new_folder: Path, *, cache_dir: Pat
         if source == destination:
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
-        # A cache at this identity can only be stale derived data. Prefer the
-        # cache just renamed from the real source folder.
         for suffix in ("", "-wal", "-shm"):
             Path(f"{destination}{suffix}").unlink(missing_ok=True)
         for suffix in ("", "-wal", "-shm"):
@@ -705,7 +709,7 @@ def relocate_folder_caches(old_folder: Path, new_folder: Path, *, cache_dir: Pat
 
 
 def prune_folder_cache(folder: Path, *, cache_root: Path | None = None) -> None:
-    """Refresh and compact a cache after source files were removed."""
+    """Удаляет записи исчезнувших исходников и уплотняет кэш."""
     names = {
         path.name
         for path in folder.iterdir()
@@ -719,11 +723,11 @@ def prune_folder_cache(folder: Path, *, cache_root: Path | None = None) -> None:
 
 
 def maintain_folder_caches(root: Path | None = None) -> dict[str, int]:
-    """Remove orphaned caches and compact caches with deleted source files.
+    """Удаляет бесхозные кэши и уплотняет базы после удаления исходников.
 
-    Caches predating ``cache_info`` are intentionally left alone: their hashed
-    filenames do not contain enough information to identify a source folder.
-    They gain that information naturally the next time the folder is opened.
+    Старые базы без ``cache_info`` остаются нетронутыми: по одному хэшу имени
+    нельзя надёжно восстановить исходную папку. Сведения появятся естественным
+    образом при следующем открытии такого кэша.
     """
     root = root or cache_root()
     result = {"removed": 0, "optimized": 0, "skipped": 0}
@@ -753,8 +757,6 @@ def maintain_folder_caches(root: Path | None = None) -> dict[str, int]:
             finally:
                 db.close()
         except sqlite3.DatabaseError:
-            # It may simply be the cache currently used by an open workspace.
-            # Normal cache loading already rebuilds genuinely corrupt databases.
             result["skipped"] += 1
             continue
         except OSError:
@@ -779,14 +781,12 @@ def maintain_folder_caches(root: Path | None = None) -> dict[str, int]:
                 finally:
                     cache.close(flush=False)
         except (OSError, sqlite3.DatabaseError):
-            # A currently busy cache or a transient filesystem error can wait
-            # for the next launch; maintenance must never affect startup.
             result["skipped"] += 1
     return result
 
 
 def _configure_database(db: sqlite3.Connection) -> None:
-    """Tune a disposable, write-heavy thumbnail/AI cache for throughput."""
+    """Настраивает SQLite для частой записи превью и результатов AI."""
     db.execute(f"PRAGMA page_size={SQLITE_PAGE_SIZE}")
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=OFF")

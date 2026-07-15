@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +9,8 @@ from rawww.xmp import build_xmp, sidecar_path, write_sidecar
 
 
 class XmpTests(unittest.TestCase):
+    """Проверяет построение и атомарную запись XMP-файлов."""
+
     def test_build_xmp_expands_codes_tags_and_named_faces(self) -> None:
         detail = {"rating": 5, "color_label": "red", "comment": "Hello {name} #hero", "faces": [{"embedding": [1.0, 0.0], "bbox": {"x": .1, "y": .2, "width": .3, "height": .4}}]}
         xmp = build_xmp(detail, [{"name": "Anna", "embedding": [1.0, 0.0]}], {"name": "World"})

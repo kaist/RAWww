@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 import os
 import unittest
 from concurrent.futures import Future
@@ -21,6 +24,8 @@ def _decoded(name: str) -> DecodedImage:
 
 
 class _Signal:
+    """Тестовый сигнал, который вызывает подключённые обработчики без Qt."""
+
     def __init__(self) -> None:
         self.emitted: list[tuple] = []
 
@@ -29,12 +34,16 @@ class _Signal:
 
 
 class _Bridge:
+    """Собирает сигналы результатов планировщика в тестах."""
+
     def __init__(self) -> None:
         self.decoded = _Signal()
         self.failed = _Signal()
 
 
 class _FolderCache:
+    """Управляемая заглушка кэша для проверки попаданий и промахов."""
+
     def __init__(self, loads: dict | None = None, raises: bool = False) -> None:
         self._loads = loads or {}
         self._raises = raises
@@ -50,6 +59,8 @@ class _FolderCache:
 
 
 class _VideoThumbnailer:
+    """Записывает запросы видео-миниатюр, не запуская мультимедиа."""
+
     def __init__(self) -> None:
         self.requested: list[Path] = []
 
@@ -58,7 +69,7 @@ class _VideoThumbnailer:
 
 
 class _SyncExecutor:
-    """Runs work immediately so ``add_done_callback`` fires synchronously."""
+    """Выполняет задачу сразу, поэтому callback завершения вызывается синхронно."""
 
     def __init__(self) -> None:
         self.calls: list[tuple] = []
@@ -69,7 +80,7 @@ class _SyncExecutor:
         future: Future = Future()
         try:
             future.set_result(fn(*args))
-        except Exception as exc:  # noqa: BLE001 - mirror executor behaviour
+        except Exception as exc:  # noqa: BLE001 — повторяем поведение исполнителя
             future.set_exception(exc)
         return future
 
@@ -78,7 +89,7 @@ class _SyncExecutor:
 
 
 class _PendingExecutor:
-    """Returns an unresolved future so completion callbacks never run."""
+    """Возвращает незавершённый ``Future`` для проверки ожидающих задач."""
 
     def __init__(self) -> None:
         self.calls: list[tuple] = []
@@ -93,6 +104,8 @@ class _PendingExecutor:
 
 
 class _Host:
+    """Минимальный владелец состояния, необходимого DecodeScheduler."""
+
     def __init__(self, folder_cache: _FolderCache | None) -> None:
         self.closing = False
         self.current_dir = Path("/photos")
@@ -121,13 +134,14 @@ def _make(folder_cache: _FolderCache | None = None) -> tuple[DecodeScheduler, _H
         visible_thumb_workers=1,
         visible_thumb_lookup_workers=1,
     )
-    # Replace the real thread pools with synchronous ones by default.
     scheduler.background_cache_lookup_executor = _SyncExecutor()
     scheduler.visible_thumb_cache_lookup_executor = _SyncExecutor()
     return scheduler, host
 
 
 class DecodeSchedulerTests(unittest.TestCase):
+    """Проверяет приоритеты, отмену и отбрасывание устаревших декодирований."""
+
     def test_cache_hit_emits_without_scheduling(self) -> None:
         scheduler, host = _make()
         path = host.current_dir / "a.jpg"
@@ -166,18 +180,16 @@ class DecodeSchedulerTests(unittest.TestCase):
 
     def test_visible_priority_uses_visible_executor(self) -> None:
         path = Path("/photos/a.jpg")
-        # load returns None so the key stays pending until the (unused) process pool.
         folder = _FolderCache(loads={})
         scheduler, host = _make(folder)
         scheduler.visible_thumb_decode_executor = _PendingExecutor()
         scheduler.submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=True)
         self.assertEqual(len(scheduler.visible_thumb_cache_lookup_executor.calls), 1)
         self.assertEqual(scheduler.background_cache_lookup_executor.calls, [])
-        # Cache miss falls back to the visible-thumb decode pool.
         self.assertEqual(len(scheduler.visible_thumb_decode_executor.calls), 1)
 
     def test_stale_directory_result_is_rejected(self) -> None:
-        path = Path("/other/a.jpg")  # parent != host.current_dir
+        path = Path("/other/a.jpg")  # результат относится к другой папке
         decoded = _decoded(str(path))
         folder = _FolderCache(loads={(path, THUMB_SIZE): decoded})
         scheduler, host = _make(folder)
@@ -222,7 +234,7 @@ class DecodeSchedulerTests(unittest.TestCase):
 
     def test_video_thumbnail_fallback_requests_thumbnailer(self) -> None:
         path = Path("/photos/clip.mp4")
-        folder = _FolderCache(loads={})  # SQLite miss
+        folder = _FolderCache(loads={})  # в SQLite записи тоже нет
         scheduler, host = _make(folder)
         scheduler.submit_video_thumbnail(path, visible_priority=False)
         self.assertEqual(host.video_thumbnailer.requested, [path])

@@ -1,4 +1,7 @@
-"""Shared ShotSync sign-in dialog."""
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Диалог входа в ShotSync."""
 
 from __future__ import annotations
 
@@ -7,7 +10,7 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButt
 
 
 def humanize_login_error(raw: str) -> str:
-    """Turn the server's technical login error into a short user message."""
+    """Превращает техническую ошибку входа в короткое понятное сообщение."""
     if not raw:
         return "Не удалось войти. Попробуйте ещё раз."
     low = raw.lower()
@@ -23,7 +26,13 @@ def humanize_login_error(raw: str) -> str:
 
 
 class ShotSyncLoginDialog(QDialog):
-    """The one ShotSync credential form, reusable from any part of the app."""
+    """Общая переиспользуемая форма входа в ShotSync.
+
+    Диалог пользуется переданным ``ShotSyncClient``, блокирует повторную отправку
+    и показывает уже приведённые к человеческому виду ошибки. После закрытия
+    ``reset`` готовит форму к новому сеансу, чтобы разные вкладки не плодили
+    одинаковые окна авторизации.
+    """
 
     loginSubmitted = Signal(str, str)
 
@@ -98,7 +107,7 @@ class ShotSyncLoginDialog(QDialog):
         self.accept()
 
     def reset(self) -> None:
-        """Prepare the reusable dialog for a new, signed-out session."""
+        """Возвращает переиспользуемую форму в состояние нового сеанса."""
         self.set_submitting(False)
         self.login_edit.clear()
         self.password_edit.clear()

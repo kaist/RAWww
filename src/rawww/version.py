@@ -1,11 +1,7 @@
-"""Version metadata shared by the desktop application and its updater.
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
 
-The version is ``1.0.<Git commit count>``. The commit count is resolved from
-Git only in a source checkout; the number is baked into ``_build_version.py`` at
-build time (see ``scripts/build_pyinstaller.py``) so the frozen, shipped
-application never shells out to Git — that would flash a console window and is
-meaningless on a client machine that has neither Git nor this repository.
-"""
+"""Определение версии приложения для исходной и собранной поставки."""
 
 from __future__ import annotations
 
@@ -18,12 +14,12 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 
 def _no_window_kwargs() -> dict:
-    """Local copy of ``subprocess_utils.no_window_kwargs``.
+    """Локальная копия ``subprocess_utils.no_window_kwargs``.
 
-    ``version.py`` must stay importable on its own: setuptools reads the dynamic
-    version by executing this module in an isolated build environment where the
-    ``rawww`` package is not installed, so a package-relative import here would
-    break the build.
+    ``setuptools`` выполняет этот модуль отдельно, чтобы прочитать динамическую
+    версию, когда пакет ``rawww`` ещё не установлен. Поэтому относительный импорт
+    здесь сломал бы сборку — небольшое дублирование в данном месте полезнее
+    красивой, но неработающей абстракции.
     """
     if sys.platform != "win32":
         return {}

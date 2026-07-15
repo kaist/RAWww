@@ -1,3 +1,6 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
 from __future__ import annotations
 
 import sqlite3
@@ -19,6 +22,8 @@ from rawww.ai import AiPipeline, prepare_analysis_batch
 
 
 class CacheTests(unittest.TestCase):
+    """Проверяет дисковый кэш папки, его очистку и перенос."""
+
     def test_ai_model_workers_are_lazy_and_releasable(self) -> None:
         pipeline = AiPipeline()
         self.assertIsNone(pipeline.source_workers)
@@ -43,6 +48,8 @@ class CacheTests(unittest.TestCase):
         worker_thread_ids = []
 
         class PreparedCache:
+            """Изображает уже подготовленный кэш, не трогая настоящий диск."""
+
             def close(self, *, flush: bool) -> None:
                 closed.set()
 
