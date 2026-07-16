@@ -291,3 +291,8 @@ class ShotSyncClient(QObject):
         image = QImage()
         if image.loadFromData(bytes(reply.readAll())) and not image.isNull():
             self.avatarLoaded.emit(image)
+
+    def shutdown(self) -> None:
+        """Отменяет ответы, которым уже некуда доставлять результат вкладки."""
+        for reply in self.findChildren(QNetworkReply):
+            reply.abort()

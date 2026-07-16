@@ -26,6 +26,7 @@ from .cache import FolderCache
 from .face_analysis import recognize
 from .imaging import RAW_EXTENSIONS
 from .runtime_paths import data_path
+from .task_lifecycle import retire_executor
 from .worker_priority import lower_background_priority
 
 MODEL_ROOT = data_path("models")
@@ -381,11 +382,11 @@ class AiPipeline:
         embedding_workers, self.embedding_workers = self.embedding_workers, None
         face_workers, self.face_workers = self.face_workers, None
         if source_workers is not None:
-            source_workers.shutdown(wait=False, cancel_futures=True)
+            retire_executor(source_workers)
         if embedding_workers is not None:
-            embedding_workers.shutdown(wait=False, cancel_futures=True)
+            retire_executor(embedding_workers)
         if face_workers is not None:
-            face_workers.shutdown(wait=False, cancel_futures=True)
+            retire_executor(face_workers)
 
     def _results_finished(self, job: _AiJob, future: Future, store) -> None:
         try:
@@ -433,5 +434,5 @@ class AiPipeline:
             future.cancel()
         for cache in caches:
             cache.close(flush=False)
-        self.job_workers.shutdown(wait=False, cancel_futures=True)
+        retire_executor(self.job_workers)
         self.release_analysis_workers()

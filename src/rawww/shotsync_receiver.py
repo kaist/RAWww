@@ -60,6 +60,7 @@ class ShotSyncReceiver(QObject):
         self._download_queue: list[tuple[int, str, Path]] = []
         self._inflight_downloads = 0
         self._http2_failed = False
+        self._closing = False
         self._sync: dict[int, dict] = {}
 
     def set_api_key(self, key: str | None) -> None:
@@ -107,6 +108,8 @@ class ShotSyncReceiver(QObject):
         self._queue_download(int(shooting_id), self._absolute_url(url), destination)
 
     def _queue_download(self, shooting_id: int, url: str, destination: Path, attempt: int = 0) -> None:
+        if self._closing:
+            return
         if destination.exists():
             self._mark_done(shooting_id, destination.name)
             return
@@ -221,6 +224,16 @@ class ShotSyncReceiver(QObject):
         self._emit_progress(shooting_id)
         delay = min(1000 * (2 ** min(attempt, 5)), _RETRY_MAX_MS)
         QTimer.singleShot(delay, lambda: self._queue_download(shooting_id, url, destination, attempt + 1))
+
+    def shutdown(self) -> None:
+        """Отменяет сетевую работу, сохраняя настройки принимаемых съёмок."""
+        self._closing = True
+        self._download_queue.clear()
+        self._downloads.clear()
+        self._sync.clear()
+        for reply in tuple(self._active):
+            reply.abort()
+        self._active.clear()
 
     def _mark_done(self, shooting_id: int, name: str) -> None:
         state = self._sync.get(shooting_id)

@@ -12,7 +12,7 @@ from PySide6.QtGui import QImage
 
 from rawww.decode_cache import DecodeCache
 from rawww.decode_scheduler import DecodeScheduler
-from rawww.imaging import DecodedImage
+from rawww.imaging import DecodedImage, PixelImage, decode_pixels
 
 THUMB_SIZE = 256
 ORIGINAL_SIZE = 0
@@ -108,6 +108,7 @@ class _Host:
 
     def __init__(self, folder_cache: _FolderCache | None) -> None:
         self.closing = False
+        self.directory_generation = 0
         self.current_dir = Path("/photos")
         self.current_path: Path | None = None
         self.workspace_active = True
@@ -121,6 +122,12 @@ class _Host:
         )
         self.bridge = _Bridge()
         self.video_thumbnailer = _VideoThumbnailer()
+        self.cache_writes: list[tuple] = []
+        self.cache_write_saw_publish = False
+
+    def queue_preview_cache_write(self, cache, pixel: PixelImage, size: int) -> None:
+        self.cache_write_saw_publish = bool(self.bridge.decoded.emitted)
+        self.cache_writes.append((cache, pixel, size))
 
 
 def _make(folder_cache: _FolderCache | None = None) -> tuple[DecodeScheduler, _Host]:
@@ -187,6 +194,24 @@ class DecodeSchedulerTests(unittest.TestCase):
         self.assertEqual(len(scheduler.visible_thumb_cache_lookup_executor.calls), 1)
         self.assertEqual(scheduler.background_cache_lookup_executor.calls, [])
         self.assertEqual(len(scheduler.visible_thumb_decode_executor.calls), 1)
+        self.assertIs(scheduler.visible_thumb_decode_executor.calls[0][0], decode_pixels)
+        self.assertIn((path, THUMB_SIZE), scheduler.visible_thumb_pending)
+
+    def test_decoded_preview_is_published_before_cache_write_is_queued(self) -> None:
+        path = Path("/photos/a.jpg")
+        folder = _FolderCache()
+        scheduler, host = _make(folder)
+        pixel = PixelImage(path=path, pixels=b"\x00" * 16, width=2, height=2)
+        future: Future = Future()
+        future.set_result(pixel)
+        scheduler.pending[(path, THUMB_SIZE)] = future
+
+        scheduler._decode_done(path, THUMB_SIZE, host.directory_generation, future)
+
+        self.assertEqual(len(host.bridge.decoded.emitted), 1)
+        self.assertEqual(host.cache_writes, [(folder, pixel, THUMB_SIZE)])
+        self.assertTrue(host.cache_write_saw_publish)
+        self.assertEqual(folder.stored, [])
 
     def test_stale_directory_result_is_rejected(self) -> None:
         path = Path("/other/a.jpg")  # результат относится к другой папке
@@ -197,6 +222,20 @@ class DecodeSchedulerTests(unittest.TestCase):
         self.assertEqual(host.bridge.decoded.emitted, [])
         self.assertIsNone(host.decode_cache.get((path, THUMB_SIZE)))
         self.assertEqual(scheduler.pending, {})
+
+    def test_result_from_previous_generation_of_same_folder_is_rejected(self) -> None:
+        path = Path("/photos/a.jpg")
+        scheduler, host = _make()
+        executor = _PendingExecutor()
+        scheduler.background_decode_executor = executor
+        scheduler.submit_decode(path, 2048, full_priority=False)
+        _function, arguments = executor.calls[0]
+        future = scheduler.pending[(path, 2048)]
+        host.directory_generation += 1
+        future.set_result(_decoded(str(path)))
+
+        self.assertIsNone(host.decode_cache.get((path, 2048)))
+        self.assertEqual(host.bridge.decoded.emitted, [])
 
     def test_lookup_failure_emits_failed(self) -> None:
         path = Path("/photos/a.jpg")

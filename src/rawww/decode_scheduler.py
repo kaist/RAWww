@@ -19,12 +19,14 @@ from .imaging import (
     decode_thumbnail_pixels,
     pixel_to_decoded,
 )
+from .task_lifecycle import retire_executor
 
 
 class DecodeHost(Protocol):
     """Описывает данные рабочей вкладки, нужные обработчикам завершения."""
 
     closing: bool
+    directory_generation: int
     current_dir: Path
     current_path: Path | None
     workspace_active: bool
@@ -32,6 +34,10 @@ class DecodeHost(Protocol):
     decode_cache: DecodeCache
     bridge: object
     video_thumbnailer: object
+
+    def queue_preview_cache_write(
+        self, cache: object, pixel: PixelImage, max_size: int
+    ) -> None: ...
 
 
 class DecodeScheduler:
@@ -102,9 +108,10 @@ class DecodeScheduler:
             self.pending[key] = future
             if visible_priority:
                 self.visible_thumb_pending.add(key)
+            generation = self._host.directory_generation
             future.add_done_callback(
-                lambda done, p=path, s=max_size, fp=full_priority, vp=visible_priority: self._cache_lookup_done(
-                    p, s, fp, vp, done
+                lambda done, p=path, s=max_size, fp=full_priority, vp=visible_priority, g=generation: self._queue_completion(
+                    "cache", p, s, fp, vp, g, done
                 )
             )
             return
@@ -130,16 +137,26 @@ class DecodeScheduler:
         self.pending[key] = future
         if visible_priority:
             self.visible_thumb_pending.add(key)
+        generation = self._host.directory_generation
         future.add_done_callback(
-            lambda done, p=path, vp=visible_priority: self._video_thumbnail_cache_lookup_done(p, vp, done)
+            lambda done, p=path, vp=visible_priority, g=generation: self._queue_completion(
+                "video", p, vp, g, done
+            )
         )
 
-    def _video_thumbnail_cache_lookup_done(self, path: Path, visible_priority: bool, future: Future) -> None:
+    def _video_thumbnail_cache_lookup_done(
+        self, path: Path, visible_priority: bool, generation: int, future: Future
+    ) -> None:
         key = (path, self._thumb_size)
         if self.pending.get(key) is future:
             self.pending.pop(key, None)
         self.visible_thumb_pending.discard(key)
-        if self._host.closing or future.cancelled() or path.parent != self._host.current_dir:
+        if (
+            self._host.closing
+            or generation != self._host.directory_generation
+            or future.cancelled()
+            or path.parent != self._host.current_dir
+        ):
             return
         try:
             decoded = future.result()
@@ -178,7 +195,13 @@ class DecodeScheduler:
         else:
             executor = self._background_decode_executor()
         try:
-            decoder = decode_original_pixels if max_size == self._original_size else (decode_pixels if full_priority else decode_thumbnail_pixels)
+            decoder = (
+                decode_original_pixels
+                if max_size == self._original_size
+                else decode_pixels
+                if full_priority or visible_priority
+                else decode_thumbnail_pixels
+            )
             future = executor.submit(decoder, path) if max_size == self._original_size else executor.submit(decoder, path, max_size)
         except RuntimeError:
             if self._host.closing:
@@ -187,7 +210,30 @@ class DecodeScheduler:
         self.pending[key] = future
         if is_foreground:
             self.foreground_full_futures[key] = future
-        future.add_done_callback(lambda done, p=path, s=max_size: self._decode_done(p, s, done))
+        generation = self._host.directory_generation
+        future.add_done_callback(
+            lambda done, p=path, s=max_size, g=generation: self._queue_completion(
+                "decode", p, s, g, done
+            )
+        )
+
+    def _queue_completion(self, kind: str, *payload: object) -> None:
+        """Передаёт изменение состояния планировщика в главный поток Qt."""
+        signal = getattr(self._host.bridge, "schedulerFinished", None)
+        if signal is None:
+            self.handle_completion((kind, *payload))
+            return
+        signal.emit((kind, *payload))
+
+    def handle_completion(self, payload: tuple) -> None:
+        """Обрабатывает готовую задачу уже в потоке владельца ``Workspace``."""
+        kind, *arguments = payload
+        if kind == "cache":
+            self._cache_lookup_done(*arguments)
+        elif kind == "video":
+            self._video_thumbnail_cache_lookup_done(*arguments)
+        elif kind == "decode":
+            self._decode_done(*arguments)
 
     def _cache_lookup_done(
         self,
@@ -195,50 +241,73 @@ class DecodeScheduler:
         max_size: int,
         full_priority: bool,
         visible_priority: bool,
+        generation: int,
         future: Future,
     ) -> None:
         """Завершает поиск в дисковом кэше или запускает настоящее декодирование."""
         key = (path, max_size)
         if self.pending.get(key) is future:
             self.pending.pop(key, None)
-        self.visible_thumb_pending.discard(key)
-        if self._host.closing or path.parent != self._host.current_dir:
+        if (
+            self._host.closing
+            or generation != self._host.directory_generation
+            or path.parent != self._host.current_dir
+        ):
+            self.visible_thumb_pending.discard(key)
             return
         if future.cancelled():
+            self.visible_thumb_pending.discard(key)
             return
         try:
             decoded = future.result()
         except Exception as exc:
+            self.visible_thumb_pending.discard(key)
             log_exception(f"Не удалось прочитать кэш превью: {path}", exc)
             self._host.bridge.failed.emit(str(path), str(exc))
             return
         if decoded is not None:
+            self.visible_thumb_pending.discard(key)
             self._host.decode_cache.put((path, max_size), decoded)
             self._host.bridge.decoded.emit((decoded, max_size))
             return
+        # Приоритет относится ко всему запросу, а не только к чтению SQLite.
+        # Иначе после промаха кэша таймер решит, что срочная очередь свободна,
+        # и успеет набить её карточками из прежней области экрана.
         self._submit_process_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
+        if key not in self.pending:
+            self.visible_thumb_pending.discard(key)
 
-    def _decode_done(self, path: Path, max_size: int, future: Future) -> None:
+    def _decode_done(self, path: Path, max_size: int, generation: int, future: Future) -> None:
         key = (path, max_size)
         if self.pending.get(key) is future:
             self.pending.pop(key, None)
         self.visible_thumb_pending.discard(key)
         if self.foreground_full_futures.get(key) is future:
             self.foreground_full_futures.pop(key, None)
-        if self._host.closing or path.parent != self._host.current_dir:
+        if (
+            self._host.closing
+            or generation != self._host.directory_generation
+            or path.parent != self._host.current_dir
+        ):
             return
         if future.cancelled():
             return
         try:
             result = future.result()
             if isinstance(result, PixelImage):
-                if self._host.folder_cache is not None and max_size == self._thumb_size:
-                    self._host.folder_cache.store_pixels(result, max_size)
                 decoded = pixel_to_decoded(result)
             else:
                 decoded = result
             self._host.decode_cache.put((path, max_size), decoded)
             self._host.bridge.decoded.emit((decoded, max_size))
+            if (
+                isinstance(result, PixelImage)
+                and self._host.folder_cache is not None
+                and max_size == self._thumb_size
+            ):
+                self._host.queue_preview_cache_write(
+                    self._host.folder_cache, result, max_size
+                )
         except Exception as exc:
             log_exception(f"Не удалось декодировать файл: {path}", exc)
             self._host.bridge.failed.emit(str(path), str(exc))
@@ -273,7 +342,7 @@ class DecodeScheduler:
         ):
             executor = getattr(self, attribute)
             if executor is not None:
-                executor.shutdown(wait=False, cancel_futures=True)
+                retire_executor(executor)
                 setattr(self, attribute, None)
 
     def cancel_pending(self) -> None:
@@ -285,11 +354,16 @@ class DecodeScheduler:
             future.cancel()
 
     def shutdown(self) -> None:
+        """Останавливает очереди и передаёт их общей финальной фазе приложения."""
+        self.cancel_pending()
         if self.current_decode_executor is not None:
-            self.current_decode_executor.shutdown(wait=False, cancel_futures=True)
+            retire_executor(self.current_decode_executor)
+            self.current_decode_executor = None
         if self.background_decode_executor is not None:
-            self.background_decode_executor.shutdown(wait=False, cancel_futures=True)
+            retire_executor(self.background_decode_executor)
+            self.background_decode_executor = None
         if self.visible_thumb_decode_executor is not None:
-            self.visible_thumb_decode_executor.shutdown(wait=False, cancel_futures=True)
-        self.background_cache_lookup_executor.shutdown(wait=False, cancel_futures=True)
-        self.visible_thumb_cache_lookup_executor.shutdown(wait=False, cancel_futures=True)
+            retire_executor(self.visible_thumb_decode_executor)
+            self.visible_thumb_decode_executor = None
+        retire_executor(self.background_cache_lookup_executor)
+        retire_executor(self.visible_thumb_cache_lookup_executor)

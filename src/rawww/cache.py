@@ -182,20 +182,34 @@ class FolderCache:
         )
 
     def store_pixels(self, pixel: PixelImage, max_size: int) -> None:
-        stamp = _stamp(pixel.path)
+        self.store_pixels_batch([(pixel, max_size)])
+
+    def store_pixels_batch(self, previews: list[tuple[PixelImage, int]]) -> None:
+        """Кодирует несколько превью и фиксирует их одной транзакцией."""
+        rows = []
+        for pixel, max_size in previews:
+            try:
+                stamp = _stamp(pixel.path)
+                encoded = _encode_jpeg(pixel.pixels, pixel.width, pixel.height)
+            except Exception:
+                continue
+            rows.append(
+                (
+                    pixel.path.name, max_size, stamp.size, stamp.mtime_ns,
+                    pixel.width, pixel.height, encoded, time.time_ns(),
+                )
+            )
+        if not rows:
+            return
         with self._lock:
             db = self._db_or_raise()
-            db.execute(
+            db.executemany(
                 """
                 INSERT OR REPLACE INTO previews
                     (name, variant, file_size, mtime_ns, width, height, format, pixels, accessed_ns)
                 VALUES (?, ?, ?, ?, ?, ?, 'jpeg', ?, ?)
                 """,
-                (
-                    pixel.path.name, max_size, stamp.size, stamp.mtime_ns,
-                    pixel.width, pixel.height,
-                    _encode_jpeg(pixel.pixels, pixel.width, pixel.height), time.time_ns(),
-                ),
+                rows,
             )
             db.commit()
 
@@ -300,11 +314,17 @@ class FolderCache:
 
     def load_audio_details(self) -> dict[str, dict]:
         details = {}
-        wavs = {
-            path.stem.casefold(): path
-            for path in self.folder.iterdir()
-            if path.is_file() and path.suffix.casefold() == ".wav"
-        }
+        wavs = {}
+        try:
+            entries = self.folder.iterdir()
+            for path in entries:
+                try:
+                    if path.is_file() and path.suffix.casefold() == ".wav":
+                        wavs[path.stem.casefold()] = path
+                except OSError:
+                    continue
+        except OSError:
+            return details
         for name in self.live_names:
             audio = wavs.get(Path(name).stem.casefold())
             if audio is not None:

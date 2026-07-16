@@ -11,6 +11,8 @@ from tempfile import gettempdir
 from PySide6.QtCore import QLockFile, QObject, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
+from .windows_activation import grant_foreground_activation
+
 
 SERVER_NAME = "rawww-single-instance-v1"
 LOCK_PATH = Path(gettempdir()) / "rawww-single-instance.lock"
@@ -69,6 +71,9 @@ class SingleInstance(QObject):
         socket.connectToServer(SERVER_NAME)
         if not socket.waitForConnected(500):
             return False
+        # Пока этот процесс ещё считается запущенным пользователем из
+        # Проводника, он может передать первой копии право получить фокус.
+        grant_foreground_activation()
         payload = str(target) if target is not None else ""
         socket.write((payload + "\n").encode("utf-8"))
         socket.waitForBytesWritten(500)

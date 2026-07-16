@@ -61,6 +61,7 @@ class SelectionDownloader(QObject):
         self._api_key = ""
         self._manager = QNetworkAccessManager(self)
         self._runs: dict[int, dict] = {}
+        self._closing = False
 
     def set_api_key(self, key: str | None) -> None:
         self._api_key = (key or "").strip()
@@ -69,6 +70,8 @@ class SelectionDownloader(QObject):
         return int(shooting_id) in self._runs
 
     def start(self, shooting_id: int, title: str) -> None:
+        if self._closing:
+            return
         shooting_id = int(shooting_id)
         if shooting_id in self._runs:
             return
@@ -193,6 +196,11 @@ class SelectionDownloader(QObject):
         run["retrying"] -= 1
         run["queue"].append((photo, attempt))
         self._pump(shooting_id)
+
+    def shutdown(self) -> None:
+        """Запрещает повторные попытки и забывает незавершённые сетевые запуски."""
+        self._closing = True
+        self._runs.clear()
 
     def _advance(self, shooting_id: int) -> None:
         run = self._runs.get(shooting_id)

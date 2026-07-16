@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSettings, Signal
+from PySide6.QtNetwork import QNetworkReply
 
 from .shotsync_receiver import ShotSyncReceiver
 from .shotsync_selection import SelectionDownloader
@@ -129,6 +130,15 @@ class ShotSyncHub(QObject):
             for shooting_id in self.receiver.receiving_ids()
         }
         self._settings.setValue(_RECEIVERS_SETTING, json.dumps(payload))
+
+    def shutdown(self) -> None:
+        """Останавливает общий сокет, HTTP-запросы и локальную подготовку файлов."""
+        self.socket.stop()
+        self.receiver.shutdown()
+        self.downloader.shutdown()
+        for reply in self.findChildren(QNetworkReply):
+            reply.abort()
+        self.uploader.shutdown(wait=True)
 
 
 _HUB: ShotSyncHub | None = None

@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from queue import Queue
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
@@ -25,6 +26,7 @@ from .cache import FolderCache
 from .error_log import log_exception
 from .runtime_paths import data_path
 from .subprocess_utils import no_window_kwargs
+from .task_lifecycle import retire_executor
 
 from .worker_priority import lower_background_priority
 
@@ -39,6 +41,7 @@ BUNDLED_WINDOWS_EXIFTOOL = data_path("tools") / "exiftool.exe"
 BUNDLED_UNIX_EXIFTOOL = data_path("tools") / "exiftool"
 BUNDLED_EXIFTOOL_SCRIPT = data_path("tools") / "exiftool_files" / "exiftool.pl"
 METADATA_BATCH_SIZE = 32
+EXIFTOOL_RESPONSE_TIMEOUT = 30.0
 
 
 class ExifToolError(RuntimeError):
@@ -93,21 +96,48 @@ class ExifToolClient:
                 self.process.stdin.write(f"{argument}\n")
             self.process.stdin.write("-execute\n")
             self.process.stdin.flush()
-            lines = []
-            while True:
-                line = self.process.stdout.readline()
-                if line == "":
-                    self.close()
-                    raise ExifToolError("ExifTool stopped before response was complete")
-                if line.strip() == "{ready}":
-                    break
-                lines.append(line)
+            lines = self._read_response()
         try:
             payload = json.loads("".join(lines) or "[]")
         except json.JSONDecodeError as exc:
             self.close()
             raise ExifToolError("ExifTool returned invalid JSON") from exc
         return payload if isinstance(payload, list) else []
+
+    def _read_response(self) -> list[str]:
+        """Читает ответ с пределом ожидания, чтобы закрытие не зависло навсегда."""
+        assert self.process and self.process.stdout
+        process = self.process
+        result: Queue[list[str] | BaseException] = Queue(maxsize=1)
+
+        def read_lines() -> None:
+            lines = []
+            try:
+                while True:
+                    line = process.stdout.readline()
+                    if line == "":
+                        raise ExifToolError("ExifTool stopped before response was complete")
+                    if line.strip() == "{ready}":
+                        result.put(lines)
+                        return
+                    lines.append(line)
+            except BaseException as exc:  # noqa: BLE001 — исключение передаётся вызывающему потоку
+                result.put(exc)
+
+        reader = threading.Thread(target=read_lines, name="exiftool-response", daemon=True)
+        reader.start()
+        reader.join(EXIFTOOL_RESPONSE_TIMEOUT)
+        if reader.is_alive():
+            self.process = None
+            process.kill()
+            process.wait(timeout=1)
+            reader.join(timeout=1)
+            raise ExifToolError("ExifTool response timeout")
+        value = result.get_nowait()
+        if isinstance(value, BaseException):
+            self.process = None
+            raise value
+        return value
 
     def _ensure_process(self) -> None:
         if self.process and self.process.poll() is None:
@@ -344,4 +374,4 @@ class MetadataPipeline:
         for future in futures:
             future.cancel()
         if workers is not None:
-            workers.shutdown(wait=False, cancel_futures=True)
+            retire_executor(workers)

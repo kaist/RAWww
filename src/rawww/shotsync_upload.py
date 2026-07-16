@@ -241,11 +241,20 @@ class FolderUploader(QObject):
             return
         from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, is_supported_image, is_supported_video
 
-        candidates = sorted(
-            p
-            for p in folder.iterdir()
-            if p.is_file() and is_supported_image(p) and not is_supported_video(p)
-        )
+        candidates = []
+        try:
+            for path in folder.iterdir():
+                try:
+                    if path.is_file() and is_supported_image(path) and not is_supported_video(path):
+                        with path.open("rb"):
+                            pass
+                        candidates.append(path)
+                except OSError:
+                    continue
+        except OSError as exc:
+            self.failed.emit(f"Не удалось прочитать папку: {exc}")
+            return
+        candidates.sort()
         raw_stems = {path.stem.casefold() for path in candidates if path.suffix.lower() in RAW_EXTENSIONS}
         images = [
             path for path in candidates
@@ -437,6 +446,15 @@ class FolderUploader(QObject):
             reply.finished.connect(reply.deleteLater)
         self.failed.emit(message)
         self._folder = None
+
+    def shutdown(self, *, wait: bool) -> None:
+        """Отменяет очередь кодирования и при выходе ждёт уже начатые файлы."""
+        self._failed = True
+        self._folder = None
+        self._pool.clear()
+        if wait:
+            self._pool.waitForDone()
+        self._close_cache(flush=False)
 
 
 class MarksFetcher(QObject):

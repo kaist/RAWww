@@ -4,16 +4,17 @@
 from __future__ import annotations
 
 import json
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import rawww.exif as exif
 from rawww.cache import FolderCache
 from rawww.app import Workspace
-from rawww.exif import ExifToolError, MetadataPipeline, bundled_exiftool_command, camera_details, extract_metadata_batch
+from rawww.exif import ExifToolClient, ExifToolError, MetadataPipeline, bundled_exiftool_command, camera_details, extract_metadata_batch
 
 
 class ExifTests(unittest.TestCase):
@@ -87,3 +88,17 @@ class ExifTests(unittest.TestCase):
             self.assertEqual(pipeline.futures, set())
             pipeline.shutdown()
             cache.close(flush=False)
+
+    def test_exiftool_response_timeout_stops_stuck_process(self) -> None:
+        released = threading.Event()
+        process = Mock()
+        process.stdout.readline.side_effect = lambda: (released.wait(), "")[1]
+        process.kill.side_effect = released.set
+        client = ExifToolClient(command=["exiftool"])
+        client.process = process
+
+        with patch("rawww.exif.EXIFTOOL_RESPONSE_TIMEOUT", 0.01):
+            with self.assertRaisesRegex(ExifToolError, "timeout"):
+                client._read_response()
+
+        process.kill.assert_called_once_with()

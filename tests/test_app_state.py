@@ -8,15 +8,15 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QSettings, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt
 from PySide6.QtGui import QGuiApplication, QPalette
-from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
+from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QStackedWidget, QWidget
 
-from rawww.app import FullView, MainWindow, Workspace, _application_settings
+from rawww.app import FullView, MainWindow, Workspace, _application_settings, _scan_directory
 from rawww.theme import apply_theme
 
 
@@ -114,6 +114,58 @@ class AppStateTests(unittest.TestCase):
         workspace.close()
         workspace.deleteLater()
         parent.deleteLater()
+
+    def test_folder_context_menu_opens_a_separate_tab_first(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(Path(directory), defer_initial_scan=True)
+            menu = QMenu()
+            opened = []
+            workspace.openFolderRequested.connect(opened.append)
+
+            workspace._populate_folder_context_menu(menu, Path(directory))
+
+            actions = menu.actions()
+            self.assertEqual(actions[0].text(), "Открыть в новой вкладке")
+            self.assertTrue(actions[1].isSeparator())
+            self.assertEqual(
+                [action.text() for action in actions[2:]],
+                ["Создать папку", "Переименовать", "Удалить"],
+            )
+            actions[0].trigger()
+            self.assertEqual(opened, [Path(directory)])
+            workspace.close()
+            workspace.deleteLater()
+            menu.deleteLater()
+
+    def test_open_folder_from_context_menu_reuses_existing_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            window = MainWindow()
+            window._open_folder_tab(Path(directory))
+            count_after_first_open = window.tabs.count()
+
+            window._open_folder_tab(Path(directory))
+
+            self.assertEqual(window.tabs.count(), count_after_first_open)
+            self.assertEqual(window.workspace_stack.currentWidget().current_dir, Path(directory))
+            window.close()
+            window.deleteLater()
+
+    @unittest.skipUnless(os.name == "nt", "Системное меню Проводника есть только в Windows")
+    def test_photo_context_menu_uses_windows_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "photo.jpg"
+            photo.touch()
+            workspace = Workspace(Path(directory), defer_initial_scan=True)
+
+            with patch("rawww.app.show_file_context_menu") as show_menu:
+                workspace._show_grid_context_menu(photo, QPoint(17, 23))
+
+            show_menu.assert_called_once()
+            arguments = show_menu.call_args.args
+            self.assertEqual(arguments[0], photo)
+            self.assertEqual(arguments[2:], (17, 23))
+            workspace.close()
+            workspace.deleteLater()
 
     def test_single_photo_preview_does_not_create_tab_and_g_opens_folder(self) -> None:
         """Файл из проводника показывается временно, пока пользователь не нажмёт G."""
@@ -356,6 +408,58 @@ class AppStateTests(unittest.TestCase):
         host._show_viewer_toast("Второй")
         self.assertEqual(host._viewer_toast.text(), "Второй")
         host.close()
+
+    def test_directory_scan_skips_file_without_read_access(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            photo = folder / "photo.jpg"
+            photo.write_bytes(b"image")
+
+            with patch.object(Path, "open", side_effect=PermissionError):
+                self.assertEqual(_scan_directory(folder), [])
+
+    def test_directory_card_is_never_sent_to_image_decoder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            scheduler = SimpleNamespace(submit_decode=Mock())
+            workspace = SimpleNamespace(closing=False, scheduler=scheduler)
+
+            Workspace._submit_decode(
+                workspace,
+                Path(temporary),
+                256,
+                full_priority=False,
+            )
+
+            scheduler.submit_decode.assert_not_called()
+
+    def test_hidden_workspace_retires_preview_and_ai_work(self) -> None:
+        timer = lambda: SimpleNamespace(stop=Mock(), start=Mock())
+        ai = SimpleNamespace(pending_count=Mock(return_value=1), shutdown=Mock())
+        scheduler = SimpleNamespace(abandon_preview_decode_work=Mock(), cancel_pending=Mock())
+        workspace = SimpleNamespace(
+            workspace_active=True,
+            video_thumbnailer=SimpleNamespace(set_active=Mock()),
+            populate_timer=timer(),
+            thumb_timer=timer(),
+            visible_thumb_timer=timer(),
+            grid_full_request_timer=timer(),
+            full_request_timer=timer(),
+            ai_progress_timer=timer(),
+            pending_full_request=Path("/photos/a.jpg"),
+            pending_grid_full_request=Path("/photos/a.jpg"),
+            scheduler=scheduler,
+            _ai_pipeline=ai,
+            _resume_ai_when_active=False,
+            full_view=SimpleNamespace(video_player=SimpleNamespace(pause=Mock())),
+        )
+
+        Workspace.set_workspace_active(workspace, False)
+
+        scheduler.abandon_preview_decode_work.assert_called_once_with()
+        scheduler.cancel_pending.assert_called_once_with()
+        ai.shutdown.assert_called_once_with()
+        self.assertIsNone(workspace._ai_pipeline)
+        self.assertTrue(workspace._resume_ai_when_active)
 
     def test_ai_waits_until_cached_previews_reach_the_ui(self) -> None:
         first = Path("/photos/first.jpg")

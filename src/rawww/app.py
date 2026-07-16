@@ -33,7 +33,7 @@ from typing import Callable
 from send2trash import send2trash
 
 from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
-from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
+from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -89,8 +89,11 @@ from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, 
 from .launch import target_from_argv
 from .runtime_paths import PORTABLE, data_path, filesystem_name_key, filesystem_path_key, work_path
 from .single_instance import SingleInstance
+from .task_lifecycle import retire_executor, wait_for_retired_executors
 from .telemetry import TelemetryClient
 from .subprocess_utils import no_window_kwargs
+from .windows_shell_menu import show_file_context_menu
+from .windows_activation import activate_foreground_window
 from . import theme
 from .theme import (
     apply_theme,
@@ -133,7 +136,7 @@ SERIES_ROLE = DETAIL_ROLE + 1
 CURRENT_DECODE_WORKERS = 2
 BACKGROUND_DECODE_WORKERS = 3
 VISIBLE_THUMB_DECODE_WORKERS = 1
-MAX_PENDING_THUMBS = 2
+MAX_PENDING_THUMBS = 3
 VISIBLE_THUMB_LOOKUP_WORKERS = 2
 MAX_VISIBLE_THUMB_PENDING = 1
 POPULATE_BATCH = 48
@@ -272,6 +275,7 @@ class DecodeBridge(QObject):
     directoryScanned = Signal(object, Path, object)
     metadataUpdated = Signal(object)
     xmpWritten = Signal(object)
+    schedulerFinished = Signal(object)
 
 
 def _write_xmp_task(path: Path, detail: dict, face_sets: list[dict], replacements: dict[str, str]) -> None:
@@ -463,6 +467,7 @@ class PhotoGrid(QListWidget):
     deleteRequested = Signal(bool)   # нажат ли Shift
     pathsDropped = Signal(object, object, object)   # пути, пункт назначения, действие
     orderDropped = Signal(object, object)  # переносимые пути, путь перед которым их вставить
+    contextRequested = Signal(object, object)  # путь карточки, глобальная позиция меню
 
     def __init__(self) -> None:
         super().__init__()
@@ -491,6 +496,8 @@ class PhotoGrid(QListWidget):
         self.setSpacing(0)
         self.setItemDelegate(PhotoCardDelegate(self))
         self.itemActivated.connect(self._emit_open)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._emit_context_request)
         self.verticalScrollBar().rangeChanged.connect(self._queue_card_size_update)
         self._update_card_size()
 
@@ -508,6 +515,22 @@ class PhotoGrid(QListWidget):
         path = item.data(Qt.ItemDataRole.UserRole)
         if path:
             self.openRequested.emit(Path(path))
+
+    def _emit_context_request(self, position: QPoint) -> None:
+        """Выбирает карточку под курсором и передаёт построение меню владельцу."""
+        item = self.itemAt(position)
+        if item is None:
+            return
+        if not item.isSelected():
+            self.clearSelection()
+            item.setSelected(True)
+            self.setCurrentItem(item)
+        value = item.data(Qt.ItemDataRole.UserRole)
+        if value:
+            self.contextRequested.emit(
+                Path(value),
+                self.viewport().mapToGlobal(position),
+            )
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         """Разбирает клики по интерактивным областям карточки до обычного выбора элемента."""
@@ -3238,6 +3261,12 @@ class Workspace(QMainWindow):
         self.directory_scan_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_load_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_flush_executor = ThreadPoolExecutor(max_workers=1)
+        self._preview_cache_write_buffer: dict[
+            tuple[int, Path, int], tuple[FolderCache, PixelImage, int]
+        ] = {}
+        self.preview_cache_write_timer = QTimer(self)
+        self.preview_cache_write_timer.setSingleShot(True)
+        self.preview_cache_write_timer.timeout.connect(self._drain_preview_cache_writes)
         self.cache_maintenance_executor = ThreadPoolExecutor(max_workers=1)
         self.xmp_executor = ThreadPoolExecutor(max_workers=1)
         self.bridge = DecodeBridge()
@@ -3279,6 +3308,7 @@ class Workspace(QMainWindow):
             visible_thumb_workers=VISIBLE_THUMB_DECODE_WORKERS,
             visible_thumb_lookup_workers=VISIBLE_THUMB_LOOKUP_WORKERS,
         )
+        self.bridge.schedulerFinished.connect(self._on_scheduler_finished)
         self.items_by_path: dict[Path, QListWidgetItem] = {}
         self.all_paths: list[Path] = []
         self._custom_order: list[str] = []
@@ -3373,6 +3403,7 @@ class Workspace(QMainWindow):
         self.folder_cache: FolderCache | None = None
         self._ai_pipeline = None
         self._metadata_pipeline = None
+        self._resume_ai_when_active = False
         self.ai_progress_total = 0
         self.preview_progress_total = 0
         self._auto_ai_generation = -1
@@ -3459,6 +3490,18 @@ class Workspace(QMainWindow):
         QTimer.singleShot(5_000, self._start_cache_maintenance)
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.begin_shutdown()
+        super().closeEvent(event)
+
+    def begin_shutdown(self) -> None:
+        """Запрещает новую работу вкладки, не блокируя закрытие интерфейса.
+
+        Все очереди регистрируются в общей финальной фазе. Поэтому закрытая
+        вкладка исчезает сразу, а при выходе из приложения уже начатые короткие
+        операции всё равно будут штатно завершены.
+        """
+        if self.closing:
+            return
         self.closing = True
         self._set_taskbar_progress(0, 0)
         self._taskbar_progress.close()
@@ -3472,21 +3515,28 @@ class Workspace(QMainWindow):
         self.ai_progress_timer.stop()
         self.folder_change_timer.stop()
         self.volume_refresh_timer.stop()
+        self.preview_cache_write_timer.stop()
+        self.video_thumbnailer.cancel()
+        self.full_view.stop_video()
+        self.full_view.stop_audio()
+        self.grid_audio_player.stop()
         self._flush_folder_cache(wait=False, close=True)
         self._detach_shotsync_syncer()
+        self.shotsync_client.shutdown()
         self.folder_cache = None
         self.cache_ready = False
         self.scheduler.shutdown()
-        self.directory_scan_executor.shutdown(wait=False, cancel_futures=True)
-        self.cache_load_executor.shutdown(wait=False, cancel_futures=True)
-        self.cache_flush_executor.shutdown(wait=False, cancel_futures=False)
-        self.cache_maintenance_executor.shutdown(wait=False, cancel_futures=True)
-        self.xmp_executor.shutdown(wait=False, cancel_futures=True)
+        retire_executor(self.directory_scan_executor)
+        retire_executor(self.cache_load_executor)
+        retire_executor(self.cache_flush_executor, cancel_futures=False)
+        retire_executor(self.cache_maintenance_executor)
+        # XMP отражает явные пользовательские изменения и не является
+        # производным кэшем, поэтому очередь дописывается полностью.
+        retire_executor(self.xmp_executor, cancel_futures=False)
         if self._metadata_pipeline is not None:
             self._metadata_pipeline.shutdown()
         if self._ai_pipeline is not None:
             self._ai_pipeline.shutdown()
-        super().closeEvent(event)
 
     @property
     def ai_pipeline(self):
@@ -3536,6 +3586,12 @@ class Workspace(QMainWindow):
             self.grid_full_request_timer.stop()
             self.full_request_timer.stop()
             self.pending_full_request = None
+            self.scheduler.abandon_preview_decode_work()
+            if self._ai_pipeline is not None and self._ai_pipeline.pending_count() > 0:
+                self._resume_ai_when_active = True
+                self._ai_pipeline.shutdown()
+                self._ai_pipeline = None
+                self.ai_progress_timer.stop()
             self.pending_grid_full_request = None
             self.scheduler.cancel_pending()
             self.full_view.video_player.pause()
@@ -3545,6 +3601,9 @@ class Workspace(QMainWindow):
         self._schedule_visible_thumb_priority()
         if self.thumb_priority or self.thumb_index < len(self.paths):
             self.thumb_timer.start()
+        if self._resume_ai_when_active:
+            self._resume_ai_when_active = False
+            self._start_ai_analysis()
 
     def _video_playback_changed(self, playing: bool) -> None:
         """Приостанавливает декодирование сетки, пока воспроизводится видео."""
@@ -3644,6 +3703,7 @@ class Workspace(QMainWindow):
         self.grid._update_card_size()
         self.grid.cardSizeChanged.connect(self._remember_thumbnail_size)
         self.grid.openRequested.connect(self.open_full)
+        self.grid.contextRequested.connect(self._show_grid_context_menu)
         self.grid.audioRequested.connect(self._open_grid_audio)
         self.grid.audioHoverChanged.connect(self._set_grid_audio_hover)
         self.grid.orderDropped.connect(self._save_custom_grid_order)
@@ -4585,6 +4645,17 @@ class Workspace(QMainWindow):
             return
         self.dir_tree.setCurrentIndex(index)
         menu = QMenu(self.dir_tree)
+        self._populate_folder_context_menu(menu, path)
+        menu.exec(self.dir_tree.viewport().mapToGlobal(position))
+
+    def _populate_folder_context_menu(self, menu: QMenu, path: Path) -> None:
+        """Добавляет одинаковый набор действий папки для дерева и сетки."""
+        open_tab = menu.addAction("Открыть в новой вкладке")
+        open_tab.setIcon(_fomantic_icon("folder", 13))
+        open_tab.triggered.connect(
+            lambda _checked=False, target=path: self.openFolderRequested.emit(target)
+        )
+        menu.addSeparator()
         create = menu.addAction("Создать папку")
         create.setIcon(_fomantic_icon("folder-plus", 14))
         create.triggered.connect(
@@ -4602,7 +4673,57 @@ class Workspace(QMainWindow):
         delete = menu.addAction("Удалить")
         delete.setIcon(_fomantic_icon("trash", 13))
         delete.triggered.connect(lambda _checked=False, target=path: self._delete_paths([target], permanent=False))
-        menu.exec(self.dir_tree.viewport().mapToGlobal(position))
+
+    def _show_grid_context_menu(self, path: Path, global_position: QPoint) -> None:
+        """Показывает меню папки или нативное меню файла для карточки сетки."""
+        path = Path(path)
+        if path.is_dir():
+            menu = QMenu(self.grid)
+            self._populate_folder_context_menu(menu, path)
+            menu.exec(global_position)
+            return
+        if not path.is_file():
+            return
+
+        if sys.platform == "win32":
+            try:
+                show_file_context_menu(
+                    path,
+                    int(self.window().winId()),
+                    global_position.x(),
+                    global_position.y(),
+                )
+                return
+            except Exception:
+                # Shell-расширения и исчезнувшие файлы не должны ломать сетку.
+                pass
+
+        menu = QMenu(self.grid)
+        open_file = menu.addAction("Открыть")
+        open_file.triggered.connect(
+            lambda _checked=False, target=path: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(target))
+            )
+        )
+        reveal = menu.addAction("Показать в папке")
+        reveal.triggered.connect(
+            lambda _checked=False, target=path: self._reveal_file_in_system(target)
+        )
+        menu.exec(global_position)
+
+    @staticmethod
+    def _reveal_file_in_system(path: Path) -> None:
+        """Выделяет файл в Проводнике либо открывает его родительскую папку."""
+        try:
+            if sys.platform == "win32":
+                subprocess.Popen(
+                    ["explorer.exe", f"/select,{path}"],
+                    **no_window_kwargs(),
+                )
+            else:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+        except OSError:
+            return
 
     def _delete_permanently_for_shortcut(self, shift_pressed: bool) -> bool:
         """Определяет действие Delete, сохраняя Shift обратным переключателем."""
@@ -6068,6 +6189,8 @@ class Workspace(QMainWindow):
         Результаты старых задач защищены поколением запроса: если пользователь
         уже ушёл в другую папку, запоздавший ответ тихо выбрасывается.
         """
+        if self.closing:
+            return
         switching_directory = directory != self.current_dir
         if hasattr(self, "grid_content_stack"):
             self.grid_content_stack.setCurrentWidget(self.grid)
@@ -6086,6 +6209,13 @@ class Workspace(QMainWindow):
         self.pending_grid_full_request = None
         if switching_directory:
             self._abandon_preview_decode_work()
+        if self._ai_pipeline is not None and self._ai_pipeline.pending_count() > 0:
+            self._ai_pipeline.shutdown()
+            self._ai_pipeline = None
+            self._resume_ai_when_active = False
+        if self._metadata_pipeline is not None:
+            self._metadata_pipeline.shutdown()
+            self._metadata_pipeline = None
         self.video_thumbnailer.cancel()
         self.decode_cache.clear()
         self.populate_timer.stop()
@@ -6104,6 +6234,7 @@ class Workspace(QMainWindow):
             self._refresh_status_panel()
         self.cache_load_generation += 1
         self.directory_generation += 1
+        self._rotate_folder_request_executors()
         self._flush_folder_cache(wait=False, close=True)
         self._detach_shotsync_syncer()
         self.folder_cache = None
@@ -6141,6 +6272,13 @@ class Workspace(QMainWindow):
         request = self.workspace_state.begin_directory(directory)
         future = self.directory_scan_executor.submit(_scan_directory, directory)
         future.add_done_callback(lambda done, r=request, d=directory: self._directory_scanned(r, d, done))
+
+    def _rotate_folder_request_executors(self) -> None:
+        """Даёт новому запросу папки свежие потоки без ожидания старого диска."""
+        retire_executor(self.directory_scan_executor)
+        retire_executor(self.cache_load_executor)
+        self.directory_scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="folder-scan")
+        self.cache_load_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="folder-cache")
 
     @staticmethod
     def _folder_settings_prefix(directory: Path) -> str:
@@ -6319,7 +6457,9 @@ class Workspace(QMainWindow):
                 cache,
                 analysis_paths,
             )
-            future.add_done_callback(lambda done, g=generation: self._cache_loaded(g, done))
+            future.add_done_callback(
+                lambda done, g=generation, target=cache: self._cache_loaded(g, target, done)
+            )
         else:
             self.folder_cache = None
             self.cache_ready = True
@@ -7263,11 +7403,15 @@ class Workspace(QMainWindow):
         while self.thumb_priority:
             path = self.thumb_priority.popleft()
             self.thumb_priority_set.discard(path)
+            if not path.is_file() or not is_supported_media(path):
+                continue
             if (path, THUMB_SIZE) not in self.pending:
                 return path, True
         while self.thumb_index < len(self.paths):
             path = self.paths[self.thumb_index]
             self.thumb_index += 1
+            if not path.is_file() or not is_supported_media(path):
+                continue
             item = self.items_by_path.get(path)
             if item is not None and item.data(PREVIEW_ROLE) is not None:
                 continue
@@ -7276,8 +7420,9 @@ class Workspace(QMainWindow):
             return path, False
         return None
 
-    def _cache_loaded(self, generation: int, future: Future) -> None:
-        if self.closing:
+    def _cache_loaded(self, generation: int, cache: FolderCache, future: Future) -> None:
+        if self.closing or generation != self.cache_load_generation:
+            cache.close(flush=False)
             return
         self.bridge.cacheLoaded.emit(generation, future)
 
@@ -7960,6 +8105,8 @@ class Workspace(QMainWindow):
         full_priority: bool,
         visible_priority: bool = False,
     ) -> None:
+        if self.closing or not path.is_file() or not is_supported_image(path):
+            return
         self.scheduler.submit_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
 
     def _submit_video_thumbnail(self, path: Path, *, visible_priority: bool) -> None:
@@ -8001,12 +8148,6 @@ class Workspace(QMainWindow):
         if self.closing or not self.workspace_active or preview.isNull() or path.parent != self.current_dir:
             return
         preview = preview.scaled(THUMB_SIZE, THUMB_SIZE, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        if self.folder_cache is not None and self.cache_ready:
-            rgba = preview.convertToFormat(QImage.Format.Format_RGBA8888)
-            self.folder_cache.store_pixels(
-                PixelImage(path=path, pixels=bytes(rgba.bits()), width=rgba.width(), height=rgba.height()),
-                THUMB_SIZE,
-            )
         self._thumbnail_cache_put(path, preview)
         item = self.items_by_path.get(path)
         if item is not None:
@@ -8014,6 +8155,13 @@ class Workspace(QMainWindow):
             self.grid.update(self.grid.visualItemRect(item))
         self.full_view.update_preview(path, preview)
         self.full_view.set_video_preview(path, preview)
+        if self.folder_cache is not None and self.cache_ready:
+            rgba = preview.convertToFormat(QImage.Format.Format_RGBA8888)
+            self.queue_preview_cache_write(
+                self.folder_cache,
+                PixelImage(path=path, pixels=bytes(rgba.bits()), width=rgba.width(), height=rgba.height()),
+                THUMB_SIZE,
+            )
         self.preview_finished_paths.add(path)
         self._refresh_status_panel()
 
@@ -8027,6 +8175,10 @@ class Workspace(QMainWindow):
         if failed_path == self.current_path:
             self.thumb_timer.start()
         self._refresh_status_panel()
+
+    def _on_scheduler_finished(self, payload: object) -> None:
+        """Принимает bookkeeping декодера в главном потоке Qt."""
+        self.scheduler.handle_completion(payload)
 
     def _open_selected(self) -> None:
         item = self.grid.currentItem()
@@ -8136,6 +8288,10 @@ class Workspace(QMainWindow):
         self._refresh_status_panel()
         if hasattr(self, "meta_bar"):
             self.meta_bar.set_metadata(self.photo_details.get(path.name, {}))
+        if not path.is_file() or not is_supported_image(path):
+            self.pending_grid_full_request = None
+            self.grid_full_request_timer.stop()
+            return
         self.pending_grid_full_request = path
         self.grid_full_request_timer.start(70)
 
@@ -8532,9 +8688,38 @@ class Workspace(QMainWindow):
         cache = self.folder_cache
         if cache is None:
             return
+        self._drain_preview_cache_writes(cache)
         future = self.cache_flush_executor.submit(_flush_and_close, cache, close)
         if wait:
             future.result()
+
+    def queue_preview_cache_write(
+        self, cache: FolderCache, pixel: PixelImage, max_size: int
+    ) -> None:
+        """Записывает превью после показа, сохраняя порядок с закрытием кэша."""
+        if self.closing:
+            return
+        key = (id(cache), pixel.path, max_size)
+        self._preview_cache_write_buffer[key] = (cache, pixel, max_size)
+        if not self.preview_cache_write_timer.isActive():
+            self.preview_cache_write_timer.start(120)
+
+    def _drain_preview_cache_writes(self, only_cache: FolderCache | None = None) -> None:
+        """Передаёт накопленные превью пакетами в последовательную очередь SQLite."""
+        grouped: dict[FolderCache, list[tuple[PixelImage, int]]] = {}
+        for key, (cache, pixel, max_size) in list(self._preview_cache_write_buffer.items()):
+            if only_cache is not None and cache is not only_cache:
+                continue
+            self._preview_cache_write_buffer.pop(key, None)
+            grouped.setdefault(cache, []).append((pixel, max_size))
+        if not self._preview_cache_write_buffer:
+            self.preview_cache_write_timer.stop()
+        for cache, previews in grouped.items():
+            try:
+                self.cache_flush_executor.submit(_store_cache_pixels, cache, previews)
+            except RuntimeError:
+                if not self.closing:
+                    raise
 
     def _initial_directory(self) -> Path:
         saved = self.settings.value("last_directory", "", str)
@@ -8564,6 +8749,8 @@ class MainWindow(QMainWindow):
         self._single_photo_was_minimized = False
         self._single_photo_was_active = True
         self._single_photo_closes_window = False
+        self._closing = False
+        self._background_shutdown_done = False
         self._update_check_running = False
         self._update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="update-check")
         self.setWindowTitle(APP_NAME)
@@ -8661,6 +8848,8 @@ class MainWindow(QMainWindow):
 
         def finish() -> None:
             self._update_check_running = False
+            if self._closing:
+                return
             try:
                 payload = future.result()
                 release = payload["latest"]
@@ -8678,6 +8867,8 @@ class MainWindow(QMainWindow):
                     )
 
         def wait_for_finish() -> None:
+            if self._closing:
+                return
             if future.done():
                 finish()
             else:
@@ -8741,6 +8932,9 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+        native_handle = getattr(self, "winId", None)
+        if native_handle is not None:
+            activate_foreground_window(int(native_handle()))
 
     def _present_single_photo(
         self,
@@ -9019,6 +9213,10 @@ class MainWindow(QMainWindow):
             self._update_tab_geometry()
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._closing:
+            super().closeEvent(event)
+            return
+        self._closing = True
         directories = [
             str(workspace.current_dir)
             for index in range(self.workspace_stack.count())
@@ -9035,11 +9233,29 @@ class MainWindow(QMainWindow):
             and workspace.shotsync_active
         ]
         self.settings.setValue("shotsync_workspaces", shotsync_paths)
+        self.shutdown_background_work()
+        super().closeEvent(event)
+
+    def shutdown_background_work(self) -> None:
+        """Финализирует фон как при закрытии окна, так и при ``QApplication.quit``."""
+        if self._background_shutdown_done:
+            return
+        self._background_shutdown_done = True
+        self._closing = True
+        workspaces = []
         for index in range(self.workspace_stack.count()):
             workspace = self.workspace_stack.widget(index)
-            if workspace is not None:
-                workspace.close()
-        super().closeEvent(event)
+            if isinstance(workspace, Workspace):
+                workspaces.append(workspace)
+                workspace.begin_shutdown()
+        # После общего запрета новой работы можно безопасно закрыть дочерние
+        # окна и дождаться всех очередей, включая оставшиеся от прежних папок.
+        for workspace in workspaces:
+            workspace.close()
+        if workspaces:
+            workspaces[0].shotsync.shutdown()
+        retire_executor(self._update_executor)
+        wait_for_retired_executors()
 
     def _toggle_maximized(self) -> None:
         self.showNormal() if self.isMaximized() else self.showMaximized()
@@ -9261,11 +9477,25 @@ def _macos_volume_is_removable(path: Path) -> bool:
 
 
 def _scan_directory(directory: Path) -> list[Path]:
+    """Возвращает доступные папки и поддерживаемые файлы.
+
+    Права на отдельный объект могут измениться прямо во время обхода. Такой
+    объект не должен отменять показ всей папки или доходить до Pillow. Файл
+    открывается только для проверки прав: само чтение и декодирование остаются
+    в соответствующих фоновых очередях.
+    """
     try:
         entries = []
         for entry in directory.iterdir():
-            if entry.is_dir() or (entry.is_file() and is_supported_media(entry)):
-                entries.append(entry)
+            try:
+                if entry.is_dir():
+                    entries.append(entry)
+                elif entry.is_file() and is_supported_media(entry):
+                    with entry.open("rb"):
+                        pass
+                    entries.append(entry)
+            except OSError:
+                continue
         return entries
     except OSError:
         return []
@@ -9296,6 +9526,16 @@ def _flush_and_close(cache: FolderCache, close: bool) -> None:
     finally:
         if close:
             cache.close(flush=False)
+
+
+def _store_cache_pixels(
+    cache: FolderCache, previews: list[tuple[PixelImage, int]]
+) -> None:
+    """Кодирует и сохраняет превью; повреждение кэша не отменяет показ файла."""
+    try:
+        cache.store_pixels_batch(previews)
+    except Exception:
+        return
 
 
 class _StartupWindowTrace(QObject):
@@ -9394,7 +9634,9 @@ def main() -> None:
     single_instance.target_received.connect(window.open_external_target)
     telemetry = TelemetryClient(window.settings, app)
     telemetry.start()
+    app.aboutToQuit.connect(window.shutdown_background_work)
     app.aboutToQuit.connect(telemetry.stop)
+    app.aboutToQuit.connect(wait_for_retired_executors)
     if startup_trace is not None:
         startup_trace.snapshot("main-window-constructed")
     screenshot_path = os.environ.get("RAWWW_CAPTURE_SCREENSHOT")

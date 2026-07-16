@@ -20,6 +20,7 @@ from PySide6.QtCore import QSettings, QTimer
 
 from .error_log import error_log_path
 from .version import __version__ as APP_VERSION
+from .task_lifecycle import retire_executor
 
 
 TELEMETRY_URL = "https://shotsync.ru/api/ctrlka/telemetry/"
@@ -65,7 +66,7 @@ class TelemetryClient:
         self.timer.stop()
         if self.enabled:
             self._append_pending(self._session_payload())
-        self.executor.shutdown(wait=False, cancel_futures=False)
+        retire_executor(self.executor, cancel_futures=False)
 
     def submit_snapshot(self) -> None:
         """Передаёт накопленные сессии в единственном фоновом потоке."""
