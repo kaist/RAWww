@@ -9278,7 +9278,13 @@ def main() -> None:
     single_instance.target_received.connect(window.open_external_target)
     if startup_trace is not None:
         startup_trace.snapshot("main-window-constructed")
-    if getattr(window, "_fast_full_view", False):
+    screenshot_path = os.environ.get("RAWWW_CAPTURE_SCREENSHOT")
+    if screenshot_path:
+        # Offscreen-платформа Qt часто сообщает маленький виртуальный экран.
+        # Для CI фиксируем кадр, чтобы артефакты разных runner были сопоставимы.
+        window.setGeometry(0, 0, 1920, 1080)
+        window.show()
+    elif getattr(window, "_fast_full_view", False):
         window.showFullScreen()
         workspace = window.workspace_stack.currentWidget()
         if isinstance(workspace, Workspace):
@@ -9288,7 +9294,6 @@ def main() -> None:
         if screen is not None:
             window.setGeometry(screen.availableGeometry())
         window.showMaximized()
-    screenshot_path = os.environ.get("RAWWW_CAPTURE_SCREENSHOT")
     if screenshot_path:
         def capture_screenshot() -> None:
             """Сохраняет виджет после первой отрисовки для проверки собранного приложения."""
