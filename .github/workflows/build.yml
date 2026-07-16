@@ -230,7 +230,7 @@ jobs:
             --title "Контролька $RELEASE_TAG" \
             --generate-notes \
             release-assets/ctrlka-windows/ctrlka-windows-portable.zip \
-            release-assets/ctrlka-windows/ctrlka-windows-setup.exe \
+            release-assets/ctrlka-windows/installer/ctrlka-windows-setup.exe \
             release-assets/ctrlka-macos-arm64/ctrlka-macos-arm64.dmg \
             release-assets/ctrlka-macos-intel/ctrlka-macos-intel.dmg \
             release-assets/ctrlka-linux/ctrlka-linux.AppImage
