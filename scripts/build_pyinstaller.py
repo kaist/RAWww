@@ -178,6 +178,22 @@ def _bake_build_version() -> None:
     print(f"Baked build version: {version}")
 
 
+def _linux_shared_library(soname: str) -> Path:
+    """Возвращает путь к системной библиотеке Linux для явного включения в AppImage.
+
+    PyInstaller намеренно не всегда собирает системные графические библиотеки.
+    Для Qt это опасно: без EGL приложение не сможет даже создать offscreen-окно
+    на минимальной Linux-системе.
+    """
+    result = subprocess.run(["ldconfig", "-p"], capture_output=True, text=True, check=True)
+    for line in result.stdout.splitlines():
+        if line.lstrip().startswith(f"{soname} ") and " => " in line:
+            path = Path(line.rsplit(" => ", 1)[1])
+            if path.is_file():
+                return path
+    raise RuntimeError(f"Linux runtime library is missing: {soname}")
+
+
 def main() -> None:
     """Собирает дистрибутив, чистит лишние файлы и печатает сводку размера."""
     parser = argparse.ArgumentParser()
@@ -208,6 +224,9 @@ def main() -> None:
         ]
         if bundled_exiftool is not None:
             command.extend(("--add-data", f"{bundled_exiftool}{os.pathsep}data/tools"))
+        if sys.platform.startswith("linux"):
+            egl_library = _linux_shared_library("libEGL.so.1")
+            command.extend(("--add-binary", f"{egl_library}{os.pathsep}PySide6"))
         command.append("--console" if args.console else "--windowed")
         for module in EXCLUDED_QT_MODULES:
             command.extend(("--exclude-module", module))

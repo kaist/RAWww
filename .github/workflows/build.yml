@@ -54,7 +54,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential cpanminus libperl-dev zlib1g-dev
+          sudo apt-get install --yes build-essential cpanminus libegl1 libperl-dev zlib1g-dev
           perl_lib="$RUNNER_TEMP/exiftool-perl"
           if ! cpanm --notest --local-lib-contained "$perl_lib" PAR::Packer; then
             find "$HOME/.cpanm/work" -name build.log -type f -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \;
