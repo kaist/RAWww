@@ -21,6 +21,24 @@ EXIFTOOL_ROOT = ROOT / "src" / "rawww" / "tools" / "exiftool_files"
 EXIFTOOL_SCRIPT = EXIFTOOL_ROOT / "exiftool.pl"
 
 
+def _prepare_exiftool_library(output_directory: Path) -> Path:
+    """Готовит минимальный путь модулей без Windows-копий модулей Perl.
+
+    В архиве Windows-версии ExifTool лежит полный набор Perl-модулей. Передача
+    его целиком в PAR подменяет модули текущего Perl и ломает внутренний
+    загрузчик упаковщика. Самому ExifTool достаточно его пространства Image
+    и File::RandomAccess; остальные зависимости берёт Perl, которым собирается
+    автономный исполняемый файл.
+    """
+    source_library = EXIFTOOL_ROOT / "lib"
+    library = output_directory / "exiftool-build-lib"
+    shutil.rmtree(library, ignore_errors=True)
+    (library / "File").mkdir(parents=True)
+    shutil.copytree(source_library / "Image", library / "Image")
+    shutil.copy2(source_library / "File" / "RandomAccess.pm", library / "File")
+    return library
+
+
 def build_exiftool(output_directory: Path) -> Path | None:
     """Создаёт sidecar-файл ExifTool для текущей Unix-платформы и проверяет его."""
     if sys.platform == "win32":
@@ -36,11 +54,11 @@ def build_exiftool(output_directory: Path) -> Path | None:
 
     output_directory.mkdir(parents=True, exist_ok=True)
     executable = output_directory / "exiftool"
+    library = _prepare_exiftool_library(output_directory)
     command = [
         packer,
         "--output", str(executable),
-        "--lib", str(EXIFTOOL_ROOT / "lib"),
-        "--addfile", f"{EXIFTOOL_ROOT / 'lib'};lib",
+        "--lib", str(library),
         str(EXIFTOOL_SCRIPT),
     ]
     subprocess.run(command, cwd=EXIFTOOL_ROOT, check=True)

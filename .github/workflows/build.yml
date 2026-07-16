@@ -98,7 +98,8 @@ jobs:
 
       - name: Build macOS application
         if: runner.os == 'macOS'
-        run: uv run python scripts/build_pyinstaller.py
+        # PAR::Packer создаёт вложенный загрузчик и требует управляющий терминал.
+        run: script -q /dev/null uv run python scripts/build_pyinstaller.py
 
       - name: Smoke-test macOS application
         if: runner.os == 'macOS'
@@ -126,7 +127,8 @@ jobs:
 
       - name: Build Linux application
         if: runner.os == 'Linux'
-        run: uv run python scripts/build_pyinstaller.py
+        # Как и на macOS, запускаем упаковщик ExifTool через pseudo-TTY.
+        run: script --quiet --return --command 'uv run python scripts/build_pyinstaller.py' /dev/null
 
       - name: Smoke-test Linux application
         if: runner.os == 'Linux'
