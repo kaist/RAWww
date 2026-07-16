@@ -2991,6 +2991,7 @@ class ChromeTabBar(QTabBar):
     def __init__(self) -> None:
         super().__init__()
         self._tab_width = 220
+        self._close_press_index: int | None = None
         self.setAcceptDrops(True)
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
@@ -3061,13 +3062,24 @@ class ChromeTabBar(QTabBar):
                 painter.drawLine(close_rect.right() - 3, close_rect.top() + 3, close_rect.left() + 3, close_rect.bottom() - 3)
         painter.end()
 
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+    def mousePressEvent(self, event) -> None:  # noqa: N802
         if self.count() > 1 and event.button() == Qt.MouseButton.LeftButton:
             for index in range(self.count()):
                 if self._close_rect(index).contains(event.position().toPoint()):
-                    self.closeRequested.emit(index)
+                    # Иначе базовый QTabBar активирует вкладку ещё до её закрытия.
+                    self._close_press_index = index
                     event.accept()
                     return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        close_index = self._close_press_index
+        self._close_press_index = None
+        if close_index is not None and event.button() == Qt.MouseButton.LeftButton:
+            if self._close_rect(close_index).contains(event.position().toPoint()):
+                self.closeRequested.emit(close_index)
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
     def _close_rect(self, index: int) -> QRect:

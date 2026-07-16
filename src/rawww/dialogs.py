@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication, QButtonGroup, QComboBox, QDialog, QD
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
-from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence, _uses_reserved_navigation_key
+from .hotkeys import FIXED_HOTKEYS, HOTKEY_DEFAULTS, _hotkey_sequence, _uses_reserved_navigation_key
 from .error_log import clear_error_log, read_error_log
 from .runtime_paths import filesystem_name_key
 from .shotsync_client import ShotSyncClient
@@ -70,7 +70,7 @@ class HelpDialog(QDialog):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        table = QTableWidget(len(HOTKEY_DEFAULTS), 2)
+        table = QTableWidget(len(HOTKEY_DEFAULTS) + len(FIXED_HOTKEYS), 2)
         table.setObjectName("helpHotkeysTable")
         table.setHorizontalHeaderLabels(("Действие", "Сочетание"))
         table.verticalHeader().hide()
@@ -83,6 +83,9 @@ class HelpDialog(QDialog):
             table.setItem(row, 0, QTableWidgetItem(label))
             sequence = _hotkey_sequence(settings, identifier)
             table.setItem(row, 1, QTableWidgetItem(sequence.toString() or "Не назначено"))
+        for row, (label, sequence) in enumerate(FIXED_HOTKEYS, start=len(HOTKEY_DEFAULTS)):
+            table.setItem(row, 0, QTableWidgetItem(label))
+            table.setItem(row, 1, QTableWidgetItem(sequence))
         layout.addWidget(table, 1)
 
         close = QPushButton("Закрыть")

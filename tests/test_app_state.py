@@ -14,9 +14,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt
 from PySide6.QtGui import QGuiApplication, QPalette
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QStackedWidget, QWidget
 
-from rawww.app import FullView, MainWindow, Workspace, _application_settings, _scan_directory
+from rawww.app import ChromeTabBar, FullView, MainWindow, Workspace, _application_settings, _scan_directory
+from rawww.hotkeys import FIXED_HOTKEYS
 from rawww.theme import apply_theme
 
 
@@ -114,6 +116,28 @@ class AppStateTests(unittest.TestCase):
         workspace.close()
         workspace.deleteLater()
         parent.deleteLater()
+
+    def test_close_button_does_not_activate_tab_before_requesting_close(self) -> None:
+        tabs = ChromeTabBar()
+        tabs.addTab("Первая")
+        tabs.addTab("Вторая")
+        tabs.setCurrentIndex(0)
+        closed = []
+        tabs.closeRequested.connect(closed.append)
+        tabs.resize(440, 38)
+        tabs.show()
+        self.app.processEvents()
+
+        QTest.mouseClick(tabs, Qt.MouseButton.LeftButton, pos=tabs._close_rect(1).center())
+
+        self.assertEqual(tabs.currentIndex(), 0)
+        self.assertEqual(closed, [1])
+        tabs.close()
+        tabs.deleteLater()
+
+    def test_fixed_hotkeys_include_workspace_navigation(self) -> None:
+        self.assertIn(("Следующая вкладка", "Ctrl+Right"), FIXED_HOTKEYS)
+        self.assertIn(("Предыдущая вкладка", "Ctrl+Left"), FIXED_HOTKEYS)
 
     def test_folder_context_menu_opens_a_separate_tab_first(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
