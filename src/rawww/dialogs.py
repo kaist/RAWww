@@ -7,18 +7,41 @@ from __future__ import annotations
 
 import re
 import sys
+from time import monotonic
 
 from PySide6.QtCore import QEvent, QKeyCombination, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QApplication, QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QRadioButton, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence, _uses_reserved_navigation_key
+from .runtime_paths import filesystem_name_key
 from .shotsync_client import ShotSyncClient
 from .theme import _fomantic_icon
 from .widgets import CodeCompletingLineEdit, CodeReplacementsEditor, SettingsCheckBox
 from .version import __version__ as APP_VERSION
+
+
+def _format_transfer_size(value: float) -> str:
+    """Показывает скорость без ложной точности в десятках знаков."""
+    for unit in ("Б", "КБ", "МБ", "ГБ"):
+        if value < 1024 or unit == "ГБ":
+            return f"{value:.1f} {unit}" if unit != "Б" else f"{value:.0f} {unit}"
+        value /= 1024
+    return "0 Б"
+
+
+def _format_transfer_eta(seconds: float) -> str:
+    """Форматирует оценку оставшегося времени для короткого статуса."""
+    seconds = round(seconds)
+    if seconds < 60:
+        return f"{seconds} с"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} мин {seconds:02d} с"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} ч {minutes:02d} мин"
 
 
 class HelpDialog(QDialog):
@@ -85,7 +108,10 @@ class SettingsDialog(QDialog):
         self.setObjectName("settingsDialog")
         self.setWindowTitle("Настройки")
         self.setModal(True)
-        self.resize(700, 540)
+        screen = QApplication.primaryScreen()
+        max_height = int(screen.availableGeometry().height() * 0.8) if screen else 540
+        self.setMaximumHeight(max_height)
+        self.resize(700, min(540, max_height))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 22, 24, 18)
@@ -97,12 +123,12 @@ class SettingsDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.setObjectName("settingsTabs")
-        tabs.addTab(self._behavior_tab(), "Поведение")
-        tabs.addTab(self._hotkeys_tab(), "Горячие клавиши")
+        tabs.addTab(self._scrollable_settings_tab(self._behavior_tab()), "Поведение")
+        tabs.addTab(self._scrollable_settings_tab(self._hotkeys_tab()), "Горячие клавиши")
         self.code_replacements_editor = CodeReplacementsEditor(client, settings, changed, login_requested)
-        tabs.addTab(self.code_replacements_editor, "Коды замен")
-        tabs.addTab(self._interface_tab(), "Интерфейс")
-        tabs.addTab(self._about_tab(), "О приложении")
+        tabs.addTab(self._scrollable_settings_tab(self.code_replacements_editor), "Коды замен")
+        tabs.addTab(self._scrollable_settings_tab(self._interface_tab()), "Интерфейс")
+        tabs.addTab(self._scrollable_settings_tab(self._about_tab()), "О приложении")
         layout.addWidget(tabs, 1)
 
         buttons = QHBoxLayout()
@@ -116,6 +142,15 @@ class SettingsDialog(QDialog):
         apply.clicked.connect(self._save)
         buttons.addWidget(apply)
         layout.addLayout(buttons)
+
+    @staticmethod
+    def _scrollable_settings_tab(content: QWidget) -> QScrollArea:
+        """Даёт длинной вкладке прокрутку, не увеличивая окно за пределы экрана."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(content)
+        return scroll
 
     def _behavior_tab(self) -> QWidget:
         """Собирает настройки поведения просмотра, файлов и фонового анализа."""
@@ -140,6 +175,13 @@ class SettingsDialog(QDialog):
             self.settings.value("behavior/delete_without_confirmation", False, bool)
         )
         layout.addWidget(self.delete_without_confirmation)
+        self.delete_permanently_on_del = SettingsCheckBox(
+            "Удалять сразу по DEL, без корзины (Shift+DEL — в корзину)"
+        )
+        self.delete_permanently_on_del.setChecked(
+            self.settings.value("behavior/delete_permanently_on_del", False, bool)
+        )
+        layout.addWidget(self.delete_permanently_on_del)
         self.auto_ai_after_previews = SettingsCheckBox("Всегда запускать AI после превью")
         self.auto_ai_after_previews.setChecked(
             self.settings.value("ai/auto_after_previews", False, bool)
@@ -213,7 +255,7 @@ class SettingsDialog(QDialog):
         editor_row.setSpacing(8)
         self.editor_executable = QLineEdit(self.settings.value("editor/executable", "", str))
         self.editor_executable.setObjectName("editorExecutable")
-        self.editor_executable.setPlaceholderText("Путь к исполняемому файлу")
+        self.editor_executable.setPlaceholderText("Путь к приложению или исполняемому файлу")
         self.editor_executable.setClearButtonEnabled(True)
         editor_row.addWidget(self.editor_executable, 1)
         self.choose_editor = QToolButton()
@@ -247,6 +289,10 @@ class SettingsDialog(QDialog):
             self.explorer_integration_button.setObjectName("settingsSecondaryButton")
             self.explorer_integration_button.clicked.connect(self._toggle_explorer_integration)
             integration_layout.addWidget(self.explorer_integration_button, 0, Qt.AlignmentFlag.AlignLeft)
+            self.default_app_button = QPushButton("Выбрать по умолчанию для JPG и RAW…")
+            self.default_app_button.setObjectName("settingsPrimaryButton")
+            self.default_app_button.clicked.connect(self._choose_default_photo_app)
+            integration_layout.addWidget(self.default_app_button, 0, Qt.AlignmentFlag.AlignLeft)
             layout.addWidget(integration_card)
             self._refresh_explorer_integration_button()
         layout.addStretch(1)
@@ -257,11 +303,17 @@ class SettingsDialog(QDialog):
         self.custom_editor_controls.setVisible(use_custom)
 
     def _choose_editor_executable(self) -> None:
+        if sys.platform == "win32":
+            file_filter = "Программы (*.exe);;Все файлы (*)"
+        elif sys.platform == "darwin":
+            file_filter = "Приложения (*.app);;Все файлы (*)"
+        else:
+            file_filter = "Исполняемые файлы (*);;Все файлы (*)"
         path, _ = QFileDialog.getOpenFileName(
             self,
             "Выберите редактор",
             self.editor_executable.text().strip(),
-            "Программы (*.exe);;Все файлы (*)",
+            file_filter,
         )
         if path:
             self.editor_executable.setText(path)
@@ -273,9 +325,24 @@ class SettingsDialog(QDialog):
             self.explorer_integration_button.setText("Доступно в собранном приложении")
             self.explorer_integration_button.setEnabled(False)
             self.explorer_integration_button.setToolTip("Соберите приложение, чтобы Проводник запускал ctrlka.exe.")
+            self.default_app_button.setEnabled(False)
+            self.default_app_button.setToolTip("Доступно в собранном приложении Контрольки.")
             return
         self.explorer_integration_button.setEnabled(True)
+        self.default_app_button.setEnabled(True)
         self.explorer_integration_button.setText("Удалить из Проводника" if is_registered() else "Добавить в Проводник")
+
+    def _choose_default_photo_app(self) -> None:
+        """Регистрирует поддерживаемые форматы и передаёт выбор приложению Windows."""
+        from .windows_integration import open_default_apps_settings, register_default_app
+
+        if not getattr(sys, "frozen", False):
+            return
+        try:
+            register_default_app(Path(sys.executable))
+            open_default_apps_settings()
+        except OSError as exc:
+            QMessageBox.warning(self, "Не удалось открыть настройки Windows", str(exc))
 
     def _toggle_explorer_integration(self) -> None:
         """Регистрирует или удаляет команды Контрольки в Проводнике Windows."""
@@ -381,25 +448,6 @@ class SettingsDialog(QDialog):
             self.settings.value("interface/show_full_view_mark_indicator", True, bool)
         )
         layout.addWidget(self.show_full_view_mark_indicator)
-        self.mark_indicator_position_control = QWidget()
-        position_layout = QHBoxLayout(self.mark_indicator_position_control)
-        position_layout.setContentsMargins(24, 0, 0, 0)
-        position_layout.setSpacing(8)
-        position_layout.addWidget(QLabel("Положение индикатора:"))
-        self.full_view_mark_indicator_position = QComboBox()
-        self.full_view_mark_indicator_position.addItem("Снизу справа", "bottom")
-        self.full_view_mark_indicator_position.addItem("Сверху справа", "top")
-        saved_position = self.settings.value(
-            "interface/full_view_mark_indicator_position", "bottom", str
-        )
-        self.full_view_mark_indicator_position.setCurrentIndex(
-            max(0, self.full_view_mark_indicator_position.findData(saved_position))
-        )
-        position_layout.addWidget(self.full_view_mark_indicator_position)
-        position_layout.addStretch(1)
-        self.mark_indicator_position_control.setEnabled(self.show_full_view_mark_indicator.isChecked())
-        self.show_full_view_mark_indicator.toggled.connect(self.mark_indicator_position_control.setEnabled)
-        layout.addWidget(self.mark_indicator_position_control)
         self.zoom_focus_face = SettingsCheckBox("Акцент на лице при зуме")
         self.zoom_focus_face.setChecked(
             self.settings.value("interface/zoom_focus_face", True, bool)
@@ -421,10 +469,24 @@ class SettingsDialog(QDialog):
         version = QLabel(f"Версия {APP_VERSION}")
         version.setObjectName("settingsHint")
         layout.addWidget(version)
-        description = QLabel("Рабочее пространство для просмотра, отбора и подготовки фотоматериалов.")
+        description = QLabel(
+            "Бесплатное приложение для быстрого просмотра и отбора RAW и JPG. "
+            "Оценки, цветовые метки, серии, поиск лиц, горячие клавиши и экспорт в XMP — "
+            "чтобы быстрее перейти от съёмки к готовой работе."
+        )
         description.setObjectName("settingsHint")
         description.setWordWrap(True)
         layout.addWidget(description)
+        author = QLabel(
+            "<b>Автор:</b> Игорь Заломский &lt;"
+            "<a href=\"mailto:igor@zalomskij.ru\">igor@zalomskij.ru</a>&gt;<br>"
+            "© 2026 Игорь Заломский. Лицензия GNU GPL v3 или более поздней версии.<br>"
+            "<a href=\"https://shotsync.ru/ctrlka\">Контролька на ShotSync</a>"
+        )
+        author.setObjectName("settingsHint")
+        author.setWordWrap(True)
+        author.setOpenExternalLinks(True)
+        layout.addWidget(author)
         self.auto_update_check = SettingsCheckBox("Автоматически проверять обновления при запуске")
         self.auto_update_check.setChecked(self.settings.value("updates/auto_check", True, bool))
         layout.addWidget(self.auto_update_check)
@@ -499,15 +561,12 @@ class SettingsDialog(QDialog):
                 assigned[text] = identifier
         self.settings.setValue("restore_workspaces", self.restore_workspaces.isChecked())
         self.settings.setValue("behavior/delete_without_confirmation", self.delete_without_confirmation.isChecked())
+        self.settings.setValue("behavior/delete_permanently_on_del", self.delete_permanently_on_del.isChecked())
         self.settings.setValue("ai/auto_after_previews", self.auto_ai_after_previews.isChecked())
         self.settings.setValue("interface/show_full_view_counter", self.show_full_view_counter.isChecked())
         self.settings.setValue(
             "interface/show_full_view_mark_indicator",
             self.show_full_view_mark_indicator.isChecked(),
-        )
-        self.settings.setValue(
-            "interface/full_view_mark_indicator_position",
-            self.full_view_mark_indicator_position.currentData(),
         )
         self.settings.setValue("interface/zoom_focus_face", self.zoom_focus_face.isChecked())
         self.settings.setValue("editor/use_custom_executable", self.custom_editor.isChecked())
@@ -611,14 +670,21 @@ class QuickTransferDialog(QDialog):
         if isinstance(destination, Path) and destination.is_dir():
             self.destinations.setEnabled(False)
             self.progress.setValue(0)
+            self._transfer_started = monotonic()
             self.progress.show()
             self._accepted(destination, update_recent, self._set_progress)
             self.accept()
 
-    def _set_progress(self, completed: int, total: int) -> None:
+    def _set_progress(self, completed: int, total: int, transferred: int = 0, total_bytes: int = 0) -> None:
         self.progress.setRange(0, max(1, total))
         self.progress.setValue(completed)
-        self.progress.setFormat(f"{completed} из {total}")
+        elapsed = max(0.001, monotonic() - self._transfer_started)
+        speed = transferred / elapsed
+        remaining = max(0, total_bytes - transferred)
+        eta = remaining / speed if speed > 0 and transferred else None
+        speed_text = _format_transfer_size(speed) + "/с" if transferred else "подготовка…"
+        eta_text = _format_transfer_eta(eta) if eta is not None else "—"
+        self.progress.setFormat(f"{completed} из {total} · {speed_text} · осталось {eta_text}")
         QApplication.processEvents()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
@@ -898,7 +964,7 @@ class BatchRenameDialog(QDialog):
                 errors.append(str(exc))
             candidates[path.name] = name
             self._after_list.addItem(name)
-        target_keys = [name.casefold() for name in candidates.values() if name != "—"]
+        target_keys = [filesystem_name_key(name) for name in candidates.values() if name != "—"]
         if len(target_keys) != len(set(target_keys)):
             errors.append("Шаблон создаёт одинаковые имена файлов.")
         for name in candidates.values():

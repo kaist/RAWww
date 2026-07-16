@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import atexit
 import json
+import shutil
 import subprocess
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Sequence
 
 from concurrent.futures import Future, ProcessPoolExecutor
 
@@ -31,7 +34,9 @@ EXIFTOOL_TAGS = [
     "-ShutterSpeedValue", "-ISO", "-FNumber", "-ApertureValue", "-FocalLength",
     "-Model", "-SerialNumber", "-InternalSerialNumber",
 ]
-BUNDLED_EXIFTOOL = data_path("tools") / "exiftool.exe"
+BUNDLED_WINDOWS_EXIFTOOL = data_path("tools") / "exiftool.exe"
+BUNDLED_UNIX_EXIFTOOL = data_path("tools") / "exiftool"
+BUNDLED_EXIFTOOL_SCRIPT = data_path("tools") / "exiftool_files" / "exiftool.pl"
 METADATA_BATCH_SIZE = 32
 
 
@@ -39,6 +44,27 @@ class ExifToolError(RuntimeError):
     """Ошибка протокола или ответа фонового процесса ExifTool."""
 
     pass
+
+
+def bundled_exiftool_command() -> list[str]:
+    """Возвращает команду ExifTool, которая поставляется вместе с приложением.
+
+    В Windows используем готовый EXE. В собранных macOS- и Linux-версиях это
+    sidecar с упакованным Perl runtime. Запуск из исходников сохраняет fallback
+    на Perl разработчика, чтобы не требовать локальную сборку для каждого теста.
+    """
+    executable = BUNDLED_WINDOWS_EXIFTOOL if sys.platform == "win32" else BUNDLED_UNIX_EXIFTOOL
+    if executable.is_file():
+        return [str(executable)]
+    if getattr(sys, "frozen", False):
+        raise ExifToolError(f"Bundled ExifTool is missing: {executable}")
+
+    if not BUNDLED_EXIFTOOL_SCRIPT.is_file():
+        raise ExifToolError(f"Bundled ExifTool is missing: {BUNDLED_EXIFTOOL_SCRIPT}")
+    perl = shutil.which("perl")
+    if perl:
+        return [perl, str(BUNDLED_EXIFTOOL_SCRIPT)]
+    raise ExifToolError("ExifTool source requires Perl when the application runs from sources")
 
 
 class ExifToolClient:
@@ -49,8 +75,8 @@ class ExifToolClient:
     быстро, эффектно и совершенно бесполезно.
     """
 
-    def __init__(self, executable: str | Path = BUNDLED_EXIFTOOL) -> None:
-        self.executable = str(executable)
+    def __init__(self, command: Sequence[str] | None = None) -> None:
+        self.command = list(command) if command is not None else bundled_exiftool_command()
         self.process: subprocess.Popen | None = None
         self.lock = threading.Lock()
 
@@ -86,10 +112,8 @@ class ExifToolClient:
         if self.process and self.process.poll() is None:
             return
         try:
-            if not Path(self.executable).is_file():
-                raise ExifToolError(f"Bundled ExifTool is missing: {self.executable}")
             self.process = subprocess.Popen(
-                [self.executable, "-stay_open", "True", "-@", "-", "-common_args", "-json", "-n", "-G1", "-fast2"],
+                [*self.command, "-stay_open", "True", "-@", "-", "-common_args", "-json", "-n", "-G1", "-fast2"],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, encoding="utf-8",
                 **no_window_kwargs(),

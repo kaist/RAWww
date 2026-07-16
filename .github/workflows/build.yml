@@ -37,6 +37,19 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
+      - name: Install ExifTool packer for macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install perl cpanminus
+          export PATH="$(brew --prefix perl)/bin:$PATH"
+          cpanm --notest PAR::Packer
+
+      - name: Install ExifTool packer for Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libpar-packer-perl
+
       - name: Build portable Windows application
         if: runner.os == 'Windows'
         run: uv run python scripts/build_pyinstaller.py --portable
@@ -48,20 +61,7 @@ jobs:
           if (!(Test-Path "dist/ctrlka/portable.flag")) {
             throw "Portable marker is missing"
           }
-          $process = Start-Process -FilePath "dist/ctrlka/ctrlka.exe" -PassThru
-          try {
-            Start-Sleep -Seconds 10
-            $process.Refresh()
-            if ($process.HasExited) {
-              throw "Portable application exited during startup with code $($process.ExitCode)"
-            }
-          }
-          finally {
-            $process.Refresh()
-            if (!$process.HasExited) {
-              Stop-Process -Id $process.Id -Force
-            }
-          }
+          uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka
 
       - name: Create Windows portable archive
         if: runner.os == 'Windows'
@@ -86,6 +86,10 @@ jobs:
         if: runner.os == 'macOS'
         run: uv run python scripts/build_pyinstaller.py
 
+      - name: Smoke-test macOS application
+        if: runner.os == 'macOS'
+        run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka
+
       - name: Build macOS DMG
         if: runner.os == 'macOS'
         shell: bash
@@ -109,6 +113,10 @@ jobs:
       - name: Build Linux application
         if: runner.os == 'Linux'
         run: uv run python scripts/build_pyinstaller.py
+
+      - name: Smoke-test Linux application
+        if: runner.os == 'Linux'
+        run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka
 
       - name: Build Linux AppImage
         if: runner.os == 'Linux'

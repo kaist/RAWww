@@ -1561,11 +1561,11 @@ def apply_theme(app: QApplication) -> None:
             font-size: 10px;
         }
         QWidget#viewerMeta QPushButton#viewerRating[ratingClear="true"] { border-left: 0; }
-        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="red"] { background: #7a5555; }
-        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="yellow"] { background: #7f7556; }
-        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="green"] { background: #5d7560; }
-        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="blue"] { background: #596b82; }
-        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="purple"] { background: #71607d; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="red"] { background: #765555; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="yellow"] { background: #7b7155; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="green"] { background: #5a705e; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="blue"] { background: #586a80; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="purple"] { background: #705f7b; }
         QWidget#viewerMeta QToolButton#viewerColor:hover {
             border-color: #181818;
         }
@@ -1575,11 +1575,11 @@ def apply_theme(app: QApplication) -> None:
             border-left: 1px solid #181818;
         }
         QWidget#viewerMeta QToolButton#viewerColor[colorLabel="none"]:hover { background: #696969; }
-        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="red"]:hover { background: #a96a6a; }
-        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="yellow"]:hover { background: #aa9a65; }
-        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="green"]:hover { background: #719477; }
-        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="blue"]:hover { background: #708caa; }
-        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="purple"]:hover { background: #9175a2; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="red"]:hover { background: #9a6565; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="yellow"]:hover { background: #9c8c5f; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="green"]:hover { background: #6d8d72; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="blue"]:hover { background: #6d87a2; }
+        QWidget#viewerMeta QToolButton#viewerColor[colorLabel="purple"]:hover { background: #896f9a; }
         QWidget#viewerMeta QToolButton#viewerColor:checked {
             border-color: #181818;
         }
@@ -1666,7 +1666,11 @@ def _color_swatch_icon(color: str | None) -> QIcon:
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setPen(QPen(QColor("#8c8c8c"), 1))
-    painter.setBrush(QColor(color) if color else QColor("#686868"))
+    palette = {
+        "red": "#c45b5b", "yellow": "#c39b2f", "green": "#459d63",
+        "blue": "#4a7fbc", "purple": "#9261af",
+    }
+    painter.setBrush(QColor(palette.get(color or "", color or "#686868")))
     painter.drawRect(QRect(3, 3, 12, 12))
     painter.end()
     return QIcon(pixmap)

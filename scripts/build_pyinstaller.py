@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from build_exiftool import build_exiftool
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist" / "ctrlka"
@@ -185,32 +187,37 @@ def main() -> None:
     args = parser.parse_args()
     _clean_previous_build()
     _bake_build_version()
-    command = [
-        sys.executable, "-m", "PyInstaller",
-        "--noconfirm", "--clean", "--onedir", "--name", "ctrlka",
-        "--icon", str(ROOT / "src" / "rawww" / "assets" / "ctrlka-icon.ico"),
-        "--contents-directory", "bin",
-        "--paths", str(ROOT / "src"),
-        "--distpath", str(ROOT / "dist"),
-        "--workpath", str(ROOT / "build" / "pyinstaller"),
-        "--specpath", str(ROOT / "build" / "pyinstaller"),
-        "--add-data", f"{ROOT / 'src' / 'rawww' / 'models'}{os.pathsep}data/models",
-        "--add-data", f"{ROOT / 'src' / 'rawww' / 'tools'}{os.pathsep}data/tools",
-        "--add-data", f"{ROOT / 'src' / 'rawww' / 'assets'}{os.pathsep}data/assets",
-        "--collect-binaries", "onnxruntime",
-        "--hidden-import", "rawpy",
-        "--hidden-import", "rawww._build_version",
-    ]
-    command.append("--console" if args.console else "--windowed")
-    for module in EXCLUDED_QT_MODULES:
-        command.extend(("--exclude-module", module))
-    if args.upx:
-        command.append("--noupx")
-    command.append(str(ROOT / "scripts" / "pyinstaller_entry.py"))
+    exiftool_runtime = ROOT / "build" / "exiftool-runtime"
     try:
+        bundled_exiftool = build_exiftool(exiftool_runtime)
+        command = [
+            sys.executable, "-m", "PyInstaller",
+            "--noconfirm", "--clean", "--onedir", "--name", "ctrlka",
+            "--icon", str(ROOT / "src" / "rawww" / "assets" / "ctrlka-icon.ico"),
+            "--contents-directory", "bin",
+            "--paths", str(ROOT / "src"),
+            "--distpath", str(ROOT / "dist"),
+            "--workpath", str(ROOT / "build" / "pyinstaller"),
+            "--specpath", str(ROOT / "build" / "pyinstaller"),
+            "--add-data", f"{ROOT / 'src' / 'rawww' / 'models'}{os.pathsep}data/models",
+            "--add-data", f"{ROOT / 'src' / 'rawww' / 'tools'}{os.pathsep}data/tools",
+            "--add-data", f"{ROOT / 'src' / 'rawww' / 'assets'}{os.pathsep}data/assets",
+            "--collect-binaries", "onnxruntime",
+            "--hidden-import", "rawpy",
+            "--hidden-import", "rawww._build_version",
+        ]
+        if bundled_exiftool is not None:
+            command.extend(("--add-data", f"{bundled_exiftool}{os.pathsep}data/tools"))
+        command.append("--console" if args.console else "--windowed")
+        for module in EXCLUDED_QT_MODULES:
+            command.extend(("--exclude-module", module))
+        if args.upx:
+            command.append("--noupx")
+        command.append(str(ROOT / "scripts" / "pyinstaller_entry.py"))
         subprocess.run(command, cwd=ROOT, check=True)
     finally:
         BUILD_VERSION_MODULE.unlink(missing_ok=True)
+        shutil.rmtree(exiftool_runtime, ignore_errors=True)
     _move_application_data(DIST)
     _prune_known_unused_qt_files(DIST)
     _prune_qt_translations(DIST)

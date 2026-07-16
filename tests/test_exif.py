@@ -10,9 +10,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import rawww.exif as exif
 from rawww.cache import FolderCache
 from rawww.app import Workspace
-from rawww.exif import MetadataPipeline, camera_details, extract_metadata_batch
+from rawww.exif import ExifToolError, MetadataPipeline, bundled_exiftool_command, camera_details, extract_metadata_batch
 
 
 class ExifTests(unittest.TestCase):
@@ -50,6 +51,21 @@ class ExifTests(unittest.TestCase):
             Workspace._camera_filter_key({"camera": {"model": "Camera X"}}),
             "model:Camera X",
         )
+
+    def test_windows_uses_bundled_exiftool_executable(self) -> None:
+        with patch("rawww.exif.sys.platform", "win32"):
+            command = bundled_exiftool_command()
+
+        self.assertEqual(Path(command[-1]).name, "exiftool.exe")
+
+    def test_frozen_unix_requires_its_own_exiftool(self) -> None:
+        with (
+            patch("rawww.exif.sys.platform", "darwin"),
+            patch("rawww.exif.BUNDLED_UNIX_EXIFTOOL", Path("missing-exiftool")),
+            patch.object(exif.sys, "frozen", True, create=True),
+        ):
+            with self.assertRaisesRegex(ExifToolError, "Bundled ExifTool"):
+                bundled_exiftool_command()
 
     def test_metadata_pipeline_is_independent_and_stores_results(self) -> None:
         with TemporaryDirectory() as tmp:

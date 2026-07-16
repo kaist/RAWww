@@ -86,7 +86,7 @@ from .shotsync_panel import ShotSyncPanel
 from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection_root
 from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, is_supported_image, is_supported_media, is_supported_video
 from .launch import target_from_argv
-from .runtime_paths import PORTABLE, data_path, work_path
+from .runtime_paths import PORTABLE, data_path, filesystem_name_key, filesystem_path_key, work_path
 from .single_instance import SingleInstance
 from .subprocess_utils import no_window_kwargs
 from . import theme
@@ -458,8 +458,9 @@ class PhotoGrid(QListWidget):
     seriesToggleRequested = Signal(Path)
     audioRequested = Signal(Path)
     audioHoverChanged = Signal(object)
-    deleteRequested = Signal(bool)   # постоянный
+    deleteRequested = Signal(bool)   # нажат ли Shift
     pathsDropped = Signal(object, object, object)   # пути, пункт назначения, действие
+    orderDropped = Signal(object, object)  # переносимые пути, путь перед которым их вставить
 
     def __init__(self) -> None:
         super().__init__()
@@ -574,6 +575,14 @@ class PhotoGrid(QListWidget):
             event.ignore()
             return
         item = self.itemAt(event.position().toPoint())
+        internal_reorder = event.mimeData().hasFormat("application/x-rawww-drag") and item is not None
+        if internal_reorder:
+            before = Path(item.data(Qt.ItemDataRole.UserRole))
+            dragged = set(paths)
+            if before not in dragged:
+                self.orderDropped.emit(paths, before)
+            event.acceptProposedAction()
+            return
         destination = None
         if item is not None:
             candidate = item.data(Qt.ItemDataRole.UserRole)
@@ -778,11 +787,11 @@ class PhotoCardDelegate(QStyledItemDelegate):
         series = index.data(SERIES_ROLE) or {}
         expanded_series = bool(series.get("expanded") or series.get("member"))
         label = str(detail.get("color_label") or "")
-        colors = {"red": "#a25555", "yellow": "#af9440", "green": "#4d9660", "blue": "#537fc2", "purple": "#9760b2"}
+        colors = {"red": "#c45b5b", "yellow": "#c39b2f", "green": "#459d63", "blue": "#4a7fbc", "purple": "#9261af"}
         tints = {
-            "red": QColor(170, 88, 88, 86), "yellow": QColor(181, 151, 63, 84),
-            "green": QColor(75, 154, 97, 82), "blue": QColor(83, 127, 194, 88),
-            "purple": QColor(151, 96, 178, 84),
+            "red": QColor(196, 91, 91, 118), "yellow": QColor(195, 155, 47, 118),
+            "green": QColor(69, 157, 99, 118), "blue": QColor(74, 127, 188, 118),
+            "purple": QColor(146, 97, 175, 118),
         }
 
         if expanded_series:
@@ -792,7 +801,7 @@ class PhotoCardDelegate(QStyledItemDelegate):
         painter.fillRect(rect, bg)
         if label in tints:
             painter.fillRect(rect, tints[label])
-        painter.setPen(QPen(QColor(colors.get(label, "#767676")), 1))
+        painter.setPen(QPen(QColor(colors.get(label, "#767676")), 2 if label else 1))
         painter.drawRect(rect.adjusted(1, 1, -1, -1))
         if selected:
             painter.setPen(QPen(QColor("#ececec"), 2))
@@ -1556,11 +1565,11 @@ class ViewerMetaBar(QWidget):
             )
         menu.addSeparator()
         color_options = (
-            ("red", "Красная метка", "#7a5555"),
-            ("yellow", "Жёлтая метка", "#7f7556"),
-            ("green", "Зелёная метка", "#5d7560"),
-            ("blue", "Синяя метка", "#596b82"),
-            ("purple", "Фиолетовая метка", "#71607d"),
+            ("red", "Красная метка", "#c45b5b"),
+            ("yellow", "Жёлтая метка", "#c39b2f"),
+            ("green", "Зелёная метка", "#459d63"),
+            ("blue", "Синяя метка", "#4a7fbc"),
+            ("purple", "Фиолетовая метка", "#9261af"),
         )
         for color, tooltip, swatch in color_options:
             selected = self._quick_mark == ("color_label", color)
@@ -2198,20 +2207,21 @@ class FullView(QFrame):
         detail = self._mark_detail
         rating = int(detail.get("rating") or 0)
         color_label = str(detail.get("color_label") or "")
+        has_mark = rating > 0 or bool(color_label)
         visible = (
             not self._is_video
             and not self.image_view.zoom_requested
+            and has_mark
             and _application_settings().value("interface/show_full_view_mark_indicator", True, bool)
         )
         if not visible:
             self.mark_indicator.hide()
             return
         colors = {
-            "red": "#a25555", "yellow": "#af9440", "green": "#4d9660",
-            "blue": "#537fc2", "purple": "#9760b2",
+            "red": "#c45b5b", "yellow": "#c39b2f", "green": "#459d63",
+            "blue": "#4a7fbc", "purple": "#9261af",
         }
         self.mark_indicator.setText(f"★ {rating}" if rating > 0 else "")
-        has_mark = rating > 0 or bool(color_label)
         self.mark_indicator.setToolTip(
             "Снять все метки" if has_mark else "Применить быструю метку (M)"
         )
@@ -2292,19 +2302,16 @@ class FullView(QFrame):
             return
         self.face_filter_chip.adjustSize()
         self.face_filter_chip.move(
-            max(8, self.media_panel.width() - self.face_filter_chip.width() - 12), 12
+            max(8, self.media_panel.width() - self.face_filter_chip.width() - self.mark_indicator.width() - 20), 12
         )
         self.face_filter_chip.raise_()
 
     def _position_mark_indicator(self) -> None:
         if not self.mark_indicator.isVisible():
             return
-        position = _application_settings().value(
-            "interface/full_view_mark_indicator_position", "bottom", str
-        )
         self.mark_indicator.move(
             max(8, self.media_panel.width() - self.mark_indicator.width() - 12),
-            12 if position == "top" else max(8, self.media_panel.height() - self.mark_indicator.height() - 12),
+            12,
         )
         self.mark_indicator.raise_()
 
@@ -2848,12 +2855,16 @@ class FilterComboBox(QComboBox):
 
     def showPopup(self) -> None:  # noqa: N802
         view = self.view()
-        visible_items = min(self.count(), self.maxVisibleItems())
+        # Верхняя панель не должна превращать короткие списки фильтров в
+        # прокручиваемое окошко: Qt по умолчанию ограничивает его десятью строками.
+        self.setMaxVisibleItems(self.count())
+        visible_items = self.count()
         content_height = sum(
             max(0, view.sizeHintForRow(index))
             for index in range(visible_items)
         )
         view.setMinimumHeight(content_height + 2 * view.frameWidth())
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         super().showPopup()
 
 
@@ -3263,6 +3274,7 @@ class Workspace(QMainWindow):
         )
         self.items_by_path: dict[Path, QListWidgetItem] = {}
         self.all_paths: list[Path] = []
+        self._custom_order: list[str] = []
         self.preview_paths: set[Path] = set()
         self.preview_finished_paths: set[Path] = set()
         self.view_paths: list[Path] = []
@@ -3627,6 +3639,7 @@ class Workspace(QMainWindow):
         self.grid.openRequested.connect(self.open_full)
         self.grid.audioRequested.connect(self._open_grid_audio)
         self.grid.audioHoverChanged.connect(self._set_grid_audio_hover)
+        self.grid.orderDropped.connect(self._save_custom_grid_order)
         self.grid.seriesToggleRequested.connect(self._toggle_grid_series)
         self.grid.deleteRequested.connect(self._delete_grid_selection)
         self.grid.pathsDropped.connect(self._receive_dropped_paths)
@@ -4247,9 +4260,12 @@ class Workspace(QMainWindow):
                 if event.key() == Qt.Key.Key_Delete and self._is_directory_focus_widget(focus_widget):
                     index = self.dir_tree.currentIndex()
                     if index.isValid():
-                        self._delete_paths([Path(self.dir_model.filePath(index))], permanent=bool(
-                            event.modifiers() & Qt.KeyboardModifier.ShiftModifier
-                        ))
+                        self._delete_paths(
+                            [Path(self.dir_model.filePath(index))],
+                            permanent=self._delete_permanently_for_shortcut(
+                                bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                            ),
+                        )
                         return True
                 if event.key() in (Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
                     self._toggle_primary_panel_focus()
@@ -4436,10 +4452,7 @@ class Workspace(QMainWindow):
 
     @staticmethod
     def _favorite_path_key(path: Path) -> str:
-        try:
-            return str(path.expanduser().resolve()).casefold()
-        except OSError:
-            return str(path.expanduser()).casefold()
+        return filesystem_path_key(path)
 
     def _default_favorite_paths(self) -> list[Path]:
         locations = (
@@ -4577,8 +4590,18 @@ class Workspace(QMainWindow):
         delete.triggered.connect(lambda _checked=False, target=path: self._delete_paths([target], permanent=False))
         menu.exec(self.dir_tree.viewport().mapToGlobal(position))
 
-    def _delete_grid_selection(self, permanent: bool) -> None:
-        self._delete_paths(self._selected_paths(), permanent=permanent)
+    def _delete_permanently_for_shortcut(self, shift_pressed: bool) -> bool:
+        """Определяет действие Delete, сохраняя Shift обратным переключателем."""
+        default_permanent = self.settings.value(
+            "behavior/delete_permanently_on_del", False, bool
+        )
+        return default_permanent != shift_pressed
+
+    def _delete_grid_selection(self, shift_pressed: bool) -> None:
+        self._delete_paths(
+            self._selected_paths(),
+            permanent=self._delete_permanently_for_shortcut(shift_pressed),
+        )
 
     def _file_panel_paths(self) -> list[Path]:
         """Возвращает пути, выбранные в активной файловой панели."""
@@ -4655,7 +4678,7 @@ class Workspace(QMainWindow):
             return "replace"
         return "cancel"
 
-    def _receive_dropped_paths(self, paths: list[Path], destination: Path | None, action, progress: Callable[[int, int], None] | None = None) -> None:
+    def _receive_dropped_paths(self, paths: list[Path], destination: Path | None, action, progress: Callable[..., None] | None = None) -> None:
         """Копирует внешние файлы или переносит внутреннее перетаскивание в цель."""
         if destination is None:
             destination = self.current_dir
@@ -4664,6 +4687,15 @@ class Workspace(QMainWindow):
         sources = list(dict.fromkeys(path for path in paths if path.exists()))
         if not sources:
             return
+        # Для индикатора считаем байты самих файлов. Папки остаются в общем
+        # счётчике объектов: обходить весь их состав до начала операции означало
+        # бы получить второй, заметный проход по медленному диску.
+        total_bytes = sum(
+            path.stat().st_size for path in sources if path.is_file()
+        )
+        transferred_bytes = 0
+        if progress is not None:
+            progress(0, len(sources), 0, total_bytes)
         move = action == Qt.DropAction.MoveAction
         if move and self.current_dir in sources:
             self.load_directory(self.current_dir.parent)
@@ -4727,11 +4759,13 @@ class Workspace(QMainWindow):
                     shutil.copytree(source, target)
                 else:
                     shutil.copy2(source, target)
+                if not is_folder:
+                    transferred_bytes += source.stat().st_size if source.exists() else target.stat().st_size
                 changed = True
             except OSError as exc:
                 errors.append(f"{source.name}: {exc}")
             if progress is not None:
-                progress(completed, len(sources))
+                progress(completed, len(sources), transferred_bytes, total_bytes)
         for source, target in moved_folders:
             try:
                 relocate_folder_caches(source, target)
@@ -6061,6 +6095,10 @@ class Workspace(QMainWindow):
         self.folder_cache = None
         self.cache_ready = False
         self.current_dir = directory
+        self._custom_order = self._load_custom_order(directory)
+        if self._custom_order and self.sort_combo.findData("custom") < 0:
+            self.sort_combo.addItem("Пользовательский", "custom")
+            self.sort_combo.setItemIcon(self.sort_combo.count() - 1, _fomantic_icon("sort", 10, "#a8b0bd"))
         self._remember_directory_for_volume(directory)
         self._refresh_shotsync_tab_indicator()
         self._refresh_shotsync_current_shooting()
@@ -6092,8 +6130,35 @@ class Workspace(QMainWindow):
 
     @staticmethod
     def _folder_settings_prefix(directory: Path) -> str:
-        normalized = str(directory.expanduser().resolve()).casefold()
+        normalized = filesystem_path_key(directory)
         return f"folder_settings/{sha1(normalized.encode()).hexdigest()}"
+
+    def _load_custom_order(self, directory: Path) -> list[str]:
+        """Возвращает сохранённую последовательность имён для одной папки."""
+        value = self.settings.value(f"{self._folder_settings_prefix(directory)}/custom_order", [], list)
+        return [str(name) for name in value] if isinstance(value, (list, tuple)) else []
+
+    def _save_custom_grid_order(self, dragged: object, before: object) -> None:
+        """Сохраняет ручную перестановку карточек и сразу включает её сортировку."""
+        paths = [Path(path) for path in dragged if isinstance(path, Path)]
+        if not paths or not isinstance(before, Path):
+            return
+        ordered = [path for path in self.view_paths if path not in paths]
+        try:
+            index = ordered.index(before)
+        except ValueError:
+            return
+        ordered[index:index] = paths
+        # Храним полный порядок папки, чтобы фильтры лишь временно скрывали кадры.
+        names = [path.name for path in ordered]
+        names.extend(path.name for path in self.all_paths if path.name not in names)
+        self._custom_order = names
+        self.settings.setValue(f"{self._folder_settings_prefix(self.current_dir)}/custom_order", names)
+        if self.sort_combo.findData("custom") < 0:
+            self.sort_combo.addItem("Пользовательский", "custom")
+            self.sort_combo.setItemIcon(self.sort_combo.count() - 1, _fomantic_icon("sort", 10, "#a8b0bd"))
+        self.sort_combo.setCurrentIndex(self.sort_combo.findData("custom"))
+        self._apply_view()
 
     def _load_folder_grid_context(self, directory: Path) -> tuple[list[str], int] | None:
         prefix = self._folder_settings_prefix(directory)
@@ -6709,7 +6774,7 @@ class Workspace(QMainWindow):
         overwrite_all = False
         for source in paths:
             target = output_dir / f"{source.stem}.jpg"
-            if target.name.casefold() in planned:
+            if filesystem_name_key(target.name) in planned:
                 target = self._next_resize_name(target, planned)
             if target.exists() and not overwrite_all:
                 choice = QMessageBox(self)
@@ -6729,7 +6794,7 @@ class Workspace(QMainWindow):
                     target = self._next_resize_name(target, planned)
                 elif clicked != overwrite:
                     return None
-            planned.add(target.name.casefold())
+            planned.add(filesystem_name_key(target.name))
             targets.append((source, target))
         return targets
 
@@ -6737,7 +6802,7 @@ class Workspace(QMainWindow):
     def _next_resize_name(target: Path, planned: set[str]) -> Path:
         for index in range(2, 100_000):
             candidate = target.with_name(f"{target.stem} ({index}){target.suffix}")
-            if candidate.name.casefold() not in planned and not candidate.exists():
+            if filesystem_name_key(candidate.name) not in planned and not candidate.exists():
                 return candidate
         raise OSError("Не удалось подобрать свободное имя")
 
@@ -6749,7 +6814,7 @@ class Workspace(QMainWindow):
         if not changes:
             return
         directory = self.current_dir
-        if len({name.casefold() for name in changes.values()}) != len(changes):
+        if len({filesystem_name_key(name) for name in changes.values()}) != len(changes):
             raise OSError("Шаблон создаёт одинаковые имена")
         for old, new in changes.items():
             source, target = directory / old, directory / new
@@ -7048,14 +7113,13 @@ class Workspace(QMainWindow):
             if key is None:
                 continue
             camera = detail.get("camera") or {}
-            entry = cameras.setdefault(key, {"model": str(camera.get("model") or ""), "count": 0})
-            entry["count"] = int(entry["count"]) + 1
+            cameras.setdefault(key, {"model": str(camera.get("model") or "")})
         self.camera_filter.blockSignals(True)
         self.camera_filter.clear()
         self.camera_filter.addItem("Все камеры", None)
         self.camera_filter.setItemIcon(0, _fomantic_icon("images", 12, "#a8b0bd"))
         for key, entry in sorted(cameras.items(), key=lambda item: (str(item[1]["model"]).casefold(), item[0])):
-            self.camera_filter.addItem(f"{entry['model']} ({entry['count']})", key)
+            self.camera_filter.addItem(str(entry["model"]), key)
         index = self.camera_filter.findData(selected)
         self.camera_filter.setCurrentIndex(index if index >= 0 else 0)
         self.camera_filter.blockSignals(False)
@@ -7307,7 +7371,11 @@ class Workspace(QMainWindow):
             return not needle or needle in path.name.casefold() or needle in str(detail.get("comment", "")).casefold()
 
         order = self.sort_combo.currentData()
-        if order == "rating":
+        if order == "custom":
+            positions = {name: index for index, name in enumerate(self._custom_order)}
+            key = lambda path: (positions.get(path.name, len(positions)), path.name.casefold())
+            reverse = False
+        elif order == "rating":
             key = lambda path: (-(self.photo_details.get(path.name, {}).get("rating") or 0), path.name.casefold())
             reverse = False
         elif order and order.startswith("time"):
@@ -7964,14 +8032,15 @@ class Workspace(QMainWindow):
         use_custom = self.settings.value("editor/use_custom_executable", bool(executable), bool)
         if use_custom:
             editor = Path(executable)
-            if not editor.is_file():
+            is_macos_bundle = sys.platform == "darwin" and editor.suffix.casefold() == ".app" and editor.is_dir()
+            if not editor.is_file() and not is_macos_bundle:
                 QMessageBox.warning(
                     self,
                     "Внешний редактор",
-                    f"Не найден исполняемый файл редактора:\n{editor}",
+                    f"Не найдено приложение или исполняемый файл редактора:\n{editor}",
                 )
                 return
-            command = [str(editor), str(path)]
+            command = ["open", "-a", str(editor), str(path)] if is_macos_bundle else [str(editor), str(path)]
         else:
             command = self._photoshop_command(path)
             if command is None:

@@ -29,3 +29,17 @@ def data_path(name: str) -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "data" / name
     return Path(__file__).with_name(name)
+
+
+def filesystem_name_key(name: str) -> str:
+    """Возвращает ключ имени с учётом обычной чувствительности файловой системы."""
+    return name.casefold() if sys.platform in {"win32", "darwin"} else name
+
+
+def filesystem_path_key(path: Path) -> str:
+    """Нормализует путь для настроек, не склеивая разные по регистру пути Linux."""
+    try:
+        value = str(path.expanduser().resolve())
+    except OSError:
+        value = str(path.expanduser())
+    return filesystem_name_key(value)

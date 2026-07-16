@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+
+from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS
 
 
 DEFAULT_EXTENSIONS = (
@@ -18,6 +21,12 @@ DEFAULT_EXTENSIONS = (
 VERB = "rawww.open"
 LABEL = "Открыть в Контрольке"
 _BASE = r"Software\Classes"
+DEFAULT_APP_PROG_ID = "Kontrolka.Photo"
+DEFAULT_APP_CAPABILITIES = r"Software\Kontrolka\Capabilities"
+DEFAULT_APP_REGISTRATION = r"Software\RegisteredApplications"
+# Ассоциации не дублируют список декодера: новая поддержанная RAW-камера
+# автоматически появляется и в выборе программы по умолчанию.
+DEFAULT_APP_EXTENSIONS = tuple(sorted(JPEG_EXTENSIONS | RAW_EXTENSIONS))
 
 
 def _delete_tree(registry, root, path: str) -> None:
@@ -64,6 +73,56 @@ def unregister(extensions: tuple[str, ...] = DEFAULT_EXTENSIONS) -> None:
         _delete_tree(winreg, winreg.HKEY_CURRENT_USER, f"{_BASE}\\SystemFileAssociations\\{extension}\\shell\\{VERB}")
     for kind in ("Directory", "Directory\\Background"):
         _delete_tree(winreg, winreg.HKEY_CURRENT_USER, f"{_BASE}\\{kind}\\shell\\{VERB}")
+
+
+def register_default_app(
+    executable: Path, extensions: tuple[str, ...] = DEFAULT_APP_EXTENSIONS
+) -> None:
+    """Регистрирует Контрольку кандидатом в системном выборе приложений Windows.
+
+    Windows хранит подтверждённое пользователем приложение в защищённом
+    ``UserChoice``, поэтому эта функция не меняет текущую программу молча.
+    После регистрации пользователь выбирает Контрольку на странице настроек.
+    """
+    import winreg
+
+    executable = executable.resolve()
+    command = f'"{executable}" "%1"'
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER, f"{_BASE}\\{DEFAULT_APP_PROG_ID}", 0, winreg.KEY_WRITE
+    ) as key:
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, "Контролька: фотографии RAW и JPG")
+        winreg.SetValueEx(key, "FriendlyTypeName", 0, winreg.REG_SZ, "Контролька: фотографии RAW и JPG")
+    _set_command(winreg, f"{_BASE}\\{DEFAULT_APP_PROG_ID}\\shell\\open\\command", command)
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER, DEFAULT_APP_CAPABILITIES, 0, winreg.KEY_WRITE
+    ) as key:
+        winreg.SetValueEx(key, "ApplicationName", 0, winreg.REG_SZ, "Контролька")
+        winreg.SetValueEx(key, "ApplicationDescription", 0, winreg.REG_SZ, "Быстрый просмотр и отбор RAW и JPG")
+    for extension in extensions:
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            f"{_BASE}\\{extension}\\OpenWithProgids",
+            0,
+            winreg.KEY_WRITE,
+        ) as key:
+            winreg.SetValueEx(key, DEFAULT_APP_PROG_ID, 0, winreg.REG_NONE, b"")
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            f"{DEFAULT_APP_CAPABILITIES}\\FileAssociations",
+            0,
+            winreg.KEY_WRITE,
+        ) as key:
+            winreg.SetValueEx(key, extension, 0, winreg.REG_SZ, DEFAULT_APP_PROG_ID)
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER, DEFAULT_APP_REGISTRATION, 0, winreg.KEY_WRITE
+    ) as key:
+        winreg.SetValueEx(key, "Контролька", 0, winreg.REG_SZ, DEFAULT_APP_CAPABILITIES)
+
+
+def open_default_apps_settings() -> None:
+    """Открывает страницу Windows, на которой пользователь подтверждает ассоциации."""
+    os.startfile("ms-settings:defaultapps")
 
 
 def is_registered() -> bool:
