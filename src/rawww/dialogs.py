@@ -482,6 +482,7 @@ class SettingsDialog(QDialog):
             "<a href=\"mailto:igor@zalomskij.ru\">igor@zalomskij.ru</a>&gt;<br>"
             "© 2026 Игорь Заломский. Лицензия GNU GPL v3 или более поздней версии.<br>"
             "<a href=\"https://shotsync.ru/ctrlka\">Контролька на ShotSync</a>"
+            "<br><a href=\"https://github.com/kaist/RAWww\">Исходный код на GitHub</a>"
         )
         author.setObjectName("settingsHint")
         author.setWordWrap(True)

@@ -41,14 +41,21 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install perl cpanminus
-          export PATH="$(brew --prefix perl)/bin:$PATH"
-          cpanm --notest PAR::Packer
+          perl_prefix="$(brew --prefix perl)"
+          "$perl_prefix/bin/cpanm" --notest --reinstall PAR::Packer
+          "$perl_prefix/bin/pp" --version
+          echo "EXIFTOOL_PP=$perl_prefix/bin/pp" >> "$GITHUB_ENV"
 
       - name: Install ExifTool packer for Linux
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libpar-packer-perl
+          sudo apt-get install --yes build-essential cpanminus
+          perl_lib="$RUNNER_TEMP/exiftool-perl"
+          cpanm --notest --local-lib-contained "$perl_lib" PAR::Packer
+          "$perl_lib/bin/pp" --version
+          echo "EXIFTOOL_PP=$perl_lib/bin/pp" >> "$GITHUB_ENV"
+          echo "PERL5LIB=$perl_lib/lib/perl5" >> "$GITHUB_ENV"
 
       - name: Build portable Windows application
         if: runner.os == 'Windows'
