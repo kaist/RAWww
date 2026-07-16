@@ -541,6 +541,11 @@ class SettingsDialog(QDialog):
         self.auto_update_check = SettingsCheckBox("Автоматически проверять обновления при запуске")
         self.auto_update_check.setChecked(self.settings.value("updates/auto_check", True, bool))
         layout.addWidget(self.auto_update_check)
+        self.disable_usage_statistics = SettingsCheckBox("Не отправлять статистику использования")
+        self.disable_usage_statistics.setChecked(
+            self.settings.value("telemetry/disable_usage_statistics", False, bool)
+        )
+        layout.addWidget(self.disable_usage_statistics)
         check = QPushButton("Проверить обновления")
         check.setObjectName("settingsPrimaryButton")
         check.clicked.connect(lambda: self.update_requested())
@@ -628,6 +633,7 @@ class SettingsDialog(QDialog):
         self.settings.setValue("editor/executable", self.editor_executable.text().strip())
         self.settings.setValue("hotkeys/swap_rating_and_color", self.swap_rating_color.isChecked())
         self.settings.setValue("updates/auto_check", self.auto_update_check.isChecked())
+        self.settings.setValue("telemetry/disable_usage_statistics", self.disable_usage_statistics.isChecked())
         for identifier, sequence in sequences.items():
             self.settings.setValue(f"hotkeys/{identifier}", sequence.toString(QKeySequence.SequenceFormat.PortableText))
         self.accept()

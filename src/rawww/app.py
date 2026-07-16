@@ -89,6 +89,7 @@ from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, 
 from .launch import target_from_argv
 from .runtime_paths import PORTABLE, data_path, filesystem_name_key, filesystem_path_key, work_path
 from .single_instance import SingleInstance
+from .telemetry import TelemetryClient
 from .subprocess_utils import no_window_kwargs
 from . import theme
 from .theme import (
@@ -9363,6 +9364,9 @@ def main() -> None:
     apply_theme(app)
     window = MainWindow(target)
     single_instance.target_received.connect(window.open_external_target)
+    telemetry = TelemetryClient(window.settings, app)
+    telemetry.start()
+    app.aboutToQuit.connect(telemetry.stop)
     if startup_trace is not None:
         startup_trace.snapshot("main-window-constructed")
     screenshot_path = os.environ.get("RAWWW_CAPTURE_SCREENSHOT")
