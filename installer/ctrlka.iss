@@ -1,5 +1,5 @@
 #define MyAppName "Контролька"
-#define MyAppVersion "0.1.0"
+#include "..\build\installer_version.iss"
 #define MyAppPublisher "Контролька"
 #define MyAppExeName "ctrlka.exe"
 
@@ -16,6 +16,7 @@ Compression=lzma2
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
 WizardStyle=modern
+SetupIconFile=..\src\rawww\assets\ctrlka-icon.ico
 LanguageDetectionMethod=none
 UninstallDisplayIcon={app}\{#MyAppExeName}
 

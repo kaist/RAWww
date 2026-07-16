@@ -8,10 +8,6 @@ on:
         required: false
         default: false
         type: boolean
-      release_tag:
-        description: "Тег релиза, например v1.0.139 (обязателен при создании релиза)"
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -209,15 +205,14 @@ jobs:
       contents: write
 
     steps:
-      - name: Проверить тег релиза
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Определить версию релиза
+        id: version
         shell: bash
-        run: |
-          if [ -z "$RELEASE_TAG" ]; then
-            echo "При включённой опции создания релиза укажите release_tag, например v1.0.139." >&2
-            exit 1
-          fi
+        run: echo "tag=v$(tr -d '\r\n' < VERSION).$(git rev-list --count HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Скачать пакеты сборки
         uses: actions/download-artifact@v4
@@ -227,7 +222,7 @@ jobs:
       - name: Опубликовать релиз и пакеты
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
         shell: bash
         run: |
           gh release create "$RELEASE_TAG" \

@@ -16,10 +16,12 @@ from build_exiftool import build_exiftool
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BASE_VERSION_FILE = ROOT / "VERSION"
 DIST = ROOT / "dist" / "ctrlka"
 PORTABLE_MARKER = DIST / "portable.flag"
 CONTENTS = DIST / "bin"
 BUILD_VERSION_MODULE = ROOT / "src" / "rawww" / "_build_version.py"
+INSTALLER_VERSION_INCLUDE = ROOT / "build" / "installer_version.iss"
 EXCLUDED_QT_MODULES = (
     "PySide6.Qt3DAnimation",
     "PySide6.Qt3DCore",
@@ -171,9 +173,19 @@ def _bake_build_version() -> None:
         revision = int(result.stdout.strip())
     except (OSError, subprocess.CalledProcessError, ValueError):
         revision = 0
-    version = f"1.0.{max(revision, 0)}"
+    base_version = BASE_VERSION_FILE.read_text(encoding="utf-8").strip()
+    base_parts = base_version.split(".")
+    if len(base_parts) != 2 or any(not part.isdigit() for part in base_parts):
+        raise RuntimeError(f"Invalid base version in {BASE_VERSION_FILE}: {base_version!r}")
+    version = f"{base_version}.{max(revision, 0)}"
     BUILD_VERSION_MODULE.write_text(
         f'"""Generated at build time. Do not edit or commit."""\n\nVERSION = "{version}"\n',
+        encoding="utf-8",
+    )
+    INSTALLER_VERSION_INCLUDE.parent.mkdir(parents=True, exist_ok=True)
+    INSTALLER_VERSION_INCLUDE.write_text(
+        "; Generated at build time. Do not edit or commit.\n"
+        f'#define MyAppVersion "{version}"\n',
         encoding="utf-8",
     )
     print(f"Baked build version: {version}")

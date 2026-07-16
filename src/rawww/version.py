@@ -11,6 +11,16 @@ from pathlib import Path
 
 
 _ROOT = Path(__file__).resolve().parents[2]
+_BASE_VERSION_FILE = _ROOT / "VERSION"
+
+
+def _base_version() -> str:
+    """Читает общую для пакетов базовую часть номера версии."""
+    value = _BASE_VERSION_FILE.read_text(encoding="utf-8").strip()
+    parts = value.split(".")
+    if len(parts) != 2 or any(not part.isdigit() for part in parts):
+        raise RuntimeError(f"Invalid base version in {_BASE_VERSION_FILE}: {value!r}")
+    return value
 
 
 def _no_window_kwargs() -> dict:
@@ -59,7 +69,7 @@ def _resolve_version() -> str:
     try:
         from ._build_version import VERSION
     except ImportError:
-        return f"1.0.{_git_revision() or 0}"
+        return f"{_base_version()}.{_git_revision() or 0}"
     return VERSION
 
 
