@@ -2,6 +2,16 @@ name: Build desktop packages
 
 on:
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Создать GitHub Release после успешной сборки всех платформ"
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: "Тег релиза, например v1.0.139 (обязателен при создании релиза)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -189,3 +199,43 @@ jobs:
             dist/ctrlka-linux.AppImage
             dist/ctrlka-startup.png
           if-no-files-found: error
+
+  release:
+    name: Создать GitHub Release
+    needs: build
+    if: inputs.create_release == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Проверить тег релиза
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "При включённой опции создания релиза укажите release_tag, например v1.0.139." >&2
+            exit 1
+          fi
+
+      - name: Скачать пакеты сборки
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Опубликовать релиз и пакеты
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --target "$GITHUB_SHA" \
+            --title "Контролька $RELEASE_TAG" \
+            --generate-notes \
+            release-assets/ctrlka-windows/ctrlka-windows-portable.zip \
+            release-assets/ctrlka-windows/ctrlka-windows-setup.exe \
+            release-assets/ctrlka-macos-arm64/ctrlka-macos-arm64.dmg \
+            release-assets/ctrlka-macos-intel/ctrlka-macos-intel.dmg \
+            release-assets/ctrlka-linux/ctrlka-linux.AppImage
