@@ -65,6 +65,7 @@ PRUNABLE_QT_FILES = (
     "Qt6OpenGL.dll",
     "opengl32sw.dll",
 )
+LINUX_QT_RUNTIME_LIBRARIES = ("libEGL.so.1", "libpulse.so.0")
 
 
 def _report_size(directory: Path) -> None:
@@ -204,6 +205,7 @@ def main() -> None:
     _clean_previous_build()
     _bake_build_version()
     exiftool_runtime = ROOT / "build" / "exiftool-runtime"
+    bundled_exiftool: Path | None = None
     try:
         bundled_exiftool = build_exiftool(exiftool_runtime)
         command = [
@@ -222,11 +224,10 @@ def main() -> None:
             "--hidden-import", "rawpy",
             "--hidden-import", "rawww._build_version",
         ]
-        if bundled_exiftool is not None:
-            command.extend(("--add-data", f"{bundled_exiftool}{os.pathsep}data/tools"))
         if sys.platform.startswith("linux"):
-            egl_library = _linux_shared_library("libEGL.so.1")
-            command.extend(("--add-binary", f"{egl_library}{os.pathsep}PySide6"))
+            for soname in LINUX_QT_RUNTIME_LIBRARIES:
+                library = _linux_shared_library(soname)
+                command.extend(("--add-binary", f"{library}{os.pathsep}PySide6"))
         command.append("--console" if args.console else "--windowed")
         for module in EXCLUDED_QT_MODULES:
             command.extend(("--exclude-module", module))
@@ -234,17 +235,21 @@ def main() -> None:
             command.append("--noupx")
         command.append(str(ROOT / "scripts" / "pyinstaller_entry.py"))
         subprocess.run(command, cwd=ROOT, check=True)
+        _move_application_data(DIST)
+        if bundled_exiftool is not None:
+            target = DIST / "data" / "tools" / bundled_exiftool.name
+            shutil.copy2(bundled_exiftool, target)
+            target.chmod(target.stat().st_mode | 0o111)
+        _prune_known_unused_qt_files(DIST)
+        _prune_qt_translations(DIST)
+        if args.upx:
+            _compress_binaries(DIST)
+        if args.portable:
+            _add_portable_marker()
+        _report_size(DIST)
     finally:
         BUILD_VERSION_MODULE.unlink(missing_ok=True)
         shutil.rmtree(exiftool_runtime, ignore_errors=True)
-    _move_application_data(DIST)
-    _prune_known_unused_qt_files(DIST)
-    _prune_qt_translations(DIST)
-    if args.upx:
-        _compress_binaries(DIST)
-    if args.portable:
-        _add_portable_marker()
-    _report_size(DIST)
 
 
 if __name__ == "__main__":
