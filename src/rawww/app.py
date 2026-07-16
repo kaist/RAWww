@@ -3208,6 +3208,8 @@ class Workspace(QMainWindow):
     fullViewRequested = Signal(object)
     fullscreenRequested = Signal(object)
     gridRequested = Signal()
+    singlePhotoExitRequested = Signal(object)
+    singlePhotoFolderRequested = Signal(object)
     openFolderRequested = Signal(object)    # Путь: открыть (или выделить) вкладку папки.
     shotsyncFolderChanged = Signal(bool)    # текущая папка связана с ShotSync
     seriesModeChanged = Signal(bool)
@@ -3225,6 +3227,9 @@ class Workspace(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(1440, 920)
         self.closing = False
+        # Временное рабочее пространство используется только для открытия одного
+        # файла из проводника: оно не становится вкладкой и не попадает в сессию.
+        self.single_photo_mode = False
         self._taskbar_progress = WindowsTaskbarProgress()
         self._dock_progress = MacDockProgress()
 
@@ -4101,7 +4106,7 @@ class Workspace(QMainWindow):
 
         add_hotkey("full_view", self._open_selected)
         add_hotkey("open_in_editor", self._open_in_editor)
-        add_hotkey("grid", self.show_grid)
+        add_hotkey("grid", self._show_grid_or_open_single_photo_folder)
         add_hotkey("strip_collapse", lambda: self.full_view.cycle_strip(1), target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         add_hotkey("strip_expand", lambda: self.full_view.cycle_strip(-1), target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
 
@@ -4284,6 +4289,13 @@ class Workspace(QMainWindow):
             return
         if self.stack.currentWidget() is self.grid_page:
             self._go_up_directory()
+
+    def _show_grid_or_open_single_photo_folder(self) -> None:
+        """По G превращает временный просмотр файла в обычную вкладку папки."""
+        if self.single_photo_mode:
+            self.singlePhotoFolderRequested.emit(self)
+            return
+        self.show_grid()
 
     def _go_up_directory(self) -> None:
         """Переходит в родительскую папку текущего каталога."""
@@ -8189,6 +8201,9 @@ class Workspace(QMainWindow):
     def show_grid(self) -> None:
         self.full_view.stop_video()
         self.full_view.stop_audio()
+        if self.single_photo_mode:
+            self.singlePhotoExitRequested.emit(self)
+            return
         self.stack.setCurrentWidget(self.grid_page)
         self._restore_grid_context()
         self._refresh_status_panel()
@@ -8542,6 +8557,11 @@ class MainWindow(QMainWindow):
     def __init__(self, open_target: Path | None = None) -> None:
         super().__init__()
         self.settings = _application_settings()
+        self._single_photo_workspace: Workspace | None = None
+        self._single_photo_origin_index: int | None = None
+        self._single_photo_was_minimized = False
+        self._single_photo_was_active = True
+        self._single_photo_closes_window = False
         self._update_check_running = False
         self._update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="update-check")
         self.setWindowTitle(APP_NAME)
@@ -8692,10 +8712,7 @@ class MainWindow(QMainWindow):
             return
         if not target.is_file():
             return
-        self._open_folder_tab(target.parent, defer_initial_scan=True)
-        workspace = self.workspace_stack.currentWidget()
-        if isinstance(workspace, Workspace):
-            workspace.open_full(target)
+        self._present_single_photo(target, close_window_on_exit=True)
 
     def open_external_target(self, target: Path | None) -> None:
         """Обрабатывает путь, переданный повторным запуском из файлового менеджера."""
@@ -8706,43 +8723,103 @@ class MainWindow(QMainWindow):
         if target.is_dir():
             self._add_workspace(target)
         elif target.is_file():
-            self._add_workspace(target.parent, defer_initial_scan=True)
-            workspace = self.workspace_stack.currentWidget()
-            if isinstance(workspace, Workspace):
-                workspace.open_full(target)
+            self._present_single_photo(target)
         self.showNormal() if self.isMinimized() else None
         self.activateWindow()
         self.raise_()
+
+    def _present_single_photo(self, target: Path, *, close_window_on_exit: bool = False) -> None:
+        """Открывает файл во временном просмотре, не меняя набор вкладок пользователя."""
+        if self._single_photo_workspace is not None:
+            self._single_photo_workspace.open_full(target)
+            return
+
+        self._single_photo_origin_index = self.workspace_stack.currentIndex()
+        self._single_photo_was_minimized = self.isMinimized()
+        self._single_photo_was_active = self.isActiveWindow()
+        self._single_photo_closes_window = close_window_on_exit
+        workspace = self._add_workspace(target.parent, defer_initial_scan=True, single_photo=True)
+        workspace.open_full(target)
+        self._single_photo_workspace = workspace
+
+    def _discard_single_photo_workspace(self, workspace: Workspace) -> None:
+        """Удаляет временное пространство и возвращает активную пользовательскую вкладку."""
+        if workspace is not self._single_photo_workspace:
+            return
+        self._leave_full_view()
+        self.workspace_stack.removeWidget(workspace)
+        workspace.close()
+        workspace.deleteLater()
+        origin_index = self._single_photo_origin_index
+        self._single_photo_workspace = None
+        self._single_photo_origin_index = None
+        if origin_index is not None and 0 <= origin_index < self.workspace_stack.count():
+            self.tabs.setCurrentIndex(origin_index)
+            self._select_workspace(origin_index)
+
+    def _exit_single_photo(self, workspace: Workspace) -> None:
+        """Завершает временный просмотр: новый запуск закрывает окно, старый — возвращает фон."""
+        closes_window = self._single_photo_closes_window
+        was_minimized = self._single_photo_was_minimized
+        was_active = self._single_photo_was_active
+        self._discard_single_photo_workspace(workspace)
+        if closes_window:
+            self.close()
+        elif was_minimized:
+            self.showMinimized()
+        elif not was_active:
+            self.lower()
+
+    def _open_single_photo_folder(self, workspace: Workspace) -> None:
+        """По G открывает папку временного файла в обычной рабочей вкладке."""
+        if workspace is not self._single_photo_workspace:
+            return
+        folder = workspace.current_dir
+        self._discard_single_photo_workspace(workspace)
+        self._open_folder_tab(folder)
 
     def _add_workspace(
         self,
         directory: Path | None = None,
         *,
         defer_initial_scan: bool = False,
-    ) -> None:
+        single_photo: bool = False,
+    ) -> Workspace:
         """Создаёт рабочую вкладку и подключает её к общим действиям окна."""
         workspace = Workspace(
             directory,
             defer_initial_scan=defer_initial_scan,
             parent=self.workspace_stack,
         )
+        workspace.single_photo_mode = single_photo
         workspace.destination_paths_provider = self._open_workspace_paths
         index = self.workspace_stack.addWidget(workspace)
-        self.tabs.addTab(_workspace_title(workspace.current_dir))
+        if not single_photo:
+            self.tabs.addTab(_workspace_title(workspace.current_dir))
         workspace.windowTitleChanged.connect(
             lambda title, view=workspace: self._update_workspace_title(view, title)
         )
         workspace.fullViewRequested.connect(self._show_full_view)
         workspace.fullscreenRequested.connect(self._toggle_workspace_fullscreen)
         workspace.gridRequested.connect(self._leave_full_view)
+        workspace.singlePhotoExitRequested.connect(self._exit_single_photo)
+        workspace.singlePhotoFolderRequested.connect(self._open_single_photo_folder)
         workspace.openFolderRequested.connect(self._open_folder_tab)
         workspace.shotsyncFolderChanged.connect(
             lambda linked, view=workspace: self._set_workspace_shotsync_icon(view, linked)
         )
         workspace.seriesModeChanged.connect(self._set_global_series_mode)
-        self.tabs.setCurrentIndex(index)
-        self._select_workspace(self.tabs.currentIndex())
-        self._update_tab_geometry()
+        if single_photo:
+            self.workspace_stack.setCurrentWidget(workspace)
+            for workspace_index in range(self.workspace_stack.count()):
+                candidate = self.workspace_stack.widget(workspace_index)
+                if isinstance(candidate, Workspace):
+                    candidate.set_workspace_active(candidate is workspace)
+        else:
+            self.tabs.setCurrentIndex(index)
+            self._select_workspace(self.tabs.currentIndex())
+            self._update_tab_geometry()
+        return workspace
 
     def _set_global_series_mode(self, enabled: bool) -> None:
         self.settings.setValue("view/series_enabled", enabled)
@@ -8756,6 +8833,7 @@ class MainWindow(QMainWindow):
             workspace.current_dir
             for index in range(self.workspace_stack.count())
             if isinstance(workspace := self.workspace_stack.widget(index), Workspace)
+            and not workspace.single_photo_mode
         ]
 
     def _open_folder_tab(self, folder: Path, *, defer_initial_scan: bool = False) -> None:
@@ -8763,7 +8841,11 @@ class MainWindow(QMainWindow):
         folder = Path(folder)
         for index in range(self.workspace_stack.count()):
             workspace = self.workspace_stack.widget(index)
-            if isinstance(workspace, Workspace) and workspace.current_dir == folder:
+            if (
+                isinstance(workspace, Workspace)
+                and not workspace.single_photo_mode
+                and workspace.current_dir == folder
+            ):
                 self.tabs.setCurrentIndex(index)
                 self._select_workspace(index)
                 return
@@ -8876,13 +8958,13 @@ class MainWindow(QMainWindow):
 
     def _update_workspace_title(self, workspace: Workspace, title: str) -> None:
         index = self.workspace_stack.indexOf(workspace)
-        if index >= 0:
+        if index >= 0 and not workspace.single_photo_mode:
             self.tabs.setTabText(index, title)
 
     def _set_workspace_shotsync_icon(self, workspace: Workspace, linked: bool) -> None:
         """Показывает облачный значок, не меняя название папки на вкладке."""
         index = self.workspace_stack.indexOf(workspace)
-        if index < 0:
+        if index < 0 or workspace.single_photo_mode:
             return
         self.tabs.setTabIcon(
             index,
@@ -8910,13 +8992,16 @@ class MainWindow(QMainWindow):
         directories = [
             str(workspace.current_dir)
             for index in range(self.workspace_stack.count())
-            if (workspace := self.workspace_stack.widget(index)) is not None and workspace.current_dir.is_dir()
+            if (workspace := self.workspace_stack.widget(index)) is not None
+            and not workspace.single_photo_mode
+            and workspace.current_dir.is_dir()
         ]
         self.settings.setValue("open_workspaces", directories)
         shotsync_paths = [
             str(workspace.current_dir)
             for index in range(self.workspace_stack.count())
             if (workspace := self.workspace_stack.widget(index)) is not None
+            and not workspace.single_photo_mode
             and workspace.shotsync_active
         ]
         self.settings.setValue("shotsync_workspaces", shotsync_paths)
@@ -8964,7 +9049,7 @@ class MainWindow(QMainWindow):
 
     def _show_full_view(self, workspace: Workspace) -> None:
         index = self.workspace_stack.indexOf(workspace)
-        if index >= 0:
+        if index >= 0 and not workspace.single_photo_mode:
             self.tabs.setCurrentIndex(index)
         if getattr(self, "_fast_full_view", False):
             return

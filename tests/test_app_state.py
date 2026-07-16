@@ -115,6 +115,66 @@ class AppStateTests(unittest.TestCase):
         workspace.deleteLater()
         parent.deleteLater()
 
+    def test_single_photo_preview_does_not_create_tab_and_g_opens_folder(self) -> None:
+        """Файл из проводника показывается временно, пока пользователь не нажмёт G."""
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "single.jpg"
+            photo.touch()
+            window = MainWindow()
+            initial_tab_count = window.tabs.count()
+
+            window._present_single_photo(photo)
+            preview = window._single_photo_workspace
+
+            self.assertIsNotNone(preview)
+            self.assertEqual(window.tabs.count(), initial_tab_count)
+            self.assertEqual(window.workspace_stack.currentWidget(), preview)
+            self.assertTrue(preview.single_photo_mode)
+
+            window._open_single_photo_folder(preview)
+
+            self.assertIsNone(window._single_photo_workspace)
+            self.assertEqual(window.tabs.count(), initial_tab_count + 1)
+            workspace = window.workspace_stack.currentWidget()
+            self.assertIsInstance(workspace, Workspace)
+            self.assertEqual(workspace.current_dir, photo.parent)
+            window.close()
+            window.deleteLater()
+
+    def test_single_photo_escape_restores_existing_workspace_without_tab(self) -> None:
+        """Esc закрывает временный просмотр и не меняет сохранённый набор вкладок."""
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "single.jpg"
+            photo.touch()
+            window = MainWindow()
+            original = window.workspace_stack.currentWidget()
+            initial_tab_count = window.tabs.count()
+
+            window._present_single_photo(photo)
+            preview = window._single_photo_workspace
+            window._exit_single_photo(preview)
+
+            self.assertIsNone(window._single_photo_workspace)
+            self.assertEqual(window.tabs.count(), initial_tab_count)
+            self.assertEqual(window.workspace_stack.currentWidget(), original)
+            window.close()
+            window.deleteLater()
+
+    def test_initial_single_photo_has_no_tab_and_escape_closes_window(self) -> None:
+        """Первый запуск с файлом не восстанавливает вкладку и завершается по Esc."""
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "single.jpg"
+            photo.touch()
+            window = MainWindow(photo)
+            preview = window._single_photo_workspace
+
+            self.assertIsNotNone(preview)
+            self.assertEqual(window.tabs.count(), 0)
+            with patch.object(window, "close") as close:
+                window._exit_single_photo(preview)
+            close.assert_called_once()
+            window.deleteLater()
+
     def test_startup_has_no_hidden_app_owned_top_level_windows(self) -> None:
         recorder = _WindowShowRecorder()
         self.app.installEventFilter(recorder)
