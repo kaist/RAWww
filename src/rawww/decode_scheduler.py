@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .decode_cache import DecodeCache
+from .error_log import log_exception
 from .imaging import (
     DecodedImage,
     PixelImage,
@@ -143,6 +144,7 @@ class DecodeScheduler:
         try:
             decoded = future.result()
         except Exception as exc:
+            log_exception(f"Не удалось получить превью видео: {path}", exc)
             self._host.bridge.failed.emit(str(path), str(exc))
             return
         if decoded is not None:
@@ -207,6 +209,7 @@ class DecodeScheduler:
         try:
             decoded = future.result()
         except Exception as exc:
+            log_exception(f"Не удалось прочитать кэш превью: {path}", exc)
             self._host.bridge.failed.emit(str(path), str(exc))
             return
         if decoded is not None:
@@ -237,6 +240,7 @@ class DecodeScheduler:
             self._host.decode_cache.put((path, max_size), decoded)
             self._host.bridge.decoded.emit((decoded, max_size))
         except Exception as exc:
+            log_exception(f"Не удалось декодировать файл: {path}", exc)
             self._host.bridge.failed.emit(str(path), str(exc))
 
     def _current_decode_executor(self) -> Executor:

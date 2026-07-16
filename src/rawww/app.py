@@ -77,6 +77,7 @@ from PySide6.QtWidgets import (
 
 from .cache import FolderCache, cache_size, clear_cache, maintain_folder_caches, prune_folder_cache, relocate_folder_caches, remove_folder_cache
 from .decode_cache import DecodeCache
+from .error_log import install_error_logging
 from .decode_scheduler import DecodeScheduler
 from .shotsync_client import ShotSyncClient
 from .face_sets_sync import merge_server_faces, upload_fields_for_entry
@@ -9340,6 +9341,7 @@ class _StartupWindowTrace(QObject):
 
 def main() -> None:
     """Настраивает окружение Qt, единственный экземпляр и запускает приложение."""
+    install_error_logging()
     import multiprocessing
 
     multiprocessing.freeze_support()

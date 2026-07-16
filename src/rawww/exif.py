@@ -22,6 +22,7 @@ from typing import Sequence
 from concurrent.futures import Future, ProcessPoolExecutor
 
 from .cache import FolderCache
+from .error_log import log_exception
 from .runtime_paths import data_path
 from .subprocess_utils import no_window_kwargs
 
@@ -331,8 +332,8 @@ class MetadataPipeline:
             cache.store_photo_metadata(results)
             if on_complete is not None:
                 on_complete(results)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_exception("Не удалось обработать результаты ExifTool", exc)
 
     def shutdown(self) -> None:
         with self._lock:

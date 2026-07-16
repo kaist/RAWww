@@ -11,11 +11,12 @@ from time import monotonic
 
 from PySide6.QtCore import QEvent, QKeyCombination, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QApplication, QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QTextEdit
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence, _uses_reserved_navigation_key
+from .error_log import clear_error_log, read_error_log
 from .runtime_paths import filesystem_name_key
 from .shotsync_client import ShotSyncClient
 from .theme import _fomantic_icon
@@ -88,6 +89,55 @@ class HelpDialog(QDialog):
         close.setObjectName("helpDialogCloseButton")
         close.clicked.connect(self.accept)
         layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+
+
+class ErrorLogDialog(QDialog):
+    """Показывает локальный stderr без необходимости искать файл в проводнике."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("errorLogDialog")
+        self.setWindowTitle("Лог ошибок")
+        self.setModal(True)
+        self.resize(820, 560)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setSpacing(10)
+        title = QLabel("Лог ошибок")
+        title.setObjectName("settingsDialogTitle")
+        layout.addWidget(title)
+        hint = QLabel("Необработанные ошибки приложения и фоновых потоков. Лог остаётся только на этом компьютере.")
+        hint.setObjectName("settingsHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.content = QTextEdit()
+        self.content.setObjectName("errorLogContent")
+        self.content.setReadOnly(True)
+        self.content.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.content.setPlainText(read_error_log())
+        layout.addWidget(self.content, 1)
+
+        buttons = QHBoxLayout()
+        clear = QPushButton("Очистить")
+        clear.setObjectName("settingsSecondaryButton")
+        clear.clicked.connect(self._clear)
+        buttons.addWidget(clear)
+        buttons.addStretch(1)
+        copy = QPushButton("Копировать")
+        copy.setObjectName("settingsSecondaryButton")
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.content.toPlainText()))
+        buttons.addWidget(copy)
+        close = QPushButton("Закрыть")
+        close.setObjectName("settingsPrimaryButton")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+    def _clear(self) -> None:
+        """Очищает файл и виджет одним действием, чтобы они не расходились."""
+        clear_error_log()
+        self.content.clear()
 
 
 class SettingsDialog(QDialog):
@@ -495,6 +545,10 @@ class SettingsDialog(QDialog):
         check.setObjectName("settingsPrimaryButton")
         check.clicked.connect(lambda: self.update_requested())
         layout.addWidget(check, 0, Qt.AlignmentFlag.AlignLeft)
+        error_log = QPushButton("Лог ошибок")
+        error_log.setObjectName("settingsSecondaryButton")
+        error_log.clicked.connect(lambda: ErrorLogDialog(self).exec())
+        layout.addWidget(error_log, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addStretch(1)
         return tab
 
