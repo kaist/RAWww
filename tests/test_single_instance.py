@@ -73,6 +73,17 @@ class _Lock:
         self.unlocked += 1
 
 
+class _IncomingSocket:
+    """Отдаёт порцию байтов так, как это делает сокет уже запущенного экземпляра."""
+
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def readAll(self) -> bytes:  # noqa: N802
+        payload, self.payload = self.payload, b""
+        return payload
+
+
 class SingleInstanceTests(unittest.TestCase):
     """Проверяет, что живой экземпляр не теряет имя сокета при повторном запуске."""
 
@@ -108,3 +119,17 @@ class SingleInstanceTests(unittest.TestCase):
 
         self.assertFalse(instance.start(None))
         self.assertEqual(_Server.removed, 1)
+
+    @patch("rawww.single_instance.QLockFile", _Lock)
+    @patch("rawww.single_instance.QLocalServer", _Server)
+    def test_running_instance_emits_target_received_from_second_process(self) -> None:
+        """Путь второго процесса доходит до обработчика уже запущенного окна."""
+        instance = SingleInstance()
+        received: list[Path | None] = []
+        instance.target_received.connect(received.append)
+        socket = _IncomingSocket(b"C:/photos/from-explorer\n")
+        instance._buffers[socket] = bytearray()
+
+        instance._read(socket)
+
+        self.assertEqual(received, [Path("C:/photos/from-explorer")])

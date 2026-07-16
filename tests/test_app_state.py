@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QSettings
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt
 from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import QApplication, QMainWindow, QStackedWidget, QWidget
 
@@ -157,6 +157,104 @@ class AppStateTests(unittest.TestCase):
             self.assertIsNone(window._single_photo_workspace)
             self.assertEqual(window.tabs.count(), initial_tab_count)
             self.assertEqual(window.workspace_stack.currentWidget(), original)
+            window.close()
+            window.deleteLater()
+
+    def test_external_request_restores_minimized_window_before_opening_target(self) -> None:
+        """Внешнее открытие не оставляет свёрнутую Контрольку на панели задач."""
+        calls: list[str] = []
+
+        class _Window:
+            def windowState(self):  # noqa: N802
+                return Qt.WindowState.WindowMinimized | Qt.WindowState.WindowMaximized
+
+            def showMaximized(self) -> None:  # noqa: N802
+                calls.append("maximized")
+
+            def show(self) -> None:
+                calls.append("show")
+
+            def raise_(self) -> None:
+                calls.append("raise")
+
+            def activateWindow(self) -> None:  # noqa: N802
+                calls.append("activate")
+
+        MainWindow._restore_and_activate(_Window())
+
+        self.assertEqual(calls, ["maximized", "show", "raise", "activate"])
+
+    def test_external_request_activates_normal_window_without_changing_its_state(self) -> None:
+        """Запрос Проводника активирует только главное окно, не меняя его режим."""
+        calls: list[str] = []
+
+        class _Window:
+            def windowState(self):  # noqa: N802
+                return Qt.WindowState.WindowNoState
+
+            def show(self) -> None:
+                calls.append("show")
+
+            def raise_(self) -> None:
+                calls.append("raise")
+
+            def activateWindow(self) -> None:  # noqa: N802
+                calls.append("activate")
+
+        MainWindow._restore_and_activate(_Window())
+
+        self.assertEqual(calls, ["show", "raise", "activate"])
+
+    def test_external_folder_is_prepared_before_window_is_activated(self) -> None:
+        """Проводник показывает уже открытую папку, а не прежнее содержимое окна."""
+        calls: list[str] = []
+
+        class _Window:
+            def _open_folder_tab(self, _target: Path) -> None:
+                calls.append("open")
+
+            def _restore_and_activate(self) -> None:
+                calls.append("activate")
+
+        with tempfile.TemporaryDirectory() as directory:
+            MainWindow.open_external_target(_Window(), Path(directory))
+
+        self.assertEqual(calls, ["open", "activate"])
+
+    def test_external_file_does_not_restore_minimized_state_after_preview(self) -> None:
+        """Закрытие файла из Проводника не должно снова сворачивать окно."""
+        calls: list[tuple[str, bool] | str] = []
+
+        class _Window:
+            def _present_single_photo(self, _target: Path, *, preserve_window_state_on_exit: bool) -> None:
+                calls.append(("open", preserve_window_state_on_exit))
+
+            def _restore_and_activate(self) -> None:
+                calls.append("activate")
+
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "photo.jpg"
+            photo.touch()
+            MainWindow.open_external_target(_Window(), photo)
+
+        self.assertEqual(calls, [("open", False), "activate"])
+
+    def test_external_request_selects_existing_folder_tab(self) -> None:
+        """Повторное открытие папки из Проводника не создаёт дубликат вкладки."""
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            window = MainWindow()
+            window._open_folder_tab(folder, defer_initial_scan=True)
+            tab_count = window.tabs.count()
+
+            equivalent_folder = folder / ".." / folder.name
+            with patch.object(window, "_restore_and_activate"):
+                window.open_external_target(equivalent_folder)
+
+            self.assertEqual(window.tabs.count(), tab_count)
+            workspace = window.workspace_stack.currentWidget()
+            self.assertIsInstance(workspace, Workspace)
+            self.assertEqual(workspace.current_dir, folder)
             window.close()
             window.deleteLater()
 

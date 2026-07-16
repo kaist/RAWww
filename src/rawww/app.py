@@ -8718,27 +8718,53 @@ class MainWindow(QMainWindow):
 
     def open_external_target(self, target: Path | None) -> None:
         """Обрабатывает путь, переданный повторным запуском из файлового менеджера."""
-        if target is None or not target.exists():
-            self.activateWindow()
-            self.raise_()
-            return
-        if target.is_dir():
-            self._add_workspace(target)
-        elif target.is_file():
-            self._present_single_photo(target)
-        self.showNormal() if self.isMinimized() else None
-        self.activateWindow()
-        self.raise_()
+        if target is not None and target.exists() and target.is_dir():
+            self._open_folder_tab(target)
+        elif target is not None and target.exists() and target.is_file():
+            self._present_single_photo(target, preserve_window_state_on_exit=False)
+        self._restore_and_activate()
 
-    def _present_single_photo(self, target: Path, *, close_window_on_exit: bool = False) -> None:
-        """Открывает файл во временном просмотре, не меняя набор вкладок пользователя."""
+    def _restore_and_activate(self) -> None:
+        """Восстанавливает и выводит на передний план окно по внешнему запросу.
+
+        Вызывается после подготовки цели, чтобы пользователь сразу увидел
+        нужную папку или кадр, а не предыдущее содержимое окна.
+        """
+        state = self.windowState()
+        if state & Qt.WindowState.WindowMinimized:
+            if state & Qt.WindowState.WindowFullScreen:
+                self.showFullScreen()
+            elif state & Qt.WindowState.WindowMaximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _present_single_photo(
+        self,
+        target: Path,
+        *,
+        close_window_on_exit: bool = False,
+        preserve_window_state_on_exit: bool = True,
+    ) -> None:
+        """Открывает файл во временном просмотре, не меняя набор вкладок пользователя.
+
+        Внешний запрос не восстанавливает прежнее свёрнутое состояние, потому
+        что пользователь явно попросил показать этот файл через Проводник.
+        """
         if self._single_photo_workspace is not None:
             self._single_photo_workspace.open_full(target)
             return
 
         self._single_photo_origin_index = self.workspace_stack.currentIndex()
-        self._single_photo_was_minimized = self.isMinimized()
-        self._single_photo_was_active = self.isActiveWindow()
+        if preserve_window_state_on_exit:
+            self._single_photo_was_minimized = self.isMinimized()
+            self._single_photo_was_active = self.isActiveWindow()
+        else:
+            self._single_photo_was_minimized = False
+            self._single_photo_was_active = True
         self._single_photo_closes_window = close_window_on_exit
         workspace = self._add_workspace(target.parent, defer_initial_scan=True, single_photo=True)
         workspace.open_full(target)
@@ -8843,11 +8869,13 @@ class MainWindow(QMainWindow):
         folder = Path(folder)
         for index in range(self.workspace_stack.count()):
             workspace = self.workspace_stack.widget(index)
-            if (
-                isinstance(workspace, Workspace)
-                and not workspace.single_photo_mode
-                and workspace.current_dir == folder
-            ):
+            if not isinstance(workspace, Workspace) or workspace.single_photo_mode:
+                continue
+            try:
+                is_open_folder = workspace.current_dir.samefile(folder)
+            except OSError:
+                is_open_folder = workspace.current_dir == folder
+            if is_open_folder:
                 self.tabs.setCurrentIndex(index)
                 self._select_workspace(index)
                 return
