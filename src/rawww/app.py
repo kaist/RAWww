@@ -9288,6 +9288,21 @@ def main() -> None:
         if screen is not None:
             window.setGeometry(screen.availableGeometry())
         window.showMaximized()
+    screenshot_path = os.environ.get("RAWWW_CAPTURE_SCREENSHOT")
+    if screenshot_path:
+        def capture_screenshot() -> None:
+            """Сохраняет виджет после первой отрисовки для проверки собранного приложения."""
+            target_path = Path(screenshot_path)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            pixmap = window.grab()
+            if pixmap.isNull() or not pixmap.save(str(target_path), "PNG"):
+                print(f"Could not save startup screenshot: {target_path}", file=sys.stderr)
+                app.exit(1)
+                return
+            print(f"Startup screenshot saved: {target_path}")
+            app.quit()
+
+        QTimer.singleShot(1_500, capture_screenshot)
     if startup_trace is not None:
         startup_trace.snapshot("show-requested")
         QTimer.singleShot(3_000, startup_trace.finish)

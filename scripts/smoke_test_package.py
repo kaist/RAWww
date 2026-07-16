@@ -63,15 +63,28 @@ def _check_exiftool(executable: Path) -> None:
     print(f"ExifTool smoke test passed: {version}")
 
 
-def _check_application(executable: Path) -> None:
+def _check_application(executable: Path, screenshot_path: Path | None = None) -> None:
     """Запускает собранный Qt-клиент на offscreen-платформе и ловит раннее падение."""
     environment = os.environ.copy()
     environment["QT_QPA_PLATFORM"] = "offscreen"
+    if screenshot_path is not None:
+        environment["RAWWW_CAPTURE_SCREENSHOT"] = str(screenshot_path)
     process = subprocess.Popen(
         [str(executable)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=environment
     )
     try:
         time.sleep(8)
+        if screenshot_path is not None:
+            try:
+                output = process.communicate(timeout=8)[0]
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("Application did not create its startup screenshot") from error
+            if process.returncode != 0:
+                raise RuntimeError(f"Application screenshot failed with code {process.returncode}: {output[-2000:]}")
+            if not screenshot_path.is_file() or screenshot_path.stat().st_size == 0:
+                raise RuntimeError("Application did not save its startup screenshot")
+            print(f"Application screenshot smoke test passed: {screenshot_path}")
+            return
         if process.poll() is not None:
             output = process.communicate(timeout=1)[0]
             raise RuntimeError(f"Application stopped with code {process.returncode}: {output[-2000:]}")
@@ -90,10 +103,11 @@ def main() -> None:
     """Запускает проверки для каталога, созданного PyInstaller до упаковки артефакта."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--app-dir", type=Path, required=True)
+    parser.add_argument("--screenshot", type=Path)
     args = parser.parse_args()
     application, exiftool = _bundled_paths(args.app_dir.resolve())
     _check_exiftool(exiftool)
-    _check_application(application)
+    _check_application(application, args.screenshot.resolve() if args.screenshot else None)
 
 
 if __name__ == "__main__":

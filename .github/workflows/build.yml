@@ -103,7 +103,7 @@ jobs:
 
       - name: Smoke-test macOS application
         if: runner.os == 'macOS'
-        run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka
+        run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka --screenshot dist/ctrlka-startup.png
 
       - name: Build macOS DMG
         if: runner.os == 'macOS'
@@ -132,7 +132,7 @@ jobs:
 
       - name: Smoke-test Linux application
         if: runner.os == 'Linux'
-        run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka
+        run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka --screenshot dist/ctrlka-startup.png
 
       - name: Build Linux AppImage
         if: runner.os == 'Linux'
@@ -175,7 +175,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ctrlka-macos-${{ matrix.macos_arch }}
-          path: dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg
+          path: |
+            dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg
+            dist/ctrlka-startup.png
           if-no-files-found: error
 
       - name: Upload Linux artifact
@@ -183,5 +185,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ctrlka-linux
-          path: dist/ctrlka-linux.AppImage
+          path: |
+            dist/ctrlka-linux.AppImage
+            dist/ctrlka-startup.png
           if-no-files-found: error
