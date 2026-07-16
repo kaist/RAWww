@@ -42,18 +42,25 @@ jobs:
         run: |
           brew install perl cpanminus
           perl_prefix="$(brew --prefix perl)"
-          "$perl_prefix/bin/cpanm" --notest --reinstall PAR::Packer
-          "$perl_prefix/bin/pp" --version
-          echo "EXIFTOOL_PP=$perl_prefix/bin/pp" >> "$GITHUB_ENV"
+          cpanm="$(brew --prefix cpanminus)/bin/cpanm"
+          perl_lib="$RUNNER_TEMP/exiftool-perl"
+          "$perl_prefix/bin/perl" "$cpanm" --notest --local-lib-contained "$perl_lib" PAR::Packer
+          PERL5LIB="$perl_lib/lib/perl5" "$perl_prefix/bin/perl" "$perl_lib/bin/pp" --version
+          echo "$perl_prefix/bin" >> "$GITHUB_PATH"
+          echo "EXIFTOOL_PP=$perl_lib/bin/pp" >> "$GITHUB_ENV"
+          echo "PERL5LIB=$perl_lib/lib/perl5" >> "$GITHUB_ENV"
 
       - name: Install ExifTool packer for Linux
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential cpanminus
+          sudo apt-get install --yes build-essential cpanminus libperl-dev zlib1g-dev
           perl_lib="$RUNNER_TEMP/exiftool-perl"
-          cpanm --notest --local-lib-contained "$perl_lib" PAR::Packer
-          "$perl_lib/bin/pp" --version
+          if ! cpanm --notest --local-lib-contained "$perl_lib" PAR::Packer; then
+            find "$HOME/.cpanm/work" -name build.log -type f -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \;
+            exit 1
+          fi
+          PERL5LIB="$perl_lib/lib/perl5" "$perl_lib/bin/pp" --version
           echo "EXIFTOOL_PP=$perl_lib/bin/pp" >> "$GITHUB_ENV"
           echo "PERL5LIB=$perl_lib/lib/perl5" >> "$GITHUB_ENV"
 
