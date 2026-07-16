@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tempfile import gettempdir
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QLockFile, QObject, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
 SERVER_NAME = "rawww-single-instance-v1"
+LOCK_PATH = Path(gettempdir()) / "rawww-single-instance.lock"
 
 
 class SingleInstance(QObject):
@@ -28,17 +30,41 @@ class SingleInstance(QObject):
         super().__init__(parent)
         self.server = QLocalServer(self)
         self.server.newConnection.connect(self._accept_connection)
+        self.lock = QLockFile(str(LOCK_PATH))
         self._buffers: dict[QLocalSocket, bytearray] = {}
 
     def start(self, target: Path | None) -> bool:
         """Возвращает ``True`` во вторичном процессе после передачи запроса."""
+        if not self.lock.tryLock(100):
+            # Владелец блокировки ещё запускается либо уже слушает сокет. В
+            # обоих случаях второму процессу нельзя становиться новым окном.
+            self._send_to_running_instance(target)
+            return True
+
         if self.server.listen(SERVER_NAME):
             return False
 
+        # Замок уже принадлежит этому процессу. Значит, успешно подключившийся
+        # сервер — это экземпляр, запущенный старой версией программы; ему
+        # передаётся запрос, а текущий процесс освобождает замок и завершается.
+        if self._send_to_running_instance(target):
+            self.lock.unlock()
+            return True
+
+        # Без владельца замка можно безопасно очистить только устаревшее имя
+        # сокета, оставшееся после аварийного завершения прошлого процесса.
         QLocalServer.removeServer(SERVER_NAME)
         if self.server.listen(SERVER_NAME):
             return False
 
+        # Неожиданная гонка или ошибка ОС: безопаснее выйти, чем открыть второе
+        # окно. При следующем запуске QLockFile сам распознает stale lock.
+        self.lock.unlock()
+        return True
+
+    @staticmethod
+    def _send_to_running_instance(target: Path | None) -> bool:
+        """Передаёт путь владельцу сокета и сообщает, удалось ли подключиться."""
         socket = QLocalSocket()
         socket.connectToServer(SERVER_NAME)
         if not socket.waitForConnected(500):
