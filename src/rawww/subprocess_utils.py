@@ -26,3 +26,17 @@ def no_window_kwargs() -> dict:
         "creationflags": subprocess.CREATE_NO_WINDOW,
         "startupinfo": startupinfo,
     }
+
+
+def detached_process_kwargs() -> dict:
+    """Отделяет внешнее приложение от управляемого дерева Контрольки.
+
+    Используется только для программ, которые пользователь явно просит оставить
+    самостоятельными, например редактора или Проводника. Внутренним воркерам
+    этот выход из Job Object/группы процессов давать нельзя.
+    """
+    if sys.platform == "win32":
+        kwargs = no_window_kwargs()
+        kwargs["creationflags"] |= subprocess.CREATE_BREAKAWAY_FROM_JOB
+        return kwargs
+    return {"start_new_session": True}

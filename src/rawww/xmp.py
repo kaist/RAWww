@@ -42,7 +42,7 @@ def named_face_regions(detail: dict, face_sets: Iterable[dict], *, threshold: fl
             continue
         embedding = face.get("embedding")
         bbox = face.get("bbox") or {}
-        if not isinstance(embedding, list) or not isinstance(bbox, dict):
+        if embedding is None or not isinstance(bbox, dict):
             continue
         person = next((item for item in people if _similarity(embedding, item.get("embedding")) >= threshold), None)
         if person is None:
@@ -108,7 +108,12 @@ def write_sidecar(photo_path: Path, xmp: str | None) -> Path | None:
 
 
 def _similarity(left: object, right: object) -> float:
-    if not isinstance(left, list) or not isinstance(right, list) or not left or len(left) != len(right):
+    if left is None or right is None:
+        return -1.0
+    try:
+        if len(left) == 0 or len(left) != len(right):
+            return -1.0
+    except TypeError:
         return -1.0
     try:
         dot = sum(float(a) * float(b) for a, b in zip(left, right))

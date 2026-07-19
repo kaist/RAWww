@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+import signal
 import math
 import shutil
 import base64
@@ -27,6 +28,7 @@ import webbrowser
 from collections import deque
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Event
 from time import monotonic, sleep
 from typing import Callable
 
@@ -81,6 +83,7 @@ from .error_log import install_error_logging
 from .decode_scheduler import DecodeScheduler
 from .shotsync_client import ShotSyncClient
 from .face_sets_sync import merge_server_faces, upload_fields_for_entry
+from .face_search import FACE_MATCH_THRESHOLD, FaceSearchIndex, indexed_face_matches
 from .shotsync_login import ShotSyncLoginDialog
 from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
@@ -89,9 +92,10 @@ from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, 
 from .launch import target_from_argv
 from .runtime_paths import PORTABLE, data_path, filesystem_name_key, filesystem_path_key, work_path
 from .single_instance import SingleInstance
+from .process_guard import install_process_tree_guard
 from .task_lifecycle import retire_executor, wait_for_retired_executors
 from .telemetry import TelemetryClient
-from .subprocess_utils import no_window_kwargs
+from .subprocess_utils import detached_process_kwargs
 from .windows_shell_menu import show_file_context_menu
 from .windows_activation import activate_foreground_window
 from . import theme
@@ -130,6 +134,7 @@ RAM_CACHE_LIMIT = 96
 THUMBNAIL_RAM_CACHE_LIMIT_BYTES = 700 * 1024 * 1024
 FULL_PRELOAD_RADIUS = 10
 FULL_RAM_CACHE_LIMIT = FULL_PRELOAD_RADIUS * 2 + 1
+FULL_STRIP_PAGE_SIZE = 160
 PREVIEW_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 DETAIL_ROLE = PREVIEW_ROLE + 1
 SERIES_ROLE = DETAIL_ROLE + 1
@@ -280,6 +285,7 @@ class DecodeBridge(QObject):
     metadataUpdated = Signal(object)
     xmpWritten = Signal(object)
     schedulerFinished = Signal(object)
+    faceSearchFinished = Signal(object)
 
 
 class AiProgressBar(QProgressBar):
@@ -2027,7 +2033,7 @@ class FullView(QFrame):
     ) -> None:
         """Обновляет соседние кадры, текущую серию и навигационные ленты."""
         series_current = current if series_current is None else series_current
-        if generation != self._photo_generation:
+        if generation != self._photo_generation or paths != self.photo_strip._paths:
             self.photo_strip.set_paths(paths, current, details, previews, strip_series_cards)
             self._photo_generation = generation
         else:
@@ -3366,6 +3372,7 @@ class Workspace(QMainWindow):
         self.cache_load_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_flush_executor = ThreadPoolExecutor(max_workers=1)
         self.rename_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch-rename")
+        self.face_search_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="face-search")
         self._preview_cache_write_buffer: dict[
             tuple[int, Path, int], tuple[FolderCache, PixelImage, int]
         ] = {}
@@ -3418,6 +3425,7 @@ class Workspace(QMainWindow):
             visible_thumb_lookup_workers=VISIBLE_THUMB_LOOKUP_WORKERS,
         )
         self.bridge.schedulerFinished.connect(self._on_scheduler_finished)
+        self.bridge.faceSearchFinished.connect(self._on_face_search_finished)
         self.items_by_path: dict[Path, QListWidgetItem] = {}
         self.all_paths: list[Path] = []
         self._custom_order: list[str] = []
@@ -3502,6 +3510,11 @@ class Workspace(QMainWindow):
         except (TypeError, ValueError):
             stored_embedding = None
         self.face_reference: list[float] | None = stored_embedding if isinstance(stored_embedding, list) else None
+        self._face_match_names: set[str] | None = None
+        self._face_search_generation = 0
+        self._face_search_index: FaceSearchIndex | None = None
+        self._face_search_future: Future | None = None
+        self._face_search_cancel: Event | None = None
         self.face_filter_avatar = self._face_avatar_from_entry({
             "avatar": self.settings.value("face_filter_avatar", "", str),
         })
@@ -3520,6 +3533,8 @@ class Workspace(QMainWindow):
         self._folder_context_active = False
         self._pending_folder_grid_context: tuple[list[str], int] | None = None
         self._pending_view_cursor_path: Path | None = None
+        self._pending_view_selection: set[Path] = set()
+        self._pending_view_scroll: int | None = None
         self._restoring_folder_grid_context = False
         self.folder_cache: FolderCache | None = None
         self._ai_pipeline = None
@@ -3633,6 +3648,7 @@ class Workspace(QMainWindow):
         if self.closing:
             return
         self.closing = True
+        self._cancel_face_search()
         self._set_taskbar_progress(0, 0)
         self._taskbar_progress.close()
         self._save_folder_grid_context()
@@ -3663,6 +3679,7 @@ class Workspace(QMainWindow):
         retire_executor(self.cache_load_executor)
         retire_executor(self.cache_flush_executor, cancel_futures=False)
         retire_executor(self.rename_executor, cancel_futures=False)
+        retire_executor(self.face_search_executor)
         retire_executor(self.cache_maintenance_executor)
         # XMP отражает явные пользовательские изменения и не является
         # производным кэшем, поэтому очередь дописывается полностью.
@@ -4486,15 +4503,15 @@ class Workspace(QMainWindow):
 
     def _set_face_search_loading(self, loading: bool) -> None:
         """Показывает поиск лица там, где пользователь увидит его до перестройки списка."""
-        if self.stack.currentWidget() is self.full_view:
-            self.full_view.set_face_search_loading(loading)
-            return
+        # Пользователь может сменить grid на FullView, пока запрос работает.
+        # Оба оверлея должны разделять состояние, иначе один останется поверх результата.
+        self.full_view.set_face_search_loading(loading)
         if loading:
             self.grid_restore_loader_label.setText("Ищу похожие лица")
             self._set_grid_restore_loader_visible(True)
             return
         self.grid_restore_loader_label.setText("Папка открывается")
-        self._set_grid_restore_loader_visible(False)
+        self._set_grid_restore_loader_visible(self._restoring_folder_grid_context)
 
     def eventFilter(self, watched, event) -> bool:
         if watched is getattr(self, "grid_content_stack", None) and event.type() == QEvent.Type.Resize:
@@ -4916,7 +4933,7 @@ class Workspace(QMainWindow):
             if sys.platform == "win32":
                 subprocess.Popen(
                     ["explorer.exe", f"/select,{path}"],
-                    **no_window_kwargs(),
+                    **detached_process_kwargs(),
                 )
             else:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
@@ -6441,6 +6458,9 @@ class Workspace(QMainWindow):
         self.folder_cache = None
         self.cache_ready = False
         self.current_dir = directory
+        self._cancel_face_search()
+        self._face_search_index = None
+        self._face_match_names = None
         self._directory_scan_pending = True
         self._custom_order = self._load_custom_order(directory)
         if self._custom_order and self.sort_combo.findData("custom") < 0:
@@ -6457,6 +6477,8 @@ class Workspace(QMainWindow):
         self.view_paths = []
         self.paths = []
         self._pending_view_cursor_path = None
+        self._pending_view_selection.clear()
+        self._pending_view_scroll = None
         self.photo_details = {}
         self.image_embeddings = {}
         self._file_time_cache.clear()
@@ -6566,19 +6588,45 @@ class Workspace(QMainWindow):
             self.grid.viewport().update()
             self._hide_grid_restore_loader()
 
+    def _remember_view_context(self) -> None:
+        """Запоминает курсор и выделение перед перестройкой фильтрованного грида."""
+        if self._pending_folder_grid_context is not None or self.grid.count() == 0:
+            return
+        current = self.grid.currentItem()
+        if current is not None and self._pending_view_cursor_path is None:
+            value = current.data(Qt.ItemDataRole.UserRole)
+            if value:
+                self._pending_view_cursor_path = Path(value)
+        self._pending_view_selection.update(self._selected_paths())
+        if self._pending_view_scroll is None:
+            self._pending_view_scroll = self.grid.verticalScrollBar().value()
+
     def _restore_pending_view_cursor(self) -> None:
-        """Возвращает курсор на файл, который не должен теряться при снятии фильтра."""
+        """Возвращает сохранившиеся курсор, выделение и позицию после фильтра."""
         path = self._pending_view_cursor_path
+        selected_paths = self._pending_view_selection
+        scroll_value = self._pending_view_scroll
         self._pending_view_cursor_path = None
-        if path is None:
-            return
-        item = self.items_by_path.get(path)
-        if item is None:
-            return
-        self.grid.setCurrentItem(item)
-        item.setSelected(True)
-        self.grid.doItemsLayout()
-        self.grid.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
+        self._pending_view_selection = set()
+        self._pending_view_scroll = None
+        selected_items = [
+            self.items_by_path[selected]
+            for selected in selected_paths
+            if selected in self.items_by_path
+        ]
+        current_item = self.items_by_path.get(path) if path is not None else None
+        if current_item is None and selected_items:
+            current_item = selected_items[0]
+        if current_item is not None:
+            self.grid.setCurrentItem(current_item)
+            current_item.setSelected(True)
+            for item in selected_items:
+                item.setSelected(True)
+            self.grid.doItemsLayout()
+            self.grid.scrollToItem(current_item, QListWidget.ScrollHint.PositionAtCenter)
+        elif scroll_value is not None:
+            scroll_bar = self.grid.verticalScrollBar()
+            scroll_bar.setValue(min(scroll_value, scroll_bar.maximum()))
 
     def _reset_grid_cursor(self) -> None:
         """Ставит курсор навигации на первый элемент текущей папки."""
@@ -6723,7 +6771,11 @@ class Workspace(QMainWindow):
         self._refresh_status_panel()
         if self.populate_index >= len(self.paths):
             self.populate_timer.stop()
-            if self._pending_view_cursor_path is not None:
+            if (
+                self._pending_view_cursor_path is not None
+                or self._pending_view_selection
+                or self._pending_view_scroll is not None
+            ):
                 QTimer.singleShot(0, self._restore_pending_view_cursor)
             if self.cache_ready:
                 QTimer.singleShot(0, self._restore_folder_grid_context)
@@ -7584,12 +7636,18 @@ class Workspace(QMainWindow):
             include_metadata=ENABLE_EXIF_METADATA
         )
         self.image_embeddings = self.folder_cache.load_image_embeddings()
+        self._face_search_index = None
         self._refresh_camera_filter()
         for path, item in self.items_by_path.items():
             item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
         self.grid.viewport().update()
         self._update_analysis_controls()
-        self._apply_view()
+        if self.face_reference is not None:
+            self._cancel_face_search()
+            self._set_face_search_loading(True)
+            self._apply_face_search_view()
+        else:
+            self._apply_view()
 
     def _on_metadata_updated(self, results: object) -> None:
         """Добавляет полученный в фоне EXIF, не перечитывая весь кэш папки."""
@@ -7703,9 +7761,10 @@ class Workspace(QMainWindow):
                     continue
                 if self.color_filter.currentIndex() > 0 and detail.get("color_label", "") != color:
                     continue
-                if self.face_reference is not None and not any(
-                    self._face_similarity(self.face_reference, face.get("embedding", [])) >= 0.42
-                    for face in detail.get("faces", []) if isinstance(face, dict)
+                if (
+                    self.face_reference is not None
+                    and self._face_match_names is not None
+                    and path.name not in self._face_match_names
                 ):
                     continue
                 if needle and needle not in path.name.casefold() and needle not in str(detail.get("comment", "")).casefold():
@@ -7834,6 +7893,9 @@ class Workspace(QMainWindow):
                 include_metadata=ENABLE_EXIF_METADATA
             )
             self.image_embeddings = self.folder_cache.load_image_embeddings()
+            # Данные лиц заменены целиком, поэтому прежний RAM-индекс им больше
+            # не соответствует (при старте он также мог быть ещё пустым).
+            self._face_search_index = None
             for path, item in self.items_by_path.items():
                 item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
         if self._xmp_export_after_cache_load:
@@ -7842,6 +7904,10 @@ class Workspace(QMainWindow):
                 self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
         self._refresh_camera_filter()
         self._apply_view()
+        if self.face_reference is not None:
+            self._cancel_face_search()
+            self._set_face_search_loading(True)
+            self._apply_face_search_view()
         self._refresh_ai_status()
         if (
             self.stack.currentWidget() is self.full_view
@@ -7905,6 +7971,7 @@ class Workspace(QMainWindow):
         """Перестраивает видимый список по фильтрам, поиску и режиму серий."""
         if not hasattr(self, "rating_filter"):
             return
+        self._remember_view_context()
         rating = self.rating_filter.currentData()
         color = self.color_filter.currentData()
         media = self.media_filter.currentData()
@@ -7936,9 +8003,10 @@ class Workspace(QMainWindow):
             faces = detail.get("faces") or []
             if shot is not None and self._shot_size(detail) != shot:
                 return False
-            if self.face_reference is not None and not any(
-                self._face_similarity(self.face_reference, face.get("embedding", [])) >= 0.42
-                for face in faces if isinstance(face, dict)
+            if (
+                self.face_reference is not None
+                and self._face_match_names is not None
+                and path.name not in self._face_match_names
             ):
                 return False
             return not needle or needle in path.name.casefold() or needle in str(detail.get("comment", "")).casefold()
@@ -7987,9 +8055,14 @@ class Workspace(QMainWindow):
         self.thumb_index = 0
         self.thumb_priority.clear()
         self.thumb_priority_set.clear()
+        # Первый пакет появляется в том же событии, что и готовый фильтр. Остальные
+        # карточки добавляются таймером, но пользователь уже не видит пустой grid.
+        if self.workspace_active:
+            self._populate_next_items()
         self._update_analysis_controls()
         self._refresh_status_panel()
-        self.populate_timer.start()
+        if self.workspace_active and self.populate_index < len(self.paths):
+            self.populate_timer.start()
 
     def _collapse_series_paths(self, paths: list[Path]) -> list[Path]:
         if not paths:
@@ -8252,9 +8325,9 @@ class Workspace(QMainWindow):
 
     def _add_face_to_set(self, face: object) -> None:
         """Добавляет найденное лицо в новый или существующий набор человека."""
-        if not isinstance(face, dict) or not isinstance(face.get("embedding"), list):
+        if not isinstance(face, dict) or face.get("embedding") is None:
             return
-        embedding = face["embedding"]
+        embedding = [float(value) for value in face["embedding"]]
         already_added = any(
             self._face_similarity(embedding, item.get("embedding", [])) >= 0.42
             for item in self.face_sets
@@ -8457,11 +8530,19 @@ class Workspace(QMainWindow):
         self._apply_view()
 
     @staticmethod
-    def _face_similarity(left: list[float], right: list[float]) -> float:
-        if not left or len(left) != len(right):
+    def _face_similarity(left: object, right: object) -> float:
+        if left is None or right is None:
             return -1.0
-        dot = sum(a * b for a, b in zip(left, right))
-        norm = math.sqrt(sum(a * a for a in left) * sum(b * b for b in right))
+        try:
+            if len(left) == 0 or len(left) != len(right):
+                return -1.0
+        except TypeError:
+            return -1.0
+        dot = sum(float(a) * float(b) for a, b in zip(left, right))
+        norm = math.sqrt(
+            sum(float(a) * float(a) for a in left)
+            * sum(float(b) * float(b) for b in right)
+        )
         return dot / norm if norm else -1.0
 
     @staticmethod
@@ -8484,8 +8565,31 @@ class Workspace(QMainWindow):
 
     def _filter_face_from_full_view(self, face: object) -> None:
         embedding = face.get("embedding") if isinstance(face, dict) else None
-        if isinstance(embedding, list) and embedding:
-            self._set_face_reference(embedding, self._current_face_avatar(face), show_loading=True)
+        if embedding is not None and len(embedding):
+            reference = [float(value) for value in embedding]
+            canonical = max(
+                self.face_sets,
+                key=lambda entry: self._face_similarity(
+                    reference, entry.get("embedding", [])
+                ),
+                default=None,
+            )
+            if (
+                canonical is not None
+                and self._face_similarity(reference, canonical.get("embedding", []))
+                >= FACE_MATCH_THRESHOLD
+            ):
+                self._set_face_reference(
+                    canonical["embedding"],
+                    self._face_avatar_from_entry(canonical),
+                    show_loading=True,
+                )
+                return
+            self._set_face_reference(
+                reference,
+                self._current_face_avatar(face),
+                show_loading=True,
+            )
 
     def _set_face_reference(
         self,
@@ -8494,8 +8598,11 @@ class Workspace(QMainWindow):
         *,
         show_loading: bool = False,
     ) -> None:
-        """Запоминает лицо и при ручном поиске даёт интерфейсу отрисовать лоадер до фильтра."""
+        """Запоминает лицо и запускает устойчивое сопоставление вне UI-потока."""
+        self._cancel_face_search()
         self.face_reference = embedding
+        self._face_match_names = None
+        self._face_search_generation += 1
         self.face_filter_avatar = avatar or QPixmap()
         self.settings.setValue("face_filter_embedding", json.dumps(embedding, separators=(",", ":")))
         self.settings.setValue("face_filter_avatar", self._pixmap_to_base64(self.face_filter_avatar))
@@ -8509,24 +8616,81 @@ class Workspace(QMainWindow):
         self.full_view.set_face_filter(self.face_filter_avatar)
         if show_loading:
             self._set_face_search_loading(True)
-            # Нулевой тик мог закончиться раньше первой отрисовки оверлея,
-            # поэтому оставляем Qt короткое окно для настоящего кадра лоадера.
-            QTimer.singleShot(50, self._apply_face_search_view)
+            QTimer.singleShot(0, self._apply_face_search_view)
             return
         self._apply_face_search_view()
 
     def _apply_face_search_view(self) -> None:
-        """Применяет готовый фильтр после того, как Qt успел показать его индикатор."""
+        """Считает совпадения в фоне, чтобы бесконечный индикатор продолжал двигаться."""
+        if self.face_reference is None or self.closing:
+            self._set_face_search_loading(False)
+            return
+        # При старте сохранённый фильтр восстанавливается раньше SQLite-кэша.
+        # Пустой индекс из этого окна нельзя кэшировать: иначе он останется
+        # пустым и после загрузки десятков тысяч лиц.
+        if not self.cache_ready:
+            self._set_face_search_loading(True)
+            return
+        generation = self._face_search_generation
+        reference = list(self.face_reference)
+        # photo_details заменяется целиком после обновления кэша, а старый запрос
+        # тогда отменяется. Поэтому фон может читать текущий снимок напрямую, без
+        # синхронной копии тысяч записей перед первым кадром лоадера.
+        details = self.photo_details if self._face_search_index is None else None
+        cancelled = Event()
+        self._face_search_cancel = cancelled
+        future = self.face_search_executor.submit(
+            indexed_face_matches,
+            details,
+            reference,
+            self._face_search_index,
+            cancelled,
+        )
+        self._face_search_future = future
+        future.add_done_callback(
+            lambda done, token=generation: self.bridge.faceSearchFinished.emit((token, done))
+        )
+
+    def _cancel_face_search(self) -> None:
+        """Останавливает текущий обход и удаляет ещё не начатый запрос из очереди."""
+        if self._face_search_cancel is not None:
+            self._face_search_cancel.set()
+            self._face_search_cancel = None
+        if self._face_search_future is not None:
+            self._face_search_future.cancel()
+            self._face_search_future = None
+
+    def _on_face_search_finished(self, payload: object) -> None:
+        """Принимает только последний запрос лица и перестраивает вид после расчёта."""
+        generation, future = payload
+        if (
+            self.closing
+            or generation != self._face_search_generation
+            or future is not self._face_search_future
+            or future.cancelled()
+        ):
+            return
+        self._face_search_future = None
+        self._face_search_cancel = None
+        try:
+            self._face_search_index, matches = future.result()
+            self._face_match_names = set(matches)
+        except Exception as exc:
+            self.bridge.failed.emit(str(self.current_dir), str(exc))
+            self._face_match_names = set()
         self._apply_view()
         if self.stack.currentWidget() is self.full_view and self.current_path is not None:
             self._refresh_full_view_navigation(self.current_path)
-        QTimer.singleShot(0, lambda: self._set_face_search_loading(False))
+        self._set_face_search_loading(False)
 
     def _clear_face_search(self) -> None:
         # Файл текущего просмотра остаётся валидным после снятия фильтра и
         # должен быть точкой возврата, а не исчезнуть в начале длинной сетки.
         self._pending_view_cursor_path = self.current_path
+        self._cancel_face_search()
         self.face_reference = None
+        self._face_match_names = None
+        self._face_search_generation += 1
         self.face_filter_avatar = QPixmap()
         self.settings.remove("face_filter_embedding")
         self.settings.remove("face_filter_avatar")
@@ -8662,7 +8826,7 @@ class Workspace(QMainWindow):
                 )
                 return
         try:
-            subprocess.Popen(command, **no_window_kwargs())
+            subprocess.Popen(command, **detached_process_kwargs())
         except OSError as error:
             QMessageBox.warning(self, "Не удалось открыть редактор", str(error))
 
@@ -8761,7 +8925,6 @@ class Workspace(QMainWindow):
             (path,),
         )
         self.stack.setCurrentWidget(self.full_view)
-        self._refresh_full_view_navigation(path)
         self.fullViewRequested.emit(self)
         self.full_view.setFocus(Qt.FocusReason.OtherFocusReason)
         if is_supported_video(path):
@@ -8770,11 +8933,29 @@ class Workspace(QMainWindow):
             self.full_view.set_video(path, preview if isinstance(preview, QImage) else None)
             if not isinstance(preview, QImage) or preview.isNull():
                 self.video_thumbnailer.request(path)
+            QTimer.singleShot(0, lambda current=path: self._finish_open_full_video(current))
             return
         full_size = self._full_preview_size()
-        self._suspend_thumbnail_work()
-        self._cancel_outdated_full_tasks(path, full_size)
         self._show_best_cached_full(path, full_size)
+        # Навигация и ленты большой папки не должны задерживать первый кадр.
+        QTimer.singleShot(
+            16,
+            lambda current=path, rapid=rapid_navigation: self._finish_open_full(current, rapid),
+        )
+
+    def _finish_open_full_video(self, path: Path) -> None:
+        """Достраивает ленты видео после первой отрисовки его превью."""
+        if not self.closing and path == self.current_path and self.stack.currentWidget() is self.full_view:
+            self._refresh_full_view_navigation(path)
+
+    def _finish_open_full(self, path: Path, rapid_navigation: bool) -> None:
+        """Достраивает ленты после того, как Qt уже показал выбранную фотографию."""
+        if self.closing or path != self.current_path or self.stack.currentWidget() is not self.full_view:
+            return
+        self._suspend_thumbnail_work()
+        self._cancel_outdated_full_tasks(path, self._full_preview_size())
+        self._refresh_full_view_navigation(path)
+        full_size = self._full_preview_size()
         in_series = len(self._series_for_path(path)) > 1
         if in_series:
             self._submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=True)
@@ -8894,6 +9075,12 @@ class Workspace(QMainWindow):
         series = self._full_series_for_path(current)
         strip_current = current if current in indices else series[0]
         strip_index = indices.get(strip_current, 0)
+        # Нижняя лента — визуальный навигатор, а не второе хранилище всех
+        # файлов папки. Стрелки работают по полному снимку, но Qt создаёт лишь
+        # одну стабильную страницу элементов и не платит за 4000 карточек при
+        # первом входе в Full View.
+        page_start = (strip_index // FULL_STRIP_PAGE_SIZE) * FULL_STRIP_PAGE_SIZE
+        visible_strip_paths = strip_paths[page_start : page_start + FULL_STRIP_PAGE_SIZE]
         useful_paths = [*series, *strip_paths[max(0, strip_index - 12) : strip_index + 13]]
         previews: dict[Path, QImage] = {}
         for path in dict.fromkeys(useful_paths):
@@ -8910,7 +9097,7 @@ class Workspace(QMainWindow):
             if cached is not None:
                 previews[path] = cached.image
         self.full_view.set_navigation(
-            strip_paths,
+            visible_strip_paths,
             strip_current,
             self.photo_details,
             previews,
@@ -8918,8 +9105,12 @@ class Workspace(QMainWindow):
             self.view_generation,
             series_current=current,
             strip_series_cards=(
-                strip_cards
-                if navigation_changed or self.full_view._photo_generation != self.view_generation
+                {path: strip_cards.get(path, {}) for path in visible_strip_paths}
+                if (
+                    navigation_changed
+                    or self.full_view._photo_generation != self.view_generation
+                    or visible_strip_paths != self.full_view.photo_strip._paths
+                )
                 else None
             ),
             show_series_strip=not (len(series) > 1 and series[0] in self.expanded_series),
@@ -9104,12 +9295,13 @@ class Workspace(QMainWindow):
         if thumb is not None:
             self.full_view.set_image(thumb, fallback=True)
             return
-        if self.folder_cache is None:
-            return
-        thumb = self.folder_cache.load(path, THUMB_SIZE)
-        if thumb is not None:
-            self._cache_put((path, THUMB_SIZE), thumb)
-            self.full_view.set_image(thumb, fallback=True)
+        item = self.items_by_path.get(path)
+        preview = item.data(PREVIEW_ROLE) if item is not None else self._thumbnail_cache_get(path)
+        if isinstance(preview, QImage) and not preview.isNull():
+            self.full_view.set_image(
+                DecodedImage(path=path, image=preview, width=preview.width(), height=preview.height()),
+                fallback=True,
+            )
 
     def _full_preview_size(self) -> int:
         screen = self.screen() or QApplication.primaryScreen()
@@ -10085,12 +10277,36 @@ class _StartupWindowTrace(QObject):
         print(f"[startup-window {elapsed:0.3f}s]", *parts, file=sys.stderr, flush=True)
 
 
+def _install_interrupt_shutdown(app: QApplication, window: MainWindow) -> None:
+    """Проводит Ctrl+C через закрытие окна и штатную финализацию очередей."""
+    if not hasattr(signal, "SIGINT"):
+        return
+
+    def request_shutdown(_signum, _frame) -> None:
+        # Python-сигнал способен прервать произвольный Qt callback. Закрытие
+        # откладывается до следующего оборота event loop, чтобы не войти в него
+        # повторно посреди обновления грида или дерева дисков.
+        QTimer.singleShot(0, window.close)
+
+    signal.signal(signal.SIGINT, request_shutdown)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, request_shutdown)
+    # Qt может надолго уйти в нативный event loop без исполнения Python-кода.
+    # Короткий пустой timer даёт интерпретатору регулярно доставлять SIGINT.
+    heartbeat = QTimer(app)
+    heartbeat.setInterval(200)
+    heartbeat.timeout.connect(lambda: None)
+    heartbeat.start()
+    app._interrupt_heartbeat = heartbeat  # type: ignore[attr-defined]
+
+
 def main() -> None:
     """Настраивает окружение Qt, единственный экземпляр и запускает приложение."""
     install_error_logging()
     import multiprocessing
 
     multiprocessing.freeze_support()
+    install_process_tree_guard()
     _set_windows_app_user_model_id()
     app = QApplication(sys.argv)
     single_instance = SingleInstance(app)
@@ -10111,6 +10327,7 @@ def main() -> None:
     single_instance.target_received.connect(window.open_external_target)
     telemetry = TelemetryClient(window.settings, app)
     telemetry.start()
+    _install_interrupt_shutdown(app, window)
     app.aboutToQuit.connect(window.shutdown_background_work)
     app.aboutToQuit.connect(telemetry.stop)
     app.aboutToQuit.connect(wait_for_retired_executors)
@@ -10149,4 +10366,14 @@ def main() -> None:
     if startup_trace is not None:
         startup_trace.snapshot("show-requested")
         QTimer.singleShot(3_000, startup_trace.finish)
-    sys.exit(app.exec())
+    try:
+        exit_code = app.exec()
+    except KeyboardInterrupt:
+        # Страховка для платформ, где SIGINT успел прийти до установки
+        # обработчика: фон всё равно завершается до выхода интерпретатора.
+        exit_code = 130
+    finally:
+        window.shutdown_background_work()
+        telemetry.stop()
+        wait_for_retired_executors()
+    sys.exit(exit_code)

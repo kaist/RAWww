@@ -185,6 +185,10 @@ class DecodeScheduler:
             return
         try:
             decoded = future.result()
+        except FileNotFoundError:
+            # Файл мог исчезнуть между чтением папки и ответом SQLite. Это
+            # отменённая работа, а не ошибка декодера для пользователя.
+            return
         except Exception as exc:
             log_exception(f"Не удалось получить превью видео: {path}", exc)
             self._host.bridge.failed.emit(str(path), str(exc))
@@ -287,6 +291,10 @@ class DecodeScheduler:
             return
         try:
             decoded = future.result()
+        except FileNotFoundError:
+            # Удаление, перенос и пакетное переименование закономерно обгоняют
+            # фоновую очередь превью. Поздний промах просто отбрасывается.
+            return
         except Exception as exc:
             self.visible_thumb_pending.discard(key)
             log_exception(f"Не удалось прочитать кэш превью: {path}", exc)
@@ -329,7 +337,7 @@ class DecodeScheduler:
             if image is not None:
                 self._host.decode_cache.put((path, self._thumb_size), image)
                 self._host.bridge.decoded.emit((image, self._thumb_size))
-            else:
+            elif path.is_file():
                 self._submit_process_decode(
                     path, self._thumb_size, full_priority=False, visible_priority=False
                 )
@@ -365,6 +373,9 @@ class DecodeScheduler:
                 self._host.queue_preview_cache_write(
                     self._host.folder_cache, result, max_size
                 )
+        except FileNotFoundError:
+            # Задача уже не относится к существующему пользовательскому файлу.
+            return
         except Exception as exc:
             log_exception(f"Не удалось декодировать файл: {path}", exc)
             self._host.bridge.failed.emit(str(path), str(exc))

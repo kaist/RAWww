@@ -895,8 +895,9 @@ def apply_theme(app: QApplication) -> None:
             background: #707070;
         }
         QFrame#gridRestoreLoader {
-            background: transparent;
-            border: 0;
+            background: rgba(24, 24, 24, 0.94);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 10px;
         }
         QLabel#gridRestoreLoaderText {
             background: transparent;
@@ -916,8 +917,9 @@ def apply_theme(app: QApplication) -> None:
             background: #8a8a8a;
         }
         QFrame#faceSearchLoader {
-            background: transparent;
-            border: 0;
+            background: rgba(24, 24, 24, 0.94);
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 10px;
         }
         QLabel#faceSearchLoaderText {
             background: transparent;

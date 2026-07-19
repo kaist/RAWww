@@ -44,13 +44,19 @@ class _Bridge:
 class _FolderCache:
     """Управляемая заглушка кэша для проверки попаданий и промахов."""
 
-    def __init__(self, loads: dict | None = None, raises: bool = False) -> None:
+    def __init__(
+        self,
+        loads: dict | None = None,
+        raises: bool | BaseException = False,
+    ) -> None:
         self._loads = loads or {}
         self._raises = raises
         self.stored: list = []
 
     def load(self, path: Path, size: int):
         if self._raises:
+            if isinstance(self._raises, BaseException):
+                raise self._raises
             raise RuntimeError("boom")
         return self._loads.get((path, size))
 
@@ -273,6 +279,17 @@ class DecodeSchedulerTests(unittest.TestCase):
         scheduler.submit_decode(path, THUMB_SIZE, full_priority=False)
         self.assertEqual(len(host.bridge.failed.emitted), 1)
         self.assertEqual(host.bridge.failed.emitted[0][0], str(path))
+        self.assertEqual(scheduler.pending, {})
+
+    def test_missing_file_during_cache_lookup_is_silent(self) -> None:
+        path = Path("/photos/renamed.jpg")
+        folder = _FolderCache(raises=FileNotFoundError(path))
+        scheduler, host = _make(folder)
+
+        scheduler.submit_decode(path, THUMB_SIZE, full_priority=False)
+
+        self.assertEqual(host.bridge.failed.emitted, [])
+        self.assertEqual(host.bridge.decoded.emitted, [])
         self.assertEqual(scheduler.pending, {})
 
     def test_foreground_full_future_tracked_for_current_path(self) -> None:

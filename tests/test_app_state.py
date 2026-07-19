@@ -4,20 +4,21 @@
 from __future__ import annotations
 
 import os
+import signal
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt
 from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QStackedWidget, QWidget
+from PySide6.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMenu, QStackedWidget, QWidget
 
-from rawww.app import ChromeTabBar, FullView, MainWindow, Workspace, _application_settings, _format_remaining_time, _scan_directory
+from rawww.app import ChromeTabBar, FullView, MainWindow, Workspace, _application_settings, _format_remaining_time, _install_interrupt_shutdown, _scan_directory
 from rawww.hotkeys import FIXED_HOTKEYS
 from rawww.theme import apply_theme
 
@@ -116,6 +117,134 @@ class AppStateTests(unittest.TestCase):
         workspace.close()
         workspace.deleteLater()
         parent.deleteLater()
+
+    def test_ctrl_c_schedules_normal_window_close(self) -> None:
+        window = Mock()
+        captured = {}
+
+        def remember_handler(signal_number, handler) -> None:
+            captured[signal_number] = handler
+
+        with (
+            patch("rawww.app.signal.signal", side_effect=remember_handler),
+            patch("rawww.app.QTimer.singleShot") as single_shot,
+        ):
+            _install_interrupt_shutdown(self.app, window)
+            captured[signal.SIGINT](None, None)
+
+        single_shot.assert_called_once_with(0, window.close)
+        self.app._interrupt_heartbeat.stop()
+
+    def test_grid_filter_rebuild_keeps_surviving_cursor_and_selection(self) -> None:
+        workspace = Workspace(defer_initial_scan=True)
+        first = Path("/photos/first.jpg")
+        second = Path("/photos/second.jpg")
+        removed = Path("/photos/removed.jpg")
+
+        def item(path: Path) -> QListWidgetItem:
+            result = QListWidgetItem(path.name)
+            result.setData(Qt.ItemDataRole.UserRole, str(path))
+            return result
+
+        old_items = {path: item(path) for path in (first, second, removed)}
+        for old_item in old_items.values():
+            workspace.grid.addItem(old_item)
+        workspace.items_by_path = old_items
+        workspace.grid.setCurrentItem(old_items[second])
+        old_items[first].setSelected(True)
+        old_items[second].setSelected(True)
+        old_items[removed].setSelected(True)
+
+        workspace._remember_view_context()
+        workspace.grid.clear()
+        new_items = {path: item(path) for path in (first, second)}
+        for new_item in new_items.values():
+            workspace.grid.addItem(new_item)
+        workspace.items_by_path = new_items
+        workspace._restore_pending_view_cursor()
+
+        self.assertIs(workspace.grid.currentItem(), new_items[second])
+        self.assertTrue(new_items[first].isSelected())
+        self.assertTrue(new_items[second].isSelected())
+        workspace.close()
+        workspace.deleteLater()
+
+    def test_face_search_loader_is_hidden_in_grid_and_full_view(self) -> None:
+        host = SimpleNamespace(
+            full_view=SimpleNamespace(set_face_search_loading=Mock()),
+            grid_restore_loader_label=SimpleNamespace(setText=Mock()),
+            _set_grid_restore_loader_visible=Mock(),
+            _restoring_folder_grid_context=False,
+        )
+
+        Workspace._set_face_search_loading(host, True)
+        Workspace._set_face_search_loading(host, False)
+
+        self.assertEqual(
+            host.full_view.set_face_search_loading.call_args_list,
+            [call(True), call(False)],
+        )
+        self.assertEqual(
+            host._set_grid_restore_loader_visible.call_args_list,
+            [call(True), call(False)],
+        )
+
+    def test_ready_face_filter_immediately_populates_grid_and_strip(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(defer_initial_scan=True)
+            paths = [Path(directory) / f"photo-{index}.jpg" for index in range(4)]
+            for path in paths:
+                path.touch()
+            workspace.workspace_active = True
+            workspace.all_paths = paths
+            workspace.photo_details = {path.name: {} for path in paths}
+            workspace.face_reference = [1.0, 0.0]
+            workspace._face_match_names = {paths[1].name, paths[3].name}
+
+            workspace._apply_view()
+            workspace.current_path = paths[1]
+            workspace._refresh_full_view_navigation(paths[1])
+
+            self.assertEqual(workspace.view_paths, [paths[1], paths[3]])
+            self.assertEqual(workspace.grid.count(), 2)
+            self.assertEqual(workspace.full_view.photo_strip.count(), 2)
+            workspace.close()
+            workspace.deleteLater()
+
+    def test_photo_face_uses_matching_saved_face_as_canonical_reference(self) -> None:
+        saved = {"embedding": [1.0, 0.0], "avatar": ""}
+        host = SimpleNamespace(
+            face_sets=[saved],
+            _face_similarity=Workspace._face_similarity,
+            _face_avatar_from_entry=Mock(return_value=None),
+            _current_face_avatar=Mock(return_value=None),
+            _set_face_reference=Mock(),
+        )
+
+        Workspace._filter_face_from_full_view(
+            host,
+            {"embedding": [0.95, 0.05]},
+        )
+
+        host._set_face_reference.assert_called_once_with(
+            saved["embedding"],
+            None,
+            show_loading=True,
+        )
+
+    def test_restored_face_filter_waits_for_folder_cache(self) -> None:
+        workspace = Workspace(defer_initial_scan=True)
+        workspace.face_reference = [1.0, 0.0]
+        workspace.cache_ready = False
+        workspace.photo_details = {}
+
+        workspace._apply_face_search_view()
+
+        self.assertIsNone(workspace._face_search_index)
+        self.assertIsNone(workspace._face_search_future)
+        self.assertIsNone(workspace._face_match_names)
+        workspace.close()
+        workspace.deleteLater()
 
     def test_remaining_time_format_is_compact(self) -> None:
         self.assertEqual(_format_remaining_time(12.4), "≈ 12 с")
