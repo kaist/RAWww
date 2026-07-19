@@ -894,6 +894,48 @@ def apply_theme(app: QApplication) -> None:
             border-radius: 5px;
             background: #707070;
         }
+        QFrame#gridRestoreLoader {
+            background: transparent;
+            border: 0;
+        }
+        QLabel#gridRestoreLoaderText {
+            background: transparent;
+            color: #e4e4e4;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        QProgressBar#gridRestoreLoaderProgress {
+            min-height: 5px;
+            max-height: 5px;
+            border: 0;
+            border-radius: 2px;
+            background: #111111;
+        }
+        QProgressBar#gridRestoreLoaderProgress::chunk {
+            border-radius: 2px;
+            background: #8a8a8a;
+        }
+        QFrame#faceSearchLoader {
+            background: transparent;
+            border: 0;
+        }
+        QLabel#faceSearchLoaderText {
+            background: transparent;
+            color: #e4e4e4;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        QProgressBar#faceSearchLoaderProgress {
+            min-height: 5px;
+            max-height: 5px;
+            border: 0;
+            border-radius: 2px;
+            background: #111111;
+        }
+        QProgressBar#faceSearchLoaderProgress::chunk {
+            border-radius: 2px;
+            background: #8a8a8a;
+        }
         QWidget#viewerFiltersPanel {
             min-height: 27px;
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,

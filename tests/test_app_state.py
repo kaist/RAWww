@@ -17,7 +17,7 @@ from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QStackedWidget, QWidget
 
-from rawww.app import ChromeTabBar, FullView, MainWindow, Workspace, _application_settings, _scan_directory
+from rawww.app import ChromeTabBar, FullView, MainWindow, Workspace, _application_settings, _format_remaining_time, _scan_directory
 from rawww.hotkeys import FIXED_HOTKEYS
 from rawww.theme import apply_theme
 
@@ -116,6 +116,38 @@ class AppStateTests(unittest.TestCase):
         workspace.close()
         workspace.deleteLater()
         parent.deleteLater()
+
+    def test_remaining_time_format_is_compact(self) -> None:
+        self.assertEqual(_format_remaining_time(12.4), "≈ 12 с")
+        self.assertEqual(_format_remaining_time(75), "≈ 1 мин 15 с")
+        self.assertEqual(_format_remaining_time(7_250), "≈ 2 ч 0 мин")
+
+    def test_cancel_ai_analysis_stops_pipeline_and_auto_restart(self) -> None:
+        pipeline = Mock()
+        pipeline.pending_count.return_value = 1
+        workspace = SimpleNamespace(
+            _ai_pipeline=pipeline,
+            current_dir=Path("photos"),
+            ai_progress_timer=Mock(),
+            _ai_progress_started_at=1.0,
+            _ai_requested_generation=4,
+            _cache_ai_waiting=True,
+            _cache_ai_paths={Path("photos/a.jpg")},
+            _auto_ai_generation=-1,
+            view_generation=4,
+            ai_analysis_available=True,
+            _refresh_status_panel=Mock(),
+        )
+
+        Workspace._cancel_ai_analysis(workspace)
+
+        pipeline.shutdown.assert_called_once_with()
+        workspace.ai_progress_timer.stop.assert_called_once_with()
+        self.assertIsNone(workspace._ai_pipeline)
+        self.assertIsNone(workspace._ai_progress_started_at)
+        self.assertFalse(workspace._cache_ai_waiting)
+        self.assertEqual(workspace._cache_ai_paths, set())
+        self.assertEqual(workspace._auto_ai_generation, 4)
 
     def test_close_button_does_not_activate_tab_before_requesting_close(self) -> None:
         tabs = ChromeTabBar()
@@ -433,14 +465,73 @@ class AppStateTests(unittest.TestCase):
         self.assertEqual(host._viewer_toast.text(), "Второй")
         host.close()
 
-    def test_directory_scan_skips_file_without_read_access(self) -> None:
+    def test_directory_scan_defers_read_access_check_until_decode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
             photo = folder / "photo.jpg"
             photo.write_bytes(b"image")
 
             with patch.object(Path, "open", side_effect=PermissionError):
-                self.assertEqual(_scan_directory(folder), [])
+                self.assertEqual(_scan_directory(folder), [photo])
+
+    def test_rename_uses_one_pass_when_names_do_not_intersect(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            (folder / "first.jpg").write_bytes(b"first")
+            (folder / "second.jpg").write_bytes(b"second")
+            workspace = SimpleNamespace(
+                current_dir=folder,
+                _rename_step_count=Workspace._rename_step_count,
+            )
+
+            Workspace._rename_files_safely(
+                workspace,
+                {"first.jpg": "new-first.jpg", "second.jpg": "new-second.jpg"},
+            )
+
+            self.assertEqual((folder / "new-first.jpg").read_bytes(), b"first")
+            self.assertEqual((folder / "new-second.jpg").read_bytes(), b"second")
+
+    def test_rename_preserves_files_when_names_are_swapped(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            (folder / "first.jpg").write_bytes(b"first")
+            (folder / "second.jpg").write_bytes(b"second")
+            workspace = SimpleNamespace(
+                current_dir=folder,
+                _rename_step_count=Workspace._rename_step_count,
+            )
+
+            Workspace._rename_files_safely(
+                workspace,
+                {"first.jpg": "second.jpg", "second.jpg": "first.jpg"},
+            )
+
+            self.assertEqual((folder / "first.jpg").read_bytes(), b"second")
+            self.assertEqual((folder / "second.jpg").read_bytes(), b"first")
+
+    def test_full_navigation_reuses_snapshot_until_view_changes(self) -> None:
+        paths = [Path(f"/photos/{index}.jpg") for index in range(4_000)]
+        workspace = SimpleNamespace(
+            view_generation=7,
+            view_paths=paths,
+            series_toggle=SimpleNamespace(isChecked=lambda: False),
+            series_cards={},
+            _full_navigation_generation=-1,
+            _full_navigation_paths=[],
+            _full_navigation_indices={},
+            _full_navigation_series={},
+            _full_navigation_cards={},
+        )
+
+        with patch.object(Path, "is_file", return_value=True):
+            first = Workspace._full_navigation_snapshot(workspace)
+            second = Workspace._full_navigation_snapshot(workspace)
+
+        self.assertTrue(first[-1])
+        self.assertFalse(second[-1])
+        self.assertIs(first[0], second[0])
+        self.assertEqual(second[1][paths[-1]], len(paths) - 1)
 
     def test_directory_card_is_never_sent_to_image_decoder(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -503,6 +594,40 @@ class AppStateTests(unittest.TestCase):
         self.assertFalse(Workspace._previews_ready_for_ai(workspace))
         workspace.preview_finished_paths.add(second)
         self.assertTrue(Workspace._previews_ready_for_ai(workspace))
+
+    def test_ai_queue_notifies_until_previews_are_ready(self) -> None:
+        workspace = SimpleNamespace(
+            closing=False,
+            cache_ready=True,
+            folder_cache=object(),
+            _previews_ready_for_manual_ai=lambda: False,
+            view_generation=7,
+            _ai_requested_generation=-1,
+            ai_analysis_available=True,
+            _show_viewer_toast=Mock(),
+            _refresh_status_panel=Mock(),
+        )
+
+        Workspace._start_ai_analysis(workspace)
+
+        self.assertEqual(workspace._ai_requested_generation, 7)
+        self.assertFalse(workspace.ai_analysis_available)
+        workspace._show_viewer_toast.assert_called_once_with("AI-анализ поставлен в очередь")
+        workspace._refresh_status_panel.assert_called_once_with()
+
+    def test_manual_ai_can_restart_without_pending_cache_paths(self) -> None:
+        launch = Mock()
+        workspace = SimpleNamespace(
+            closing=False,
+            cache_ready=True,
+            folder_cache=object(),
+            _previews_ready_for_manual_ai=lambda: True,
+            _launch_ai_analysis=launch,
+        )
+
+        Workspace._start_ai_analysis(workspace)
+
+        launch.assert_called_once_with()
 
     def test_series_mode_is_saved_globally(self) -> None:
         settings = _Settings()

@@ -136,11 +136,11 @@ SERIES_ROLE = DETAIL_ROLE + 1
 CURRENT_DECODE_WORKERS = 2
 BACKGROUND_DECODE_WORKERS = 3
 VISIBLE_THUMB_DECODE_WORKERS = 1
-MAX_PENDING_THUMBS = 3
+MAX_PENDING_THUMBS = 8
 VISIBLE_THUMB_LOOKUP_WORKERS = 2
 MAX_VISIBLE_THUMB_PENDING = 1
 POPULATE_BATCH = 48
-THUMB_SUBMIT_BATCH = 1
+THUMB_SUBMIT_BATCH = 8
 WORK_PUMP_INTERVAL_MS = 16
 FLUSH_INTERVAL_MS = 30_000
 FOLDER_CHANGE_DEBOUNCE_MS = 1_000
@@ -272,10 +272,52 @@ class DecodeBridge(QObject):
     decoded = Signal(object)
     failed = Signal(str, str)
     cacheLoaded = Signal(int, object)
+    aiCacheChecked = Signal(int, object)
     directoryScanned = Signal(object, Path, object)
+    renameProgress = Signal(object, int, int)
+    renameCacheUpdating = Signal(object)
+    renameFinished = Signal(object, object, object)
     metadataUpdated = Signal(object)
     xmpWritten = Signal(object)
     schedulerFinished = Signal(object)
+
+
+class AiProgressBar(QProgressBar):
+    """Полоса AI с рисуемой внутри иконкой отмены, не зависящей от геометрии дочерних кнопок."""
+
+    cancelRequested = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._cancel_visible = False
+
+    def set_cancel_visible(self, visible: bool) -> None:
+        """Показывает крестик только пока AI-задача действительно выполняется."""
+        if self._cancel_visible != visible:
+            self._cancel_visible = visible
+            self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if not self._cancel_visible:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#d6d6d6"), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        center = QPointF(self.width() - 9, self.height() / 2)
+        painter.drawLine(center + QPointF(-3.25, -3.25), center + QPointF(3.25, 3.25))
+        painter.drawLine(center + QPointF(3.25, -3.25), center + QPointF(-3.25, 3.25))
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if (
+            self._cancel_visible
+            and event.button() == Qt.MouseButton.LeftButton
+            and event.position().x() >= self.width() - 18
+        ):
+            self.cancelRequested.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 def _write_xmp_task(path: Path, detail: dict, face_sets: list[dict], replacements: dict[str, str]) -> None:
@@ -283,9 +325,13 @@ def _write_xmp_task(path: Path, detail: dict, face_sets: list[dict], replacement
     write_sidecar(path, build_xmp(detail, face_sets, replacements))
 
 
-def _load_cache_and_check_ai(cache: FolderCache, paths: list[Path]) -> set[Path]:
-    """Открывает кэш папки и проверяет AI-данные в фоне, не подвешивая окно."""
+def _load_cache(cache: FolderCache) -> None:
+    """Открывает SQLite-кэш в фоне, чтобы сразу начать чтение миниатюр."""
     cache.load_from_disk()
+
+
+def _check_cached_ai(cache: FolderCache, paths: list[Path]) -> set[Path]:
+    """Проверяет полноту AI-кэша после старта загрузки миниатюр."""
     embedding_missing = cache.missing_ai_paths(paths, "image_embeddings")
     face_missing = cache.missing_ai_paths(paths, "face_analysis")
     return set(embedding_missing) | set(face_missing)
@@ -820,16 +866,16 @@ class PhotoCardDelegate(QStyledItemDelegate):
         }
 
         if expanded_series:
-            bg = QColor("#a0a0a0") if selected else QColor("#888888" if hovered else "#747474")
+            bg = QColor("#dddddd") if selected else QColor("#888888" if hovered else "#747474")
         else:
-            bg = QColor("#c4c4c4") if selected else QColor("#b3b3b3" if hovered else "#a7a7a7")
+            bg = QColor("#e0e0e0") if selected else QColor("#b3b3b3" if hovered else "#a7a7a7")
         painter.fillRect(rect, bg)
         if label in tints:
             painter.fillRect(rect, tints[label])
         painter.setPen(QPen(QColor(colors.get(label, "#767676")), 2 if label else 1))
         painter.drawRect(rect.adjusted(1, 1, -1, -1))
         if selected:
-            painter.setPen(QPen(QColor("#ececec"), 2))
+            painter.setPen(QPen(QColor("#ffffff"), 3))
             painter.drawRect(rect.adjusted(2, 2, -2, -2))
 
         top, side, bottom = (14, 4, 15) if self.compact else (20, 4, 16)
@@ -1057,7 +1103,6 @@ class ViewerStrip(QListWidget):
         Так сохраняется прокрутка, а Qt не пересоздаёт сотни элементов из-за
         одной приехавшей миниатюры — он и без того сегодня хорошо поработал.
         """
-        series_cards = series_cards or {}
         if paths != self._paths:
             self.clear()
             self._items_by_path.clear()
@@ -1066,7 +1111,7 @@ class ViewerStrip(QListWidget):
                 item = QListWidgetItem(path.name)
                 item.setData(Qt.ItemDataRole.UserRole, str(path))
                 item.setData(DETAIL_ROLE, details.get(path.name, {}))
-                item.setData(SERIES_ROLE, series_cards.get(path, {}))
+                item.setData(SERIES_ROLE, (series_cards or {}).get(path, {}))
                 preview = previews.get(path)
                 if preview is not None:
                     item.setData(PREVIEW_ROLE, preview)
@@ -1077,10 +1122,11 @@ class ViewerStrip(QListWidget):
                 item = self._items_by_path.get(path)
                 if item is not None:
                     item.setData(PREVIEW_ROLE, preview)
-            for path, series in series_cards.items():
-                item = self._items_by_path.get(path)
-                if item is not None:
-                    item.setData(SERIES_ROLE, series)
+            if series_cards is not None:
+                for path, series in series_cards.items():
+                    item = self._items_by_path.get(path)
+                    if item is not None:
+                        item.setData(SERIES_ROLE, series)
         self.set_current(current)
 
     def set_current(self, current: Path | None) -> None:
@@ -1800,15 +1846,32 @@ class FullView(QFrame):
         face_chip_layout.addWidget(self.face_filter_avatar)
         self.face_filter_clear = QToolButton()
         self.face_filter_clear.setObjectName("fullFaceFilterClear")
-        self.face_filter_clear.setIcon(_fomantic_icon("close", 12))
-        self.face_filter_clear.setFixedSize(20, 20)
-        self.face_filter_clear.setIconSize(QSize(12, 12))
+        self.face_filter_clear.setIcon(_fomantic_icon("close", 16))
+        self.face_filter_clear.setFixedSize(26, 26)
+        self.face_filter_clear.setIconSize(QSize(16, 16))
         self.face_filter_clear.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.face_filter_clear.setAutoRaise(True)
         self.face_filter_clear.setToolTip("Сбросить фильтр по лицу")
         self.face_filter_clear.clicked.connect(self.faceFilterClearRequested)
         face_chip_layout.addWidget(self.face_filter_clear)
         self.face_filter_chip.hide()
+
+        self.face_search_loader = QFrame(self.media_panel)
+        self.face_search_loader.setObjectName("faceSearchLoader")
+        face_loader_layout = QVBoxLayout(self.face_search_loader)
+        face_loader_layout.setContentsMargins(20, 12, 20, 12)
+        face_loader_layout.setSpacing(7)
+        face_loader_label = QLabel("Ищу похожие лица")
+        face_loader_label.setObjectName("faceSearchLoaderText")
+        face_loader_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        face_loader_layout.addWidget(face_loader_label)
+        face_loader_progress = QProgressBar()
+        face_loader_progress.setObjectName("faceSearchLoaderProgress")
+        face_loader_progress.setRange(0, 0)
+        face_loader_progress.setTextVisible(False)
+        face_loader_layout.addWidget(face_loader_progress)
+        self.face_search_loader.setFixedSize(210, 62)
+        self.face_search_loader.hide()
 
         self.audio_player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -2312,6 +2375,7 @@ class FullView(QFrame):
             self._position_counter()
             self._position_face_filter_chip()
             self._position_mark_indicator()
+            self._position_face_search_loader()
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -2321,6 +2385,7 @@ class FullView(QFrame):
         QTimer.singleShot(0, self._position_face_filter_chip)
         QTimer.singleShot(0, self._position_counter)
         QTimer.singleShot(0, self._position_mark_indicator)
+        QTimer.singleShot(0, self._position_face_search_loader)
 
     def _position_face_filter_chip(self) -> None:
         if not self.face_filter_chip.isVisible():
@@ -2330,6 +2395,21 @@ class FullView(QFrame):
             max(8, self.media_panel.width() - self.face_filter_chip.width() - self.mark_indicator.width() - 20), 12
         )
         self.face_filter_chip.raise_()
+
+    def set_face_search_loading(self, loading: bool) -> None:
+        """Показывает состояние поиска, пока Workspace фильтрует большую папку."""
+        if not loading:
+            self.face_search_loader.hide()
+            return
+        self._position_face_search_loader()
+        self.face_search_loader.show()
+        self.face_search_loader.raise_()
+
+    def _position_face_search_loader(self) -> None:
+        self.face_search_loader.move(
+            max(0, (self.media_panel.width() - self.face_search_loader.width()) // 2),
+            max(0, (self.media_panel.height() - self.face_search_loader.height()) // 2),
+        )
 
     def _position_mark_indicator(self) -> None:
         if not self.mark_indicator.isVisible():
@@ -3229,6 +3309,18 @@ def _humanize_shotsync_network_error(error: str) -> str:
     return "Не удалось подключиться к ShotSync."
 
 
+def _format_remaining_time(seconds: float) -> str:
+    """Возвращает короткую оценку оставшегося времени для строки прогресса."""
+    total_seconds = max(1, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"≈ {hours} ч {minutes} мин"
+    if minutes:
+        return f"≈ {minutes} мин {seconds} с"
+    return f"≈ {seconds} с"
+
+
 class Workspace(QMainWindow):
     """Одна независимая рабочая вкладка с папкой фотографий.
 
@@ -3273,6 +3365,7 @@ class Workspace(QMainWindow):
         self.directory_scan_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_load_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_flush_executor = ThreadPoolExecutor(max_workers=1)
+        self.rename_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch-rename")
         self._preview_cache_write_buffer: dict[
             tuple[int, Path, int], tuple[FolderCache, PixelImage, int]
         ] = {}
@@ -3285,7 +3378,11 @@ class Workspace(QMainWindow):
         self.bridge.decoded.connect(self._on_decoded)
         self.bridge.failed.connect(self._on_decode_failed)
         self.bridge.cacheLoaded.connect(self._on_cache_loaded)
+        self.bridge.aiCacheChecked.connect(self._on_ai_cache_checked)
         self.bridge.directoryScanned.connect(self._on_directory_scanned)
+        self.bridge.renameProgress.connect(self._on_rename_progress)
+        self.bridge.renameCacheUpdating.connect(self._on_rename_cache_updating)
+        self.bridge.renameFinished.connect(self._on_rename_finished)
         self.bridge.metadataUpdated.connect(self._on_metadata_updated)
         self.bridge.xmpWritten.connect(self._on_xmp_written)
         self.video_thumbnailer = VideoThumbnailer(self)
@@ -3328,11 +3425,21 @@ class Workspace(QMainWindow):
         self.preview_finished_paths: set[Path] = set()
         self.view_paths: list[Path] = []
         self.view_generation = 0
+        self._full_navigation_generation = -1
+        self._full_navigation_paths: list[Path] = []
+        self._full_navigation_indices: dict[Path, int] = {}
+        self._full_navigation_series: dict[Path, tuple[Path, ...]] = {}
+        self._full_navigation_cards: dict[Path, dict] = {}
         self.paths: list[Path] = []
         self.series_cards: dict[Path, dict] = {}
         self.expanded_series: set[Path] = set()
         self.photo_details: dict[str, dict] = {}
         self.image_embeddings: dict[str, bytes] = {}
+        self._status_visible_count = 0
+        self._status_total_count = 0
+        self._status_positions: dict[Path, int] = {}
+        self._file_time_cache: dict[Path, float] = {}
+        self._metadata_view_refresh_needed = False
         self.settings = _application_settings()
         self.destination_paths_provider: Callable[[], list[Path]] | None = None
 
@@ -3412,11 +3519,14 @@ class Workspace(QMainWindow):
         self.workspace_active = False
         self._folder_context_active = False
         self._pending_folder_grid_context: tuple[list[str], int] | None = None
+        self._pending_view_cursor_path: Path | None = None
+        self._restoring_folder_grid_context = False
         self.folder_cache: FolderCache | None = None
         self._ai_pipeline = None
         self._metadata_pipeline = None
         self._resume_ai_when_active = False
         self.ai_progress_total = 0
+        self._ai_progress_started_at: float | None = None
         self.preview_progress_total = 0
         self._auto_ai_generation = -1
         self._ai_requested_generation = -1
@@ -3493,6 +3603,14 @@ class Workspace(QMainWindow):
         self.ai_progress_timer = QTimer(self)
         self.ai_progress_timer.setInterval(250)
         self.ai_progress_timer.timeout.connect(self._update_ai_progress)
+        self.status_refresh_timer = QTimer(self)
+        self.status_refresh_timer.setSingleShot(True)
+        self.status_refresh_timer.setInterval(80)
+        self.status_refresh_timer.timeout.connect(self._refresh_status_panel)
+        self.metadata_ui_timer = QTimer(self)
+        self.metadata_ui_timer.setSingleShot(True)
+        self.metadata_ui_timer.setInterval(250)
+        self.metadata_ui_timer.timeout.connect(self._flush_metadata_ui_updates)
 
         self._create_actions()
         initial_scan_delay = 350 if defer_initial_scan else 0
@@ -3525,6 +3643,9 @@ class Workspace(QMainWindow):
         self.populate_timer.stop()
         self.thumb_timer.stop()
         self.ai_progress_timer.stop()
+        self._ai_progress_started_at = None
+        self.status_refresh_timer.stop()
+        self.metadata_ui_timer.stop()
         self.folder_change_timer.stop()
         self.volume_refresh_timer.stop()
         self.preview_cache_write_timer.stop()
@@ -3541,6 +3662,7 @@ class Workspace(QMainWindow):
         retire_executor(self.directory_scan_executor)
         retire_executor(self.cache_load_executor)
         retire_executor(self.cache_flush_executor, cancel_futures=False)
+        retire_executor(self.rename_executor, cancel_futures=False)
         retire_executor(self.cache_maintenance_executor)
         # XMP отражает явные пользовательские изменения и не является
         # производным кэшем, поэтому очередь дописывается полностью.
@@ -3960,9 +4082,9 @@ class Workspace(QMainWindow):
         chip_layout.addWidget(self.face_filter_avatar_label)
         self.face_clear_button = QToolButton()
         self.face_clear_button.setObjectName("fullFaceFilterClear")
-        self.face_clear_button.setIcon(_fomantic_icon("close", 10))
-        self.face_clear_button.setFixedSize(17, 17)
-        self.face_clear_button.setIconSize(QSize(10, 10))
+        self.face_clear_button.setIcon(_fomantic_icon("close", 14))
+        self.face_clear_button.setFixedSize(23, 23)
+        self.face_clear_button.setIconSize(QSize(14, 14))
         self.face_clear_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.face_clear_button.setAutoRaise(True)
         self.face_clear_button.setToolTip("Сбросить фильтр по лицу")
@@ -4019,13 +4141,15 @@ class Workspace(QMainWindow):
         status_layout = QVBoxLayout(self.status_panel)
         status_layout.setContentsMargins(0, 0, 0, 0)
         status_layout.setSpacing(2)
-        self.status_progress = QProgressBar()
+        self.status_progress = AiProgressBar()
         self.status_progress.setObjectName("viewerStatusProgress")
         self.status_progress.setFixedHeight(14)
         self.status_progress.setTextVisible(True)
         progress_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         progress_policy.setRetainSizeWhenHidden(True)
         self.status_progress.setSizePolicy(progress_policy)
+        self.status_progress.setToolTip("Нажмите на крестик справа, чтобы остановить AI-анализ")
+        self.status_progress.cancelRequested.connect(self._cancel_ai_analysis)
         self.status_progress.hide()
         status_layout.addWidget(self.status_progress)
         self.status_label = QLabel()
@@ -4105,6 +4229,26 @@ class Workspace(QMainWindow):
 
         self.grid_content_stack = QStackedWidget()
         self.grid_content_stack.addWidget(self.grid)
+        self.grid_restore_loader = QFrame(self.grid_content_stack)
+        self.grid_restore_loader.setObjectName("gridRestoreLoader")
+        loader_layout = QVBoxLayout(self.grid_restore_loader)
+        loader_layout.setContentsMargins(22, 16, 22, 16)
+        loader_layout.setSpacing(8)
+        self.grid_restore_loader_label = QLabel("Папка открывается")
+        self.grid_restore_loader_label.setObjectName("gridRestoreLoaderText")
+        self.grid_restore_loader_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        loader_layout.addWidget(self.grid_restore_loader_label)
+        loader_progress = QProgressBar()
+        loader_progress.setObjectName("gridRestoreLoaderProgress")
+        loader_progress.setRange(0, 0)
+        loader_progress.setTextVisible(False)
+        loader_layout.addWidget(loader_progress)
+        self.grid_restore_loader.setFixedSize(220, 76)
+        self.grid_restore_loader.hide()
+        self.grid_restore_loader_timer = QTimer(self)
+        self.grid_restore_loader_timer.setSingleShot(True)
+        self.grid_restore_loader_timer.setInterval(100)
+        self.grid_restore_loader_timer.timeout.connect(self._show_grid_restore_loader_if_needed)
         self.grid_zoom_controls = GridZoomControls(self.grid.change_card_size, self.grid_content_stack)
         self.grid_content_stack.installEventFilter(self)
         self._position_grid_zoom_controls()
@@ -4311,9 +4455,51 @@ class Workspace(QMainWindow):
         )
         controls.raise_()
 
+    def _set_grid_restore_loader_visible(self, visible: bool) -> None:
+        """Показывает оверлей, пока сетка собирается вне видимой области пользователя."""
+        if not hasattr(self, "grid_restore_loader"):
+            return
+        if visible:
+            loader = self.grid_restore_loader
+            loader.move(
+                max(0, (self.grid_content_stack.width() - loader.width()) // 2),
+                max(0, (self.grid_content_stack.height() - loader.height()) // 2),
+            )
+            loader.show()
+            loader.raise_()
+            return
+        self.grid_restore_loader.hide()
+
+    def _schedule_grid_restore_loader(self) -> None:
+        """Откладывает оверлей, чтобы быстрый переход между папками не мигал."""
+        self.grid_restore_loader_timer.start()
+
+    def _show_grid_restore_loader_if_needed(self) -> None:
+        """Показывает оверлей лишь для ещё не завершённого восстановления позиции."""
+        if self._restoring_folder_grid_context:
+            self._set_grid_restore_loader_visible(True)
+
+    def _hide_grid_restore_loader(self) -> None:
+        """Отменяет отложенный оверлей и сразу убирает уже показанный."""
+        self.grid_restore_loader_timer.stop()
+        self._set_grid_restore_loader_visible(False)
+
+    def _set_face_search_loading(self, loading: bool) -> None:
+        """Показывает поиск лица там, где пользователь увидит его до перестройки списка."""
+        if self.stack.currentWidget() is self.full_view:
+            self.full_view.set_face_search_loading(loading)
+            return
+        if loading:
+            self.grid_restore_loader_label.setText("Ищу похожие лица")
+            self._set_grid_restore_loader_visible(True)
+            return
+        self.grid_restore_loader_label.setText("Папка открывается")
+        self._set_grid_restore_loader_visible(False)
+
     def eventFilter(self, watched, event) -> bool:
         if watched is getattr(self, "grid_content_stack", None) and event.type() == QEvent.Type.Resize:
             QTimer.singleShot(0, self._position_grid_zoom_controls)
+            QTimer.singleShot(0, lambda: self._set_grid_restore_loader_visible(self.grid_restore_loader.isVisible()))
         if watched is getattr(self, "status_panel", None) and event.type() == QEvent.Type.Resize:
             self._fit_status_text()
         if event.type() == QEvent.Type.KeyPress and self.stack.currentWidget() is self.grid_page:
@@ -5026,11 +5212,8 @@ class Workspace(QMainWindow):
         """Убирает удалённые пути из сетки без её полной пересборки."""
         removed = set(deleted)
         old_paths = list(self.paths)
-        selected_rows = [
-            old_paths.index(path)
-            for path in removed
-            if path in old_paths
-        ]
+        path_rows = {path: index for index, path in enumerate(old_paths)}
+        selected_rows = [path_rows[path] for path in removed if path in path_rows]
         anchor: Path | None = None
         if selected_rows:
             after = max(selected_rows) + 1
@@ -5049,10 +5232,15 @@ class Workspace(QMainWindow):
             if self.current_dir / name not in removed
         }
         self.view_generation += 1
+        self._rebuild_status_index()
         self.populate_timer.stop()
         self.thumb_index = 0
         self.thumb_priority.clear()
         self.thumb_priority_set.clear()
+
+        if len(removed) >= 128:
+            self._apply_view()
+            return
 
         visible = set(self.paths)
         for path, item in list(self.items_by_path.items()):
@@ -6235,6 +6423,7 @@ class Workspace(QMainWindow):
         if self._ai_pipeline is None or self._ai_pipeline.pending_count() == 0:
             self.ai_progress_timer.stop()
         self.ai_progress_total = 0
+        self._ai_progress_started_at = None
         self.preview_progress_total = 0
         self.preview_paths.clear()
         self.preview_finished_paths.clear()
@@ -6252,6 +6441,7 @@ class Workspace(QMainWindow):
         self.folder_cache = None
         self.cache_ready = False
         self.current_dir = directory
+        self._directory_scan_pending = True
         self._custom_order = self._load_custom_order(directory)
         if self._custom_order and self.sort_combo.findData("custom") < 0:
             self.sort_combo.addItem("Пользовательский", "custom")
@@ -6260,17 +6450,26 @@ class Workspace(QMainWindow):
         self._refresh_shotsync_tab_indicator()
         self._refresh_shotsync_current_shooting()
         self._restore_series_mode(directory)
-        self._pending_folder_grid_context = None if switching_directory else self._load_folder_grid_context(directory)
+        self._pending_folder_grid_context = self._load_folder_grid_context(directory)
         self.settings.setValue("last_directory", str(directory))
         self.setWindowTitle(_workspace_title(directory))
         self.all_paths = []
         self.view_paths = []
         self.paths = []
+        self._pending_view_cursor_path = None
         self.photo_details = {}
         self.image_embeddings = {}
+        self._file_time_cache.clear()
         self.ai_progress_total = 0
         self.items_by_path.clear()
+        self.grid.setUpdatesEnabled(True)
         self.grid.clear()
+        self._restoring_folder_grid_context = self._pending_folder_grid_context is not None
+        if self._restoring_folder_grid_context:
+            self.grid.setUpdatesEnabled(False)
+            self._schedule_grid_restore_loader()
+        else:
+            self._hide_grid_restore_loader()
         self.thumb_priority.clear()
         self.thumb_priority_set.clear()
         self.visible_thumb_pending.clear()
@@ -6282,6 +6481,7 @@ class Workspace(QMainWindow):
             self.dir_tree.scrollTo(index)
             
         request = self.workspace_state.begin_directory(directory)
+        self._refresh_status_panel()
         future = self.directory_scan_executor.submit(_scan_directory, directory)
         future.add_done_callback(lambda done, r=request, d=directory: self._directory_scanned(r, d, done))
 
@@ -6355,8 +6555,30 @@ class Workspace(QMainWindow):
             self.grid.setCurrentItem(selected_items[0])
             for item in selected_items:
                 item.setSelected(True)
-        scroll_bar = self.grid.verticalScrollBar()
-        scroll_bar.setValue(min(scroll_value, scroll_bar.maximum()))
+            self.grid.doItemsLayout()
+            self.grid.scrollToItem(selected_items[0], QListWidget.ScrollHint.PositionAtCenter)
+        else:
+            scroll_bar = self.grid.verticalScrollBar()
+            scroll_bar.setValue(min(scroll_value, scroll_bar.maximum()))
+        if self._restoring_folder_grid_context:
+            self._restoring_folder_grid_context = False
+            self.grid.setUpdatesEnabled(True)
+            self.grid.viewport().update()
+            self._hide_grid_restore_loader()
+
+    def _restore_pending_view_cursor(self) -> None:
+        """Возвращает курсор на файл, который не должен теряться при снятии фильтра."""
+        path = self._pending_view_cursor_path
+        self._pending_view_cursor_path = None
+        if path is None:
+            return
+        item = self.items_by_path.get(path)
+        if item is None:
+            return
+        self.grid.setCurrentItem(item)
+        item.setSelected(True)
+        self.grid.doItemsLayout()
+        self.grid.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
 
     def _reset_grid_cursor(self) -> None:
         """Ставит курсор навигации на первый элемент текущей папки."""
@@ -6431,6 +6653,7 @@ class Workspace(QMainWindow):
         """Принимает результат сканирования, если запрос всё ещё относится к этой папке."""
         if self.closing or not self.workspace_state.accepts(request):
             return
+        self._directory_scan_pending = False
         self._folder_context_active = True
         try:
             self.all_paths = future.result()
@@ -6444,6 +6667,7 @@ class Workspace(QMainWindow):
             self.preview_paths = set(images)
             self.preview_finished_paths.clear()
             self.view_generation += 1
+            self._rebuild_status_index()
         except Exception as exc:
             self.bridge.failed.emit(str(directory), str(exc))
             self.all_paths = []
@@ -6465,9 +6689,7 @@ class Workspace(QMainWindow):
             cache = self.folder_cache
             analysis_paths = [path for path in scannable_paths if is_supported_image(path)]
             future = self.cache_load_executor.submit(
-                _load_cache_and_check_ai,
-                cache,
-                analysis_paths,
+                _load_cache, cache,
             )
             future.add_done_callback(
                 lambda done, g=generation, target=cache: self._cache_loaded(g, target, done)
@@ -6501,6 +6723,8 @@ class Workspace(QMainWindow):
         self._refresh_status_panel()
         if self.populate_index >= len(self.paths):
             self.populate_timer.stop()
+            if self._pending_view_cursor_path is not None:
+                QTimer.singleShot(0, self._restore_pending_view_cursor)
             if self.cache_ready:
                 QTimer.singleShot(0, self._restore_folder_grid_context)
             self._refresh_status_panel()
@@ -6536,8 +6760,10 @@ class Workspace(QMainWindow):
                 return
         elif self.visible_thumb_pending or pending_thumbs >= MAX_PENDING_THUMBS:
             return
+        image_batch: list[Path] = []
         submitted = 0
-        while submitted < THUMB_SUBMIT_BATCH:
+        submit_limit = 1 if self.thumb_priority else THUMB_SUBMIT_BATCH
+        while submitted < submit_limit:
             next_path = self._next_thumb_path()
             if next_path is None:
                 break
@@ -6545,8 +6771,13 @@ class Workspace(QMainWindow):
             if is_supported_video(path):
                 self._submit_video_thumbnail(path, visible_priority=visible_priority)
             else:
-                self._submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=visible_priority)
+                if visible_priority:
+                    self._submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=True)
+                else:
+                    image_batch.append(path)
             submitted += 1
+        if image_batch:
+            self.scheduler.submit_thumbnail_batch(image_batch)
         if self.thumb_index >= len(self.paths) and not self.thumb_priority:
             self.thumb_timer.stop()
         self._refresh_status_panel()
@@ -6560,9 +6791,10 @@ class Workspace(QMainWindow):
     def _start_ai_analysis(self) -> None:
         if self.closing or not self.cache_ready or self.folder_cache is None:
             return
-        if not self._previews_ready_for_ai():
+        if not self._previews_ready_for_manual_ai():
             self._ai_requested_generation = self.view_generation
             self.ai_analysis_available = False
+            self._show_viewer_toast("AI-анализ поставлен в очередь")
             self._refresh_status_panel()
             return
         self._launch_ai_analysis()
@@ -6574,9 +6806,26 @@ class Workspace(QMainWindow):
             return False
         self.ai_progress_total = 0
         self.ai_analysis_available = False
+        self._ai_progress_started_at = monotonic()
         self.ai_progress_timer.start()
         self._refresh_status_panel()
         return True
+
+    def _cancel_ai_analysis(self) -> None:
+        """Отменяет текущий AI-конвейер и не даёт авторежиму запустить его повторно."""
+        pipeline = self._ai_pipeline
+        if pipeline is None or pipeline.pending_count(self.current_dir) == 0:
+            return
+        self.ai_progress_timer.stop()
+        pipeline.shutdown()
+        self._ai_pipeline = None
+        self._ai_progress_started_at = None
+        self._ai_requested_generation = -1
+        self._cache_ai_waiting = False
+        self._cache_ai_paths.clear()
+        self._auto_ai_generation = self.view_generation
+        self.ai_analysis_available = False
+        self._refresh_status_panel()
 
     def _previews_ready_for_ai(self) -> bool:
         analysis_paths = self._cache_ai_paths.intersection(self.view_paths)
@@ -6585,6 +6834,18 @@ class Workspace(QMainWindow):
             and self.cache_ready
             and self.folder_cache is not None
             and analysis_paths
+            and self.populate_index >= len(self.paths)
+            and self.preview_paths
+            and self.preview_paths.issubset(self.preview_finished_paths)
+        )
+
+    def _previews_ready_for_manual_ai(self) -> bool:
+        """Разрешает ручной повтор AI после готовности превью, даже если кэш уже частично заполнен."""
+        return bool(
+            self.workspace_active
+            and self.cache_ready
+            and self.folder_cache is not None
+            and any(is_supported_image(path) for path in self.view_paths)
             and self.populate_index >= len(self.paths)
             and self.preview_paths
             and self.preview_paths.issubset(self.preview_finished_paths)
@@ -6632,14 +6893,18 @@ class Workspace(QMainWindow):
         hint.setWordWrap(True)
         hint.setFixedWidth(270)
         layout.addWidget(hint)
-        if self.ai_analysis_available:
+        ai_running = (
+            self._ai_pipeline is not None
+            and self._ai_pipeline.pending_count(self.current_dir) > 0
+        )
+        if self.cache_ready and self.folder_cache is not None and not ai_running:
             start = QPushButton("Обработать серии и лица")
             start.setObjectName("toolbarPopupPrimaryButton")
             start.setIcon(_fomantic_icon("magic", 16, "#ffffff"))
             start.setIconSize(QSize(16, 16))
             start.clicked.connect(lambda: (menu.close(), self._start_ai_analysis()))
             layout.addWidget(start)
-        elif self.ai_pipeline.pending_count(self.current_dir) == 0:
+        elif not ai_running:
             complete = QLabel("В текущей папке все фото уже обработаны.")
             complete.setObjectName("toolbarPopupHint")
             complete.setWordWrap(True)
@@ -6812,20 +7077,65 @@ class Workspace(QMainWindow):
         changes = sum(old != new for old, new in names.items())
         if not changes:
             return
-        dialog.set_renaming(changes * 2)
+        dialog.set_renaming(changes)
+        cache = self.folder_cache
+        future = self.rename_executor.submit(self._rename_files_with_cache, names, cache, dialog)
+        future.add_done_callback(
+            lambda done, view=dialog, plan=dict(names): self.bridge.renameFinished.emit(view, plan, done)
+        )
+
+    def _rename_files_with_cache(
+        self, names: dict[str, str], cache: FolderCache | None, dialog: BatchRenameDialog
+    ) -> str | None:
+        """Переименовывает файлы и кэш вне Qt-потока, сохраняя отзывчивость диалога."""
+        changes = sum(old != new for old, new in names.items())
+        self._rename_files_safely(
+            names,
+            lambda completed, total: (
+                self.bridge.renameProgress.emit(
+                    dialog,
+                    min(changes, completed * changes // total),
+                    changes,
+                )
+                if completed % 16 == 0 or completed == total
+                else None
+            ),
+        )
+        if cache is None:
+            return None
+        self.bridge.renameCacheUpdating.emit(dialog)
         try:
-            self._rename_files_safely(names, dialog.update_rename_progress)
-            if self.folder_cache is not None:
-                self.folder_cache.rename_photo_names(names)
+            cache.rename_photo_names(names)
+        except Exception as exc:
+            return str(exc)
+        return None
+
+    def _on_rename_progress(self, dialog: BatchRenameDialog, completed: int, total: int) -> None:
+        """Обновляет Qt-виджет только в главном потоке по сигналу фоновой операции."""
+        if not self.closing:
+            dialog.update_rename_progress(completed, total)
+
+    def _on_rename_cache_updating(self, dialog: BatchRenameDialog) -> None:
+        """Показывает отдельную фазу после перемещения файлов, не маскируя её зависанием."""
+        if not self.closing:
+            dialog.set_cache_updating()
+
+    def _on_rename_finished(
+        self, dialog: BatchRenameDialog, _names: dict[str, str], future: Future
+    ) -> None:
+        """Завершает диалог после файловой операции и обновления кэша."""
+        if self.closing:
+            return
+        try:
+            cache_error = future.result()
         except OSError as exc:
             dialog.rename_failed(f"Не удалось переименовать файлы: {exc}")
             return
         except Exception as exc:
-            QMessageBox.warning(dialog, "Групповое переименование", f"Файлы переименованы, но кэш не обновлён:\n{exc}")
-            self.folder_change_timer.stop()
-            self.load_directory(self.current_dir)
-            dialog.accept()
+            dialog.rename_failed(f"Не удалось переименовать файлы: {exc}")
             return
+        if cache_error:
+            QMessageBox.warning(dialog, "Групповое переименование", f"Файлы переименованы, но кэш не обновлён:\n{cache_error}")
         self.folder_change_timer.stop()
         self.load_directory(self.current_dir)
         dialog.accept()
@@ -6982,18 +7292,40 @@ class Workspace(QMainWindow):
         directory = self.current_dir
         if len({filesystem_name_key(name) for name in changes.values()}) != len(changes):
             raise OSError("Шаблон создаёт одинаковые имена")
+        try:
+            existing_keys = {filesystem_name_key(path.name) for path in directory.iterdir()}
+        except OSError as exc:
+            raise OSError(f"Не удалось прочитать папку: {exc}") from exc
+        source_keys = {filesystem_name_key(old) for old in changes}
         for old, new in changes.items():
             source, target = directory / old, directory / new
             if not source.is_file():
                 raise OSError(f"Файл «{old}» больше не существует")
-            if target.exists() and not any(target.samefile(directory / source_name) for source_name in changes):
+            if filesystem_name_key(target.name) in existing_keys and filesystem_name_key(target.name) not in source_keys:
                 raise OSError(f"Файл «{new}» уже существует")
+
+        total_steps = self._rename_step_count(changes)
+        target_keys = {filesystem_name_key(new) for new in changes.values()}
+        if source_keys.isdisjoint(target_keys):
+            completed: list[str] = []
+            try:
+                for step, (old, new) in enumerate(changes.items(), start=1):
+                    (directory / old).rename(directory / new)
+                    completed.append(old)
+                    if progress is not None:
+                        progress(step, total_steps)
+            except OSError:
+                for old in reversed(completed):
+                    target, source = directory / changes[old], directory / old
+                    if target.exists():
+                        target.rename(source)
+                raise
+            return
 
         token = uuid4().hex
         temporary = {old: directory / f".__rawww_rename_{token}_{index}" for index, old in enumerate(changes)}
         moved: list[str] = []
         completed: list[str] = []
-        total_steps = len(changes) * 2
         step = 0
         try:
             for old, temporary_path in temporary.items():
@@ -7019,6 +7351,14 @@ class Workspace(QMainWindow):
                     temporary_path.rename(source)
             raise
 
+    @staticmethod
+    def _rename_step_count(names: dict[str, str]) -> int:
+        """Возвращает число перемещений с учётом необходимости временных имён."""
+        changes = {old: new for old, new in names.items() if old != new}
+        source_keys = {filesystem_name_key(old) for old in changes}
+        target_keys = {filesystem_name_key(new) for new in changes.values()}
+        return len(changes) * (2 if source_keys & target_keys else 1)
+
     def _update_ai_progress(self) -> None:
         if self._ai_pipeline is None:
             self.ai_progress_timer.stop()
@@ -7042,6 +7382,7 @@ class Workspace(QMainWindow):
         if self.ai_pipeline.pending_count() == 0:
             self.ai_progress_timer.stop()
             self.ai_pipeline.release_analysis_workers()
+            self._ai_progress_started_at = None
         self._refresh_status_panel()
 
     def _folder_changed(self, path: str) -> None:
@@ -7075,20 +7416,28 @@ class Workspace(QMainWindow):
         self.ai_analysis_available = False
         self._refresh_status_panel()
 
+    def _rebuild_status_index(self) -> None:
+        """Сохраняет счётчики списка, чтобы прогресс превью не обходил папку заново."""
+        visible_files = [path for path in self.view_paths if is_supported_media(path)]
+        self._status_visible_count = len(visible_files)
+        self._status_total_count = sum(is_supported_media(path) for path in self.all_paths)
+        self._status_positions = {
+            path: index for index, path in enumerate(visible_files, start=1)
+        }
+
+    def _schedule_status_refresh(self) -> None:
+        """Склеивает частые завершения миниатюр в одно обновление строки состояния."""
+        if not self.closing and not self.status_refresh_timer.isActive():
+            self.status_refresh_timer.start()
+
     def _refresh_status_panel(self) -> None:
         """Показывает активную операцию и счётчики папки или выделения."""
         if not hasattr(self, "status_label"):
             return
-        visible_files = [
-            path for path in self.view_paths
-            if is_supported_media(path)
-        ]
-        total_files = sum(
-            1 for path in self.all_paths
-            if is_supported_media(path)
-        )
-        filtered = len(visible_files)
-        position = visible_files.index(self.current_path) + 1 if self.current_path in visible_files else "-"
+        self.status_progress.set_cancel_visible(False)
+        filtered = self._status_visible_count
+        total_files = self._status_total_count
+        position = self._status_positions.get(self.current_path, "-")
         selected = len(self._selected_paths())
         text = f"{position}/{filtered}"
         if filtered != total_files:
@@ -7160,12 +7509,21 @@ class Workspace(QMainWindow):
             self._set_taskbar_progress(0, 0)
             return
 
+        if getattr(self, "_directory_scan_pending", False):
+            self.status_progress.setRange(0, 0)
+            self.status_progress.setFormat("Сканирую папку…")
+            self.status_progress.setToolTip(self.status_progress.format())
+            self.status_progress.show()
+            self._set_taskbar_progress(0, 0)
+            return
+
         ai_completed, ai_total, ai_running = (
             self._ai_pipeline.progress(self.current_dir)
             if self._ai_pipeline is not None
             else (0, 0, False)
         )
         if ai_running:
+            self.status_progress.set_cancel_visible(True)
             if ai_total <= 0:
                 self.status_progress.setRange(0, 0)
                 self.status_progress.setFormat("Подготовка AI…")
@@ -7175,7 +7533,12 @@ class Workspace(QMainWindow):
                 return
             self.status_progress.setRange(0, ai_total)
             self.status_progress.setValue(ai_completed)
-            self.status_progress.setFormat(f"Анализ: {ai_completed}/{ai_total}")
+            eta = ""
+            if ai_completed > 0 and self._ai_progress_started_at is not None:
+                elapsed = monotonic() - self._ai_progress_started_at
+                remaining = (ai_total - ai_completed) * elapsed / ai_completed
+                eta = f" ({_format_remaining_time(remaining)})"
+            self.status_progress.setFormat(f"Анализ: {ai_completed}/{ai_total}{eta}")
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
             self._set_taskbar_progress(ai_completed, ai_total)
@@ -7251,14 +7614,24 @@ class Workspace(QMainWindow):
             if item is not None:
                 item.setData(DETAIL_ROLE, detail)
             changed_current |= path == self.current_path
-        self._refresh_camera_filter()
         if self.camera_filter.currentData() in changed_camera_keys:
-            self._apply_view()
+            self._metadata_view_refresh_needed = True
+        if changed_camera_keys and not self.metadata_ui_timer.isActive():
+            self.metadata_ui_timer.start()
         if changed_current and self.current_path is not None:
             detail = self.photo_details.get(self.current_path.name, {})
             self.full_view.set_metadata(detail)
             if self.stack.currentWidget() is self.grid_page and hasattr(self, "meta_bar"):
                 self.meta_bar.set_metadata(detail)
+
+    def _flush_metadata_ui_updates(self) -> None:
+        """Обновляет фильтры один раз за несколько пакетов EXIF, а не на каждые 32 файла."""
+        if self.closing:
+            return
+        self._refresh_camera_filter()
+        if self._metadata_view_refresh_needed:
+            self._metadata_view_refresh_needed = False
+            self._apply_view()
 
     @staticmethod
     def _camera_filter_key(detail: dict) -> str | None:
@@ -7438,17 +7811,23 @@ class Workspace(QMainWindow):
             return
         self.bridge.cacheLoaded.emit(generation, future)
 
+    def _ai_cache_checked(self, generation: int, future: Future) -> None:
+        """Передаёт результат поздней проверки AI-кэша в поток интерфейса."""
+        if self.closing or generation != self.cache_load_generation:
+            return
+        self.bridge.aiCacheChecked.emit(generation, future)
+
     def _on_cache_loaded(self, generation: int, future: Future) -> None:
         """Подключает загруженный кэш к текущему поколению содержимого папки."""
         if self.closing or generation != self.cache_load_generation:
             return
         try:
-            self._cache_ai_paths = set(future.result())
-            self._cache_ai_waiting = bool(self._cache_ai_paths)
+            future.result()
         except Exception as exc:
             self.bridge.failed.emit(str(self.current_dir), str(exc))
-            self._cache_ai_paths.clear()
-            self._cache_ai_waiting = False
+            return
+        self._cache_ai_paths.clear()
+        self._cache_ai_waiting = False
         self.cache_ready = True
         if self.folder_cache is not None:
             self.photo_details = self.folder_cache.load_photo_details(
@@ -7463,7 +7842,6 @@ class Workspace(QMainWindow):
                 self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
         self._refresh_camera_filter()
         self._apply_view()
-        self._update_analysis_controls()
         self._refresh_ai_status()
         if (
             self.stack.currentWidget() is self.full_view
@@ -7486,6 +7864,30 @@ class Workspace(QMainWindow):
             )
         self.thumb_index = 0
         self._schedule_visible_thumb_priority()
+
+        if self.folder_cache is not None:
+            analysis_paths = [
+                path for path in self.all_paths
+                if path.is_file() and is_supported_image(path)
+            ]
+            ai_future = self.cache_load_executor.submit(
+                _check_cached_ai, self.folder_cache, analysis_paths
+            )
+            ai_future.add_done_callback(
+                lambda done, g=generation: self._ai_cache_checked(g, done)
+            )
+
+    def _on_ai_cache_checked(self, generation: int, future: Future) -> None:
+        """Включает автозапуск AI только после фоновой проверки полноты кэша."""
+        if self.closing or generation != self.cache_load_generation:
+            return
+        try:
+            self._cache_ai_paths = set(future.result())
+        except Exception as exc:
+            self.bridge.failed.emit(str(self.current_dir), str(exc))
+            self._cache_ai_paths.clear()
+        self._cache_ai_waiting = bool(self._cache_ai_paths)
+        self._refresh_ai_status()
         self.thumb_timer.start()
         self._attach_shotsync_syncer()
         self._refresh_shotsync_tab_indicator()
@@ -7557,7 +7959,15 @@ class Workspace(QMainWindow):
                         return datetime.fromisoformat(str(value)).timestamp()
                     except ValueError:
                         pass
-                return path.stat().st_mtime_ns / 1_000_000_000
+                cached = self._file_time_cache.get(path)
+                if cached is not None:
+                    return cached
+                try:
+                    captured = path.stat().st_mtime_ns / 1_000_000_000
+                except OSError:
+                    captured = 0.0
+                self._file_time_cache[path] = captured
+                return captured
 
             key = capture_time
             reverse = order.endswith("desc")
@@ -7569,6 +7979,7 @@ class Workspace(QMainWindow):
         self.preview_paths = {path for path in self.paths if path.is_file()}
         self.preview_progress_total = len(self.preview_paths)
         self.view_generation += 1
+        self._rebuild_status_index()
         self.populate_timer.stop()
         self.grid.clear()
         self.items_by_path.clear()
@@ -8001,7 +8412,7 @@ class Workspace(QMainWindow):
         entry = self._face_set_by_id(face_id)
         if entry is None:
             return
-        self._set_face_reference(entry["embedding"], self._face_avatar_from_entry(entry))
+        self._set_face_reference(entry["embedding"], self._face_avatar_from_entry(entry), show_loading=True)
         dialog.accept()
 
     def _show_face_mark_menu(self, button: QToolButton, face_id: str) -> None:
@@ -8074,9 +8485,16 @@ class Workspace(QMainWindow):
     def _filter_face_from_full_view(self, face: object) -> None:
         embedding = face.get("embedding") if isinstance(face, dict) else None
         if isinstance(embedding, list) and embedding:
-            self._set_face_reference(embedding, self._current_face_avatar(face))
+            self._set_face_reference(embedding, self._current_face_avatar(face), show_loading=True)
 
-    def _set_face_reference(self, embedding: list[float], avatar: QPixmap | None = None) -> None:
+    def _set_face_reference(
+        self,
+        embedding: list[float],
+        avatar: QPixmap | None = None,
+        *,
+        show_loading: bool = False,
+    ) -> None:
+        """Запоминает лицо и при ручном поиске даёт интерфейсу отрисовать лоадер до фильтра."""
         self.face_reference = embedding
         self.face_filter_avatar = avatar or QPixmap()
         self.settings.setValue("face_filter_embedding", json.dumps(embedding, separators=(",", ":")))
@@ -8089,11 +8507,25 @@ class Workspace(QMainWindow):
             self.face_filter_avatar_label.setPixmap(_fomantic_icon("user", 13).pixmap(16, 16))
         self.face_filter_chip.show()
         self.full_view.set_face_filter(self.face_filter_avatar)
+        if show_loading:
+            self._set_face_search_loading(True)
+            # Нулевой тик мог закончиться раньше первой отрисовки оверлея,
+            # поэтому оставляем Qt короткое окно для настоящего кадра лоадера.
+            QTimer.singleShot(50, self._apply_face_search_view)
+            return
+        self._apply_face_search_view()
+
+    def _apply_face_search_view(self) -> None:
+        """Применяет готовый фильтр после того, как Qt успел показать его индикатор."""
         self._apply_view()
         if self.stack.currentWidget() is self.full_view and self.current_path is not None:
             self._refresh_full_view_navigation(self.current_path)
+        QTimer.singleShot(0, lambda: self._set_face_search_loading(False))
 
     def _clear_face_search(self) -> None:
+        # Файл текущего просмотра остаётся валидным после снятия фильтра и
+        # должен быть точкой возврата, а не исчезнуть в начале длинной сетки.
+        self._pending_view_cursor_path = self.current_path
         self.face_reference = None
         self.face_filter_avatar = QPixmap()
         self.settings.remove("face_filter_embedding")
@@ -8154,7 +8586,7 @@ class Workspace(QMainWindow):
         if max_size > THUMB_SIZE and decoded.path == self.current_path:
             self.thumb_timer.start()
         if max_size == THUMB_SIZE:
-            self._refresh_status_panel()
+            self._schedule_status_refresh()
 
     def _on_video_preview(self, path: Path, preview: QImage) -> None:
         if self.closing or not self.workspace_active or preview.isNull() or path.parent != self.current_dir:
@@ -8175,7 +8607,7 @@ class Workspace(QMainWindow):
                 THUMB_SIZE,
             )
         self.preview_finished_paths.add(path)
-        self._refresh_status_panel()
+        self._schedule_status_refresh()
 
     def _on_decode_failed(self, path: str, message: str) -> None:
         failed_path = Path(path)
@@ -8186,7 +8618,7 @@ class Workspace(QMainWindow):
             item.setText(f"{failed_path.name}\n{message}")
         if failed_path == self.current_path:
             self.thumb_timer.start()
-        self._refresh_status_panel()
+        self._schedule_status_refresh()
 
     def _on_scheduler_finished(self, payload: object) -> None:
         """Принимает bookkeeping декодера в главном потоке Qt."""
@@ -8382,6 +8814,17 @@ class Workspace(QMainWindow):
     def _remember_thumbnail_size(self, size: int) -> None:
         self.workspace_state.thumbnail_size = size
         self.settings.setValue("thumbnail_size", size)
+        QTimer.singleShot(0, self._keep_current_grid_item_visible)
+
+    def _keep_current_grid_item_visible(self) -> None:
+        """Возвращает текущую карточку в центр после изменения геометрии сетки."""
+        item = self.grid.currentItem()
+        if item is None and self.current_path is not None:
+            item = self.items_by_path.get(self.current_path)
+        if item is None:
+            return
+        self.grid.doItemsLayout()
+        self.grid.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
 
     def _restore_grid_context(self) -> None:
         """Возвращает сетку к карточке, на которой закончился полный просмотр."""
@@ -8433,25 +8876,24 @@ class Workspace(QMainWindow):
         self._move(-1)
 
     def _move(self, direction: int) -> None:
-        if not self.current_path or self.current_path not in self.view_paths:
+        if not self.current_path:
             return
-        targets = self._photo_mode_paths()
+        targets, indices, _series, _cards, _changed = self._full_navigation_snapshot()
         current = self.current_path
-        if current not in targets:
-            current = self._series_for_path(current)[0]
-        index = targets.index(current) + direction
+        if current not in indices:
+            current = self._full_series_for_path(current)[0]
+        if current not in indices:
+            return
+        index = indices.get(current, 0) + direction
         if 0 <= index < len(targets):
             self.open_full(targets[index])
 
     def _refresh_full_view_navigation(self, current: Path) -> None:
         """Обновляет соседей, ленты и предзагрузку вокруг текущего кадра."""
-        strip_paths = self._photo_mode_paths()
-        series = self._series_for_path(current)
-        strip_current = current if current in strip_paths else series[0]
-        try:
-            strip_index = strip_paths.index(strip_current)
-        except ValueError:
-            strip_index = 0
+        strip_paths, indices, _series, strip_cards, navigation_changed = self._full_navigation_snapshot()
+        series = self._full_series_for_path(current)
+        strip_current = current if current in indices else series[0]
+        strip_index = indices.get(strip_current, 0)
         useful_paths = [*series, *strip_paths[max(0, strip_index - 12) : strip_index + 13]]
         previews: dict[Path, QImage] = {}
         for path in dict.fromkeys(useful_paths):
@@ -8475,17 +8917,18 @@ class Workspace(QMainWindow):
             series,
             self.view_generation,
             series_current=current,
-            strip_series_cards={path: self.series_cards.get(path, {}) for path in strip_paths},
+            strip_series_cards=(
+                strip_cards
+                if navigation_changed or self.full_view._photo_generation != self.view_generation
+                else None
+            ),
             show_series_strip=not (len(series) > 1 and series[0] in self.expanded_series),
         )
-        self._prioritize_full_strip_thumbs(current, strip_paths, series)
+        self._prioritize_full_strip_thumbs(strip_current, strip_paths, series)
 
     def _prioritize_full_strip_thumbs(self, current: Path, strip_paths: list[Path], series: list[Path]) -> None:
         """Продвигает миниатюры актуальных лент в общей очереди сетки."""
-        try:
-            index = strip_paths.index(current)
-        except ValueError:
-            index = 0
+        index = self._full_navigation_indices.get(current, 0)
         nearby = [*series, *strip_paths[max(0, index - 4) : index + 5]]
         self._prioritize_strip_thumbs(nearby)
 
@@ -8521,40 +8964,66 @@ class Workspace(QMainWindow):
                 self.visible_thumb_pending.discard(key)
 
     def _photo_mode_paths(self) -> list[Path]:
-        """Строит порядок ленты, раскрывая ту же серию, что выбрана в сетке."""
-        image_only_paths = [p for p in self.view_paths if p.is_file()]
-        if not self.series_toggle.isChecked():
-            return list(image_only_paths)
+        """Возвращает сохранённый порядок ленты без обхода всей папки."""
+        return self._full_navigation_snapshot()[0]
+
+    def _full_navigation_snapshot(
+        self,
+    ) -> tuple[list[Path], dict[Path, int], dict[Path, tuple[Path, ...]], dict[Path, dict], bool]:
+        """Кэширует навигацию Full View до смены фильтра, сортировки или серий.
+
+        ``view_generation`` меняется при перестройке списка. Между такими
+        изменениями Right/Left не должны снова обходить тысячи карточек.
+        """
+        if self._full_navigation_generation == self.view_generation:
+            return (
+                self._full_navigation_paths,
+                self._full_navigation_indices,
+                self._full_navigation_series,
+                self._full_navigation_cards,
+                False,
+            )
+
+        image_only_paths = [path for path in self.view_paths if path.is_file()]
         result: list[Path] = []
-        group: list[Path] = []
+        series_by_path: dict[Path, tuple[Path, ...]] = {}
+        if not self.series_toggle.isChecked():
+            result = image_only_paths
+        else:
+            group: list[Path] = []
 
-        def flush() -> None:
-            if not group:
-                return
-            if group[0] in self.expanded_series:
-                result.extend(group)
-            else:
-                result.append(group[0])
-            group.clear()
+            def flush() -> None:
+                if not group:
+                    return
+                members = tuple(group)
+                for member in members:
+                    series_by_path[member] = members
+                if group[0] in self.expanded_series:
+                    result.extend(group)
+                else:
+                    result.append(group[0])
+                group.clear()
 
-        for path in image_only_paths:
-            if group and self._embedding_similarity(group[-1], path) < 0.92:
-                flush()
-            group.append(path)
-        flush()
-        return result
+            for path in image_only_paths:
+                if group and self._embedding_similarity(group[-1], path) < 0.92:
+                    flush()
+                group.append(path)
+            flush()
+
+        self._full_navigation_paths = result
+        self._full_navigation_indices = {path: index for index, path in enumerate(result)}
+        self._full_navigation_series = series_by_path
+        self._full_navigation_cards = {path: self.series_cards.get(path, {}) for path in result}
+        self._full_navigation_generation = self.view_generation
+        return result, self._full_navigation_indices, series_by_path, self._full_navigation_cards, True
+
+    def _full_series_for_path(self, path: Path) -> list[Path]:
+        """Возвращает серию из навигационного снимка без линейного поиска пути."""
+        _paths, _indices, series_by_path, _cards, _changed = self._full_navigation_snapshot()
+        return list(series_by_path.get(path, (path,)))
 
     def _series_for_path(self, path: Path) -> list[Path]:
-        if not self.series_toggle.isChecked() or path not in self.view_paths or path.name not in self.image_embeddings:
-            return [path]
-        index = self.view_paths.index(path)
-        start = index
-        end = index
-        while start > 0 and self._embedding_similarity(self.view_paths[start - 1], self.view_paths[start]) >= 0.92:
-            start -= 1
-        while end + 1 < len(self.view_paths) and self._embedding_similarity(self.view_paths[end], self.view_paths[end + 1]) >= 0.92:
-            end += 1
-        return self.view_paths[start : end + 1]
+        return self._full_series_for_path(path)
 
     def _embedding_similarity(self, left: Path, right: Path) -> float:
         a = self.image_embeddings.get(left.name, b"")
@@ -8568,10 +9037,9 @@ class Workspace(QMainWindow):
         return dot / norm if norm else -1.0
 
     def _preload_neighbors(self, path: Path) -> None:
-        navigation_paths = self._full_preload_paths(path)
-        if path not in navigation_paths:
+        navigation_paths, index = self._full_navigation_context(path)
+        if index < 0:
             return
-        index = navigation_paths.index(path)
         full_size = self._full_preview_size()
         before = list(reversed(navigation_paths[max(0, index - FULL_PRELOAD_RADIUS) : index]))
         after = navigation_paths[index + 1 : index + FULL_PRELOAD_RADIUS + 1]
@@ -8590,21 +9058,20 @@ class Workspace(QMainWindow):
 
     def _full_preload_paths(self, path: Path) -> list[Path]:
         """Выбирает соседние кадры для упреждающей загрузки внутри серии."""
-        series = self._series_for_path(path)
-        if len(series) > 1 and path in series:
-            return series
-        navigation_paths = self._photo_mode_paths()
-        if path not in navigation_paths:
-            series_leader = series[0]
-            if series_leader in navigation_paths:
-                return navigation_paths
-        return navigation_paths
+        return self._full_navigation_context(path)[0]
+
+    def _full_navigation_context(self, path: Path) -> tuple[list[Path], int]:
+        """Возвращает список предзагрузки и позицию кадра без поиска по папке."""
+        series = self._full_series_for_path(path)
+        if len(series) > 1:
+            return series, series.index(path)
+        navigation_paths, indices, _series, _cards, _changed = self._full_navigation_snapshot()
+        return navigation_paths, indices.get(path, -1)
 
     def _cancel_outdated_full_tasks(self, path: Path, full_size: int) -> None:
         keep = {path}
-        navigation_paths = self._full_preload_paths(path)
-        if path in navigation_paths:
-            index = navigation_paths.index(path)
+        navigation_paths, index = self._full_navigation_context(path)
+        if index >= 0:
             keep.update(
                 navigation_paths[
                     max(0, index - FULL_PRELOAD_RADIUS) : index + FULL_PRELOAD_RADIUS + 1
@@ -9503,8 +9970,6 @@ def _scan_directory(directory: Path) -> list[Path]:
                 if entry.is_dir():
                     entries.append(entry)
                 elif entry.is_file() and is_supported_media(entry):
-                    with entry.open("rb"):
-                        pass
                     entries.append(entry)
             except OSError:
                 continue

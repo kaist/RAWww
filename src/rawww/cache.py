@@ -170,6 +170,44 @@ class FolderCache:
         image = image.convertToFormat(QImage.Format.Format_RGB888)
         return DecodedImage(path=path, image=image, width=width, height=height)
 
+    def load_batch(self, paths: list[Path], max_size: int) -> dict[Path, DecodedImage]:
+        """Читает несколько миниатюр одним запросом, оставляя устаревшие записи за бортом."""
+        stamps: dict[Path, FileStamp] = {}
+        for path in paths:
+            try:
+                stamps[path] = _stamp(path)
+            except OSError:
+                continue
+        if not stamps:
+            return {}
+        placeholders = ", ".join("?" for _ in stamps)
+        with self._lock:
+            rows = self._db_or_raise().execute(
+                f"""
+                SELECT name, file_size, mtime_ns, width, height, format, pixels
+                FROM previews
+                WHERE variant = ? AND name IN ({placeholders})
+                """,
+                (max_size, *(path.name for path in stamps)),
+            ).fetchall()
+        rows_by_name = {str(row[0]): row[1:] for row in rows}
+        decoded: dict[Path, DecodedImage] = {}
+        for path, stamp in stamps.items():
+            row = rows_by_name.get(path.name)
+            if row is None:
+                continue
+            file_size, mtime_ns, width, height, fmt, data = row
+            if file_size != stamp.size or mtime_ns != stamp.mtime_ns or fmt != "jpeg":
+                continue
+            try:
+                rgba = _decode_jpeg_to_rgba(data)
+                image = QImage(rgba, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
+                image = image.convertToFormat(QImage.Format.Format_RGB888)
+            except Exception:
+                continue
+            decoded[path] = DecodedImage(path=path, image=image, width=width, height=height)
+        return decoded
+
     def store(self, decoded: DecodedImage, max_size: int) -> None:
         self.store_pixels(
             PixelImage(
@@ -387,28 +425,37 @@ class FolderCache:
         if len(set(changes.values())) != len(changes):
             raise ValueError("Renamed filenames must be unique")
 
-        temporary = {
-            old: f".__rawww_rename_{uuid4().hex}_{index}"
-            for index, old in enumerate(changes)
-        }
         tables = (
             "previews", "image_embeddings", "face_analysis", "photo_metadata",
             "photo_selection",
         )
+        map_table = f"rename_map_{uuid4().hex}"
+        prefix = f".__rawww_rename_{uuid4().hex}_"
         with self._lock:
             db = self._db_or_raise()
             try:
                 db.execute("BEGIN")
+                db.execute(
+                    f"CREATE TEMP TABLE {map_table} (old_name TEXT PRIMARY KEY, new_name TEXT NOT NULL)"
+                )
+                db.executemany(
+                    f"INSERT INTO {map_table} (old_name, new_name) VALUES (?, ?)",
+                    changes.items(),
+                )
                 for table in tables:
-                    db.executemany(
-                        f"UPDATE {table} SET name = ? WHERE name = ?",
-                        ((temporary[old], old) for old in changes),
+                    db.execute(
+                        f"UPDATE {table} SET name = ? || name "
+                        f"WHERE name IN (SELECT old_name FROM {map_table})",
+                        (prefix,),
                     )
-                for table in tables:
-                    db.executemany(
-                        f"UPDATE {table} SET name = ? WHERE name = ?",
-                        ((changes[old], temporary[old]) for old in changes),
+                    db.execute(
+                        f"UPDATE {table} SET name = ("
+                        f"SELECT new_name FROM {map_table} "
+                        f"WHERE old_name = substr({table}.name, ?)) "
+                        f"WHERE substr(name, 1, ?) = ?",
+                        (len(prefix) + 1, len(prefix), prefix),
                     )
+                db.execute(f"DROP TABLE {map_table}")
                 self.live_names = {changes.get(name, name) for name in self.live_names}
                 db.commit()
             except Exception:

@@ -121,6 +121,23 @@ class CacheTests(unittest.TestCase):
                 self.assertEqual((third.width, third.height), (first.width, first.height))
             cache2.close(flush=False)
 
+    def test_batch_load_returns_only_current_cached_previews(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            first = folder / "first.jpg"
+            second = folder / "second.jpg"
+            Image.new("RGB", (800, 600), (180, 60, 40)).save(first)
+            Image.new("RGB", (800, 600), (40, 100, 180)).save(second)
+            cache = FolderCache(folder, {first.name, second.name}, cache_root=folder / "cache")
+            cache.load_or_decode(first, 256)
+            cache.load_or_decode(second, 256)
+
+            loaded = cache.load_batch([first, second], 256)
+
+            self.assertEqual(set(loaded), {first, second})
+            self.assertTrue(all(max(item.width, item.height) <= 256 for item in loaded.values()))
+            cache.close(flush=False)
+
     def test_process_worker_decodes_pixels(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "sample.jpg"

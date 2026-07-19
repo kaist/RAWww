@@ -91,7 +91,9 @@ jobs:
       - name: Prepare Windows installer build
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Remove-Item dist/ctrlka/portable.flag -Force
+        run: |
+          Remove-Item dist/ctrlka/portable.flag -Force
+          Remove-Item dist/ctrlka/work -Recurse -Force -ErrorAction SilentlyContinue
 
       - name: Install Inno Setup
         if: runner.os == 'Windows'

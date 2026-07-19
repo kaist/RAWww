@@ -9,7 +9,7 @@ import re
 import sys
 from time import monotonic
 
-from PySide6.QtCore import QEvent, QKeyCombination, QSettings, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QKeyCombination, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QTextEdit
 from datetime import datetime
@@ -784,6 +784,7 @@ class BatchRenameDialog(QDialog):
     """
 
     renameRequested = Signal(object)
+    _preview_limit = 300
     _token_pattern = re.compile(
         r"\{counter(?::(\d+))?\}|\{(year|month|day|hour|minute|second|date|time|datetime)\}"
     )
@@ -794,6 +795,10 @@ class BatchRenameDialog(QDialog):
         self.details = details
         self.settings = settings
         self._renaming = False
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(180)
+        self._preview_timer.timeout.connect(self._update_preview)
         self.setObjectName("batchRenameDialog")
         self.setWindowTitle("Групповое переименование")
         self.setModal(True)
@@ -827,7 +832,7 @@ class BatchRenameDialog(QDialog):
             {"code": "counter:04", "value": "Счётчик (0001)"},
         ]}], 0)
         self.template_edit.setPlaceholderText("Например: свадьба_{counter:04}")
-        self.template_edit.textEdited.connect(lambda _text: self._update_preview())
+        self.template_edit.textEdited.connect(self._schedule_preview)
         template_row.addWidget(self.template_edit, 1)
         layout.addLayout(template_row)
 
@@ -847,14 +852,14 @@ class BatchRenameDialog(QDialog):
         self.counter_start.setRange(0, 999_999_999)
         self.counter_start.setValue(self.settings.value("batch_rename/counter_start", 1, int))
         self.counter_start.setPrefix("с ")
-        self.counter_start.valueChanged.connect(self._update_preview)
+        self.counter_start.valueChanged.connect(self._schedule_preview)
         counter_row.addWidget(self.counter_start)
         self.counter_digits = QSpinBox()
         self.counter_digits.setObjectName("batchRenameSpin")
         self.counter_digits.setRange(1, 9)
         self.counter_digits.setValue(self.settings.value("batch_rename/counter_digits", 4, int))
         self.counter_digits.setSuffix(" цифры")
-        self.counter_digits.valueChanged.connect(self._update_preview)
+        self.counter_digits.valueChanged.connect(self._schedule_preview)
         counter_row.addWidget(self.counter_digits)
         add_counter = self._token_button("sort", "Счётчик", self._insert_counter)
         counter_row.addWidget(add_counter)
@@ -959,7 +964,7 @@ class BatchRenameDialog(QDialog):
         position = self.template_edit.cursorPosition()
         self.template_edit.setText(raw[:position] + token + raw[position:])
         self.template_edit.setCursorPosition(position + len(token))
-        self._update_preview()
+        self._schedule_preview()
         self.template_edit.setFocus()
 
     def names(self) -> dict[str, str]:
@@ -985,7 +990,11 @@ class BatchRenameDialog(QDialog):
         self.rename_progress.setRange(0, max(1, total))
         self.rename_progress.setValue(completed)
         self.rename_progress.setFormat(f"Переименование: {completed}/{total}")
-        QApplication.processEvents()
+
+    def set_cache_updating(self) -> None:
+        """Объясняет паузу после файловой части, пока в фоне переносится SQLite-кэш."""
+        self.rename_progress.setRange(0, 0)
+        self.rename_progress.setFormat("Обновляю кэш…")
 
     def rename_failed(self, message: str) -> None:
         self._renaming = False
@@ -1017,8 +1026,9 @@ class BatchRenameDialog(QDialog):
         template = self.template_edit.text()
         candidates: dict[str, str] = {}
         errors: list[str] = []
+        preview_before: list[str] = []
+        preview_after: list[str] = []
         for index, path in enumerate(self.paths):
-            self._before_list.addItem(path.name)
             try:
                 stem = self._render_stem(template, path, index)
                 name = f"{stem}{path.suffix}"
@@ -1027,23 +1037,45 @@ class BatchRenameDialog(QDialog):
                 name = "—"
                 errors.append(str(exc))
             candidates[path.name] = name
-            self._after_list.addItem(name)
-        target_keys = [filesystem_name_key(name) for name in candidates.values() if name != "—"]
-        if len(target_keys) != len(set(target_keys)):
+            if index < self._preview_limit:
+                preview_before.append(path.name)
+                preview_after.append(name)
+        if len(self.paths) > self._preview_limit:
+            remainder = len(self.paths) - self._preview_limit
+            preview_before.append(f"… ещё {remainder} файлов")
+            preview_after.append(f"… ещё {remainder} новых имён")
+        self._before_list.addItems(preview_before)
+        self._after_list.addItems(preview_after)
+
+        target_keys = {
+            filesystem_name_key(name) for name in candidates.values() if name != "—"
+        }
+        if len(target_keys) != sum(name != "—" for name in candidates.values()):
             errors.append("Шаблон создаёт одинаковые имена файлов.")
-        for name in candidates.values():
-            if name == "—":
-                continue
-            target = self.paths[0].parent / name
-            if target.exists() and not any(target.samefile(source) for source in self.paths):
-                errors.append(f"Файл «{name}» уже существует в папке.")
-                break
+        if self.paths:
+            source_keys = {filesystem_name_key(path.name) for path in self.paths}
+            try:
+                existing_keys = {
+                    filesystem_name_key(path.name) for path in self.paths[0].parent.iterdir()
+                }
+            except OSError:
+                existing_keys = set()
+            for name in candidates.values():
+                key = filesystem_name_key(name)
+                if name != "—" and key in existing_keys and key not in source_keys:
+                    errors.append(f"Файл «{name}» уже существует в папке.")
+                    break
         self._names = candidates if not errors else {}
         self.rename_button.setEnabled(bool(self._names) and any(old != new for old, new in self._names.items()))
         self.validation_label.setText(errors[0] if errors else f"Будет переименовано: {sum(old != new for old, new in candidates.items())} из {len(candidates)}")
         self.validation_label.setProperty("invalid", bool(errors))
         self.validation_label.style().unpolish(self.validation_label)
         self.validation_label.style().polish(self.validation_label)
+
+    def _schedule_preview(self, *_args: object) -> None:
+        """Откладывает тяжёлый пересчёт, пока пользователь продолжает вводить шаблон."""
+        if not self._renaming:
+            self._preview_timer.start()
 
     def _render_stem(self, template: str, path: Path, index: int) -> str:
         """Подставляет в шаблон имя, номер и EXIF-поля одного файла."""

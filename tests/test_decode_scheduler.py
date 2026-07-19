@@ -54,6 +54,15 @@ class _FolderCache:
             raise RuntimeError("boom")
         return self._loads.get((path, size))
 
+    def load_batch(self, paths: list[Path], size: int):
+        if self._raises:
+            raise RuntimeError("boom")
+        return {
+            path: decoded
+            for path in paths
+            if (decoded := self._loads.get((path, size))) is not None
+        }
+
     def store_pixels(self, result, size: int) -> None:
         self.stored.append((result, size))
 
@@ -221,6 +230,26 @@ class DecodeSchedulerTests(unittest.TestCase):
         scheduler.submit_decode(path, THUMB_SIZE, full_priority=False)
         self.assertEqual(host.bridge.decoded.emitted, [])
         self.assertIsNone(host.decode_cache.get((path, THUMB_SIZE)))
+        self.assertEqual(scheduler.pending, {})
+
+    def test_thumbnail_batch_reads_cache_once_and_publishes_each_hit(self) -> None:
+        first = Path("/photos/a.jpg")
+        second = Path("/photos/b.jpg")
+        first_decoded = _decoded(str(first))
+        second_decoded = _decoded(str(second))
+        folder = _FolderCache(loads={
+            (first, THUMB_SIZE): first_decoded,
+            (second, THUMB_SIZE): second_decoded,
+        })
+        scheduler, host = _make(folder)
+
+        scheduler.submit_thumbnail_batch([first, second])
+
+        self.assertEqual(len(scheduler.background_cache_lookup_executor.calls), 1)
+        self.assertEqual(
+            host.bridge.decoded.emitted,
+            [((first_decoded, THUMB_SIZE),), ((second_decoded, THUMB_SIZE),)],
+        )
         self.assertEqual(scheduler.pending, {})
 
     def test_result_from_previous_generation_of_same_folder_is_rejected(self) -> None:

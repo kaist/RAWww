@@ -117,6 +117,31 @@ class DecodeScheduler:
             return
         self._submit_process_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
 
+    def submit_thumbnail_batch(self, paths: list[Path]) -> None:
+        """Запрашивает фоновую пачку миниатюр одним чтением SQLite без приоритета экрана."""
+        if self._host.closing or self._host.folder_cache is None:
+            return
+        requested = []
+        for path in paths:
+            key = (path, self._thumb_size)
+            if self._host.decode_cache.get(key) is not None or key in self.pending:
+                continue
+            requested.append(path)
+        if not requested:
+            return
+        cache = self._host.folder_cache
+        future = self.background_cache_lookup_executor.submit(
+            cache.load_batch, requested, self._thumb_size
+        )
+        for path in requested:
+            self.pending[(path, self._thumb_size)] = future
+        generation = self._host.directory_generation
+        future.add_done_callback(
+            lambda done, paths=tuple(requested), g=generation: self._queue_completion(
+                "cache_batch", paths, g, done
+            )
+        )
+
     def submit_video_thumbnail(self, path: Path, *, visible_priority: bool) -> None:
         """Ищет кадр видео в RAM и SQLite, затем обращается к Qt-декодеру."""
         key = (path, self._thumb_size)
@@ -230,6 +255,8 @@ class DecodeScheduler:
         kind, *arguments = payload
         if kind == "cache":
             self._cache_lookup_done(*arguments)
+        elif kind == "cache_batch":
+            self._cache_batch_lookup_done(*arguments)
         elif kind == "video":
             self._video_thumbnail_cache_lookup_done(*arguments)
         elif kind == "decode":
@@ -276,6 +303,36 @@ class DecodeScheduler:
         self._submit_process_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
         if key not in self.pending:
             self.visible_thumb_pending.discard(key)
+
+    def _cache_batch_lookup_done(
+        self, paths: tuple[Path, ...], generation: int, future: Future
+    ) -> None:
+        """Раздаёт результат пакетного чтения и декодирует только отсутствующие миниатюры."""
+        for path in paths:
+            key = (path, self._thumb_size)
+            if self.pending.get(key) is future:
+                self.pending.pop(key, None)
+        if (
+            self._host.closing
+            or generation != self._host.directory_generation
+            or future.cancelled()
+        ):
+            return
+        try:
+            decoded = future.result()
+        except Exception as exc:
+            for path in paths:
+                self._host.bridge.failed.emit(str(path), str(exc))
+            return
+        for path in paths:
+            image = decoded.get(path)
+            if image is not None:
+                self._host.decode_cache.put((path, self._thumb_size), image)
+                self._host.bridge.decoded.emit((image, self._thumb_size))
+            else:
+                self._submit_process_decode(
+                    path, self._thumb_size, full_priority=False, visible_priority=False
+                )
 
     def _decode_done(self, path: Path, max_size: int, generation: int, future: Future) -> None:
         key = (path, max_size)
