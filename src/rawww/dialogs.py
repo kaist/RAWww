@@ -597,6 +597,16 @@ class SettingsDialog(QDialog):
         author.setWordWrap(True)
         author.setOpenExternalLinks(True)
         layout.addWidget(author)
+        credits = QLabel(
+            "<b>Определение закрытых глаз:</b> модель "
+            "<a href=\"https://huggingface.co/MichalMlodawski/"
+            "open-closed-eye-classification-mobilev2\">open-closed-eye-classification-mobilev2</a> "
+            "(Michał Młodawski, лицензия CC BY-NC-ND 4.0), используется без изменений."
+        )
+        credits.setObjectName("settingsHint")
+        credits.setWordWrap(True)
+        credits.setOpenExternalLinks(True)
+        layout.addWidget(credits)
         self.auto_update_check = SettingsCheckBox("Автоматически проверять обновления при запуске")
         self.auto_update_check.setChecked(self.settings.value("updates/auto_check", True, bool))
         layout.addWidget(self.auto_update_check)

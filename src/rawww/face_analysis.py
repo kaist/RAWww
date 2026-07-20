@@ -17,7 +17,12 @@ from .runtime_paths import data_path
 MODEL_DIR = data_path("models") / "insightface" / "models" / "buffalo_s_shotsync"
 DETECTOR_MODEL = MODEL_DIR / "det_500m.onnx"
 RECOGNITION_MODEL = MODEL_DIR / "w600k_mbf.onnx"
+EYE_STATE_MODEL = data_path("models") / "eye_state" / "mobilenetv2_eyes.onnx"
 DETECTOR_SIZE = (640, 640)
+EYE_STATE_SIZE = 224
+# Половина стороны квадрата глаза как доля межзрачкового расстояния: 0.45 даёт
+# лучшее разделение открытых и закрытых на тестах, оставляя веко в кадре.
+EYE_CROP_FRACTION = 0.45
 FACE_TEMPLATE = np.array(
     [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
      [41.5493, 92.3655], [70.7299, 92.3655]],
@@ -27,16 +32,23 @@ FACE_TEMPLATE = np.array(
 
 @dataclass(frozen=True)
 class Face:
-    """Найденное лицо: рамка, ориентиры и вектор для сравнения с наборами."""
+    """Найденное лицо: рамка, ориентиры и вектор для сравнения с наборами.
+
+    ``eyes_open`` — вероятность, что глаза открыты, как ``max`` по двум глазам:
+    так «закрыто» означает закрытые оба глаза, а подмигивание кадр не бракует.
+    ``None`` — если модель состояния глаз недоступна.
+    """
 
     bbox: np.ndarray
     landmarks: np.ndarray
     confidence: float
     embedding: np.ndarray
+    eyes_open: float | None = None
 
 
 _detector_session = None
 _recognition_session = None
+_eye_state_session = None
 
 
 def _session(model: Path):
@@ -64,6 +76,54 @@ def _recognition():
     if _recognition_session is None:
         _recognition_session = _session(RECOGNITION_MODEL)
     return _recognition_session
+
+
+def _eye_state():
+    global _eye_state_session
+    if _eye_state_session is None:
+        _eye_state_session = _session(EYE_STATE_MODEL)
+    return _eye_state_session
+
+
+def _eye_patch(image: Image.Image, center: np.ndarray, half: float) -> np.ndarray:
+    """Вырезает квадрат вокруг глаза и готовит вход классификатора (mean=std=0.5)."""
+    cx, cy = float(center[0]), float(center[1])
+    patch = image.crop((cx - half, cy - half, cx + half, cy + half)).resize(
+        (EYE_STATE_SIZE, EYE_STATE_SIZE), Image.Resampling.BILINEAR
+    )
+    values = (np.asarray(patch, dtype=np.float32) / 255.0 - 0.5) / 0.5
+    return values.transpose(2, 0, 1)
+
+
+def _classify_eyes(image: Image.Image, landmarks: np.ndarray) -> list[float | None]:
+    """Возвращает вероятность открытых глаз для каждого лица одним прогоном модели.
+
+    Для каждого лица классифицируются оба глаза (точки 0 и 1 ориентиров), а
+    итог — ``max`` двух вероятностей: закрытым лицо считается лишь когда закрыты
+    оба глаза. При отсутствии модели глаз возвращаются ``None``, чтобы конвейер
+    лиц продолжал работать без состояния глаз.
+    """
+    if not len(landmarks):
+        return []
+    try:
+        session = _eye_state()
+    except Exception:
+        return [None] * len(landmarks)
+    patches = []
+    for points in landmarks:
+        left, right = points[0], points[1]
+        half = max(6.0, EYE_CROP_FRACTION * float(np.hypot(left[0] - right[0], left[1] - right[1])))
+        patches.append(_eye_patch(image, left, half))
+        patches.append(_eye_patch(image, right, half))
+    try:
+        logits = session.run(None, {session.get_inputs()[0].name: np.stack(patches)})[0]
+    except Exception:
+        return [None] * len(landmarks)
+    logits = logits - logits.max(axis=1, keepdims=True)
+    probabilities = np.exp(logits)
+    probabilities /= probabilities.sum(axis=1, keepdims=True)
+    open_scores = probabilities[:, 1].reshape(-1, 2)
+    return [float(pair.max()) for pair in open_scores]
 
 
 def _detector_input(image: Image.Image) -> tuple[np.ndarray, float]:
@@ -168,4 +228,9 @@ def recognize(image: Image.Image) -> list[Face]:
         session.run(None, {input_name: crop[None]})[0]
         for crop in crops
     ])
-    return [Face(box, points, float(score), embedding) for box, points, score, embedding in zip(boxes, landmarks, scores, embeddings)]
+    eye_states = _classify_eyes(image, landmarks)
+    return [
+        Face(box, points, float(score), embedding, eyes_open)
+        for box, points, score, embedding, eyes_open
+        in zip(boxes, landmarks, scores, embeddings, eye_states)
+    ]

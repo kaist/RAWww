@@ -138,6 +138,8 @@ from .version import __version__
 
 THUMB_SIZE = 256
 ORIGINAL_SIZE = 0
+# Ниже этого значения вероятности «глаз открыт» глаз считается закрытым.
+EYES_OPEN_THRESHOLD = 0.5
 CARD_HARD_MIN_WIDTH = 96
 CARD_TARGET_WIDTH = 200
 CARD_MAX_WIDTH = 280
@@ -4360,6 +4362,10 @@ class Workspace(QMainWindow):
         for label, value in (("Все планы", None), ("Крупный", "closeup"), ("Средний", "medium"), ("Общий", "wide"), ("Без лиц", "no_face")):
             self.shot_filter.addItem(label, value)
         self.shot_filter.hide()
+        self.eyes_filter = FilterComboBox()
+        for label, value in (("Все глаза", None), ("Закрытые глаза", "closed")):
+            self.eyes_filter.addItem(label, value)
+        self.eyes_filter.hide()
         self.sort_combo = FilterComboBox()
         for label, value in (("По имени ↑", "name"), ("По имени ↓", "name_desc"), ("По времени ↑", "time"), ("По времени ↓", "time_desc"), ("По рейтингу", "rating")):
             self.sort_combo.addItem(label, value)
@@ -4378,7 +4384,7 @@ class Workspace(QMainWindow):
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setFixedWidth(112)
         self.search_edit.setFixedHeight(self.media_filter.sizeHint().height())
-        for control in (self.rating_filter, self.color_filter, self.media_filter, self.file_type_filter, self.camera_filter, self.shot_filter, self.sort_combo):
+        for control in (self.rating_filter, self.color_filter, self.media_filter, self.file_type_filter, self.camera_filter, self.shot_filter, self.eyes_filter, self.sort_combo):
             control.currentIndexChanged.connect(self._apply_view)
             filter_layout.addWidget(control)
         self.search_edit.textChanged.connect(self._apply_view)
@@ -4524,7 +4530,27 @@ class Workspace(QMainWindow):
             button.clicked.connect(lambda _checked=False, target=value: self._set_shot_filter(target))
             self.shot_buttons[value] = button
             shot_layout.addWidget(button)
+
+        self.eyes_group = QWidget()
+        self.eyes_group.setObjectName("aiPanelGroup")
+        eyes_layout = QHBoxLayout(self.eyes_group)
+        eyes_layout.setContentsMargins(0, 0, 0, 0)
+        eyes_layout.setSpacing(3)
+        self.eyes_panel_title = QLabel("ГЛАЗА")
+        self.eyes_panel_title.setObjectName("aiPanelTitle")
+        eyes_layout.addWidget(self.eyes_panel_title)
+        self.eyes_buttons: dict[object, QToolButton] = {}
+        for label, value in (("Все", None), ("Закрытые", "closed")):
+            button = QToolButton()
+            button.setObjectName("shotFilter")
+            button.setText(label)
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, target=value: self._set_eyes_filter(target))
+            self.eyes_buttons[value] = button
+            eyes_layout.addWidget(button)
+
         ai_layout.addStretch(1)
+        ai_layout.addWidget(self.eyes_group)
         ai_layout.addWidget(self.shot_group)
         self.ai_panel.hide()
 
@@ -8620,6 +8646,7 @@ class Workspace(QMainWindow):
             self.series_toggle.setVisible(True)
             self.faces_panel_button.setVisible(has_faces)
             self.shot_group.setVisible(has_faces)
+            self.eyes_group.setVisible(has_faces)
             counts = {value: 0 for value in self.shot_buttons}
             rating = self.rating_filter.currentData()
             color = self.color_filter.currentData()
@@ -8656,20 +8683,73 @@ class Workspace(QMainWindow):
                 if needle and needle not in path.name.casefold() and needle not in str(detail.get("comment", "")).casefold():
                     continue
                 matching_paths.append(path)
+            closed_eyes_count = 0
             for path in matching_paths:
                 detail = self.photo_details.get(path.name, {})
                 counts[self._shot_size(detail)] = counts.get(self._shot_size(detail), 0) + 1
+                if self._eyes_closed(detail):
+                    closed_eyes_count += 1
             for value, button in self.shot_buttons.items():
                 button.setChecked(self.shot_filter.currentData() == value)
                 count = len(matching_paths) if value is None else counts.get(value, 0)
                 label = button.property("shotLabel") or button.text().split("  ")[0]
                 button.setProperty("shotLabel", label)
                 button.setText(f"{label}  {count}")
+            eyes_counts = {None: len(matching_paths), "closed": closed_eyes_count}
+            for value, button in self.eyes_buttons.items():
+                button.setChecked(self.eyes_filter.currentData() == value)
+                label = button.property("shotLabel") or button.text().split("  ")[0]
+                button.setProperty("shotLabel", label)
+                button.setText(f"{label}  {eyes_counts.get(value, 0)}")
 
     def _set_shot_filter(self, value: str | None) -> None:
         index = self.shot_filter.findData(value)
         if index >= 0:
             self.shot_filter.setCurrentIndex(index)
+
+    def _set_eyes_filter(self, value: str | None) -> None:
+        index = self.eyes_filter.findData(value)
+        if index >= 0:
+            self.eyes_filter.setCurrentIndex(index)
+
+    @staticmethod
+    def _eyes_closed(detail: dict) -> bool:
+        """Признак брака по глазам: закрыты глаза у ключевого лица кадра.
+
+        Брак, если закрыты оба глаза у крупнейшего лица; либо когда лиц с
+        известным состоянием глаз не больше трёх и закрыто хотя бы одно из них.
+        В больших группах учитываем только крупнейшее лицо, чтобы моргнувший на
+        фоне не браковал кадр. Лица без состояния глаз игнорируются.
+        """
+        faces = [face for face in (detail.get("faces") or []) if isinstance(face, dict)]
+        known = 0
+        any_closed = False
+        largest_closed = False
+        largest_size = -1.0
+        for face in faces:
+            state = face.get("eyes_open")
+            if state is None:
+                continue
+            try:
+                open_score = float(state)
+            except (TypeError, ValueError):
+                continue
+            known += 1
+            closed = open_score < EYES_OPEN_THRESHOLD
+            any_closed = any_closed or closed
+            bbox = face.get("bbox") or {}
+            try:
+                size = max(float(bbox.get("width", 0.0)), float(bbox.get("height", 0.0)))
+            except (TypeError, ValueError):
+                size = 0.0
+            if size > largest_size:
+                largest_size = size
+                largest_closed = closed
+        if not known:
+            return False
+        if largest_closed:
+            return True
+        return known <= 3 and any_closed
 
     def _has_available_series(self, paths: list[Path]) -> bool:
         photos = [path for path in paths if path.is_file()]
@@ -8874,6 +8954,7 @@ class Workspace(QMainWindow):
         file_type = self.file_type_filter.currentData()
         camera_key = self.camera_filter.currentData()
         shot = self.shot_filter.currentData()
+        eyes = self.eyes_filter.currentData()
         needle = self.search_edit.text().strip().casefold()
 
         def visible(path: Path) -> bool:
@@ -8898,6 +8979,8 @@ class Workspace(QMainWindow):
                 return False
             faces = detail.get("faces") or []
             if shot is not None and self._shot_size(detail) != shot:
+                return False
+            if eyes == "closed" and not self._eyes_closed(detail):
                 return False
             if (
                 self.face_reference is not None
