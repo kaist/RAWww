@@ -254,6 +254,146 @@ def apply_theme(app: QApplication) -> None:
             text-align: center;
             min-height: 18px;
         }
+        QDialog#cardImportDialog {
+            background: #1d2128;
+            border: 1px solid #666666;
+            border-radius: 10px;
+        }
+        QDialog#cardImportDialog QLabel { background: transparent; }
+        QLabel#cardImportTitle {
+            color: #f4f8ff;
+            font-size: 20px;
+        }
+        QLabel#cardImportSection {
+            color: #bdbdbd;
+            font-size: 10px;
+            letter-spacing: 0.7px;
+        }
+        QLabel#cardImportFieldLabel {
+            min-width: 142px;
+            color: #e1e1e1;
+            font-size: 12px;
+        }
+        QListWidget#cardImportSources {
+            background: #15191f;
+            border: 1px solid #555555;
+            border-radius: 7px;
+            color: #ededed;
+            outline: 0;
+            padding: 4px;
+            font-size: 13px;
+        }
+        QListWidget#cardImportSources::item {
+            min-height: 27px;
+            padding: 3px 7px;
+            border-radius: 5px;
+        }
+        QListWidget#cardImportSources::item:hover { background: #343434; }
+        QListWidget#cardImportSources::item { background: transparent; }
+        QFrame#cardImportDestination {
+            background: transparent;
+            border: 1px solid #555b62;
+            border-radius: 8px;
+        }
+        QLineEdit#cardImportPath, QLineEdit#cardImportShootName {
+            min-height: 0;
+            max-height: 50px;
+            background: #15191f;
+            border: 1px solid #5f5f5f;
+            border-radius: 6px;
+            color: #f1f4f7;
+            padding: 0 10px;
+            font-size: 13px;
+            selection-background-color: #666666;
+            selection-color: #ffffff;
+        }
+        QLineEdit#cardImportPath:read-only { color: #f1f4f7; }
+        QLineEdit#cardImportShootName {
+            min-height: 0;
+            max-height: 54px;
+            font-size: 17px;
+        }
+        QLineEdit#cardImportPath:focus, QLineEdit#cardImportShootName:focus { border-color: #eeeeee; }
+        QLineEdit#cardImportPath:disabled { color: #727982; background: #20242a; border-color: #343b43; }
+        QToolButton#cardImportBrowse {
+            min-width: 50px;
+            max-width: 50px;
+            min-height: 0;
+            max-height: 50px;
+            border: 1px solid #646464;
+            border-radius: 6px;
+            background: #353c44;
+        }
+        QToolButton#cardImportBrowse:hover { background: #525252; border-color: #bcbcbc; }
+        QFrame#cardImportFolderMode {
+            background: transparent;
+            border: 0;
+        }
+        QRadioButton#cardImportDateMode, QRadioButton#cardImportNameMode {
+            min-height: 24px;
+            background-color: transparent;
+            border: 0;
+            color: #e8edf2;
+            font-size: 12px;
+            font-weight: normal;
+            spacing: 8px;
+        }
+        QRadioButton#cardImportDateMode:checked,
+        QRadioButton#cardImportNameMode:checked,
+        QRadioButton#cardImportDateMode:hover,
+        QRadioButton#cardImportNameMode:hover,
+        QRadioButton#cardImportDateMode:disabled,
+        QRadioButton#cardImportNameMode:disabled {
+            background-color: transparent;
+            border: 0;
+        }
+        QRadioButton#cardImportDateMode::indicator,
+        QRadioButton#cardImportNameMode::indicator {
+            width: 18px;
+            height: 18px;
+            min-width: 18px;
+            max-width: 18px;
+            min-height: 18px;
+            max-height: 18px;
+            border: 1px solid #8a8a8a;
+            border-radius: 9px;
+            background: transparent;
+            image: none;
+        }
+        QRadioButton#cardImportDateMode::indicator:checked,
+        QRadioButton#cardImportNameMode::indicator:checked {
+            width: 18px;
+            height: 18px;
+            background: #e7e7e7;
+            border: 1px solid #e7e7e7;
+            border-radius: 9px;
+            image: none;
+        }
+        QCheckBox#cardImportSourceOption {
+            min-height: 28px;
+            background: transparent;
+            color: #ededed;
+            font-size: 13px;
+            font-weight: normal;
+            spacing: 8px;
+            padding: 0 7px;
+        }
+        QCheckBox#cardImportSourceOption::indicator {
+            width: 18px;
+            height: 18px;
+            background: #292929;
+            border: 1px solid #8a8a8a;
+            border-radius: 4px;
+        }
+        QCheckBox#cardImportSourceOption::indicator:checked { background: #707070; border-color: #e2e2e2; }
+        QDialog#cardImportDialog QPushButton { font-weight: normal; }
+        QDialog#cardImportDialog QPushButton#settingsPrimaryButton {
+            background: #e7e7e7;
+            border-color: #ffffff;
+            color: #202020;
+        }
+        QDialog#cardImportDialog QPushButton#settingsPrimaryButton:hover { background: #ffffff; }
+        QLabel#cardImportStatus { min-height: 18px; color: #c5c5c5; font-size: 11px; }
         QDialog#quickTransferDialog QProgressBar::chunk {
             background: #4b91d1;
             border-radius: 4px;
@@ -444,6 +584,18 @@ def apply_theme(app: QApplication) -> None:
             border-color: #79aaff;
             color: white;
         }
+        QPushButton#cardImportButton {
+            min-height: 42px;
+            background: #e7e7e7;
+            border: 1px solid #ffffff;
+            border-radius: 6px;
+            color: #1b1b1b;
+            font-size: 14px;
+            text-align: left;
+            padding: 0 12px;
+        }
+        QPushButton#cardImportButton:hover { background: #ffffff; border-color: #ffffff; }
+        QPushButton#cardImportButton:pressed { background: #c9c9c9; }
         QWidget#directoryPanel {
             background: transparent;
         }

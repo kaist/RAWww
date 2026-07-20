@@ -234,6 +234,53 @@ class SettingsDialog(QDialog):
             self.settings.value("transfers/auto_rename_conflicts", True, bool)
         )
         layout.addWidget(self.auto_rename_transfer_conflicts)
+
+        card_import_card = QFrame()
+        card_import_card.setObjectName("externalEditorCard")
+        card_import_layout = QVBoxLayout(card_import_card)
+        card_import_layout.setContentsMargins(14, 13, 14, 14)
+        card_import_layout.setSpacing(7)
+        card_import_heading = QLabel("Импорт с карты памяти")
+        card_import_heading.setObjectName("externalEditorTitle")
+        card_import_layout.addWidget(card_import_heading)
+        card_import_hint = QLabel(
+            "Эти параметры применяются к каждому новому импорту с подключённой карты памяти."
+        )
+        card_import_hint.setObjectName("externalEditorHint")
+        card_import_hint.setWordWrap(True)
+        card_import_layout.addWidget(card_import_hint)
+        self.card_import_flatten = SettingsCheckBox("Все файлы в одну папку")
+        self.card_import_flatten.setChecked(self.settings.value("card_import/flatten", True, bool))
+        card_import_layout.addWidget(self.card_import_flatten)
+        self.card_import_delete_sources = SettingsCheckBox("Удалять исходные файлы с карты")
+        self.card_import_delete_sources.setChecked(self.settings.value("card_import/delete_sources", True, bool))
+        card_import_layout.addWidget(self.card_import_delete_sources)
+        self.card_import_backup_enabled = SettingsCheckBox("Сделать резервную копию")
+        self.card_import_backup_enabled.setChecked(self.settings.value("card_import/backup_enabled", False, bool))
+        card_import_layout.addWidget(self.card_import_backup_enabled)
+        backup_row = QHBoxLayout()
+        backup_row.setContentsMargins(24, 0, 0, 0)
+        backup_row.setSpacing(8)
+        remembered_backup = self.settings.value("card_import/backup_destination", "", str)
+        self.card_import_backup_destination = QLineEdit("" if remembered_backup in {"", "."} else remembered_backup)
+        self.card_import_backup_destination.setObjectName("editorExecutable")
+        self.card_import_backup_destination.setReadOnly(True)
+        self.card_import_backup_destination.setPlaceholderText("Папка резервной копии")
+        backup_row.addWidget(self.card_import_backup_destination, 1)
+        self.card_import_backup_browse = QToolButton()
+        self.card_import_backup_browse.setObjectName("editorBrowseButton")
+        self.card_import_backup_browse.setIcon(_fomantic_icon("folder", 15, "#c9c9c9"))
+        self.card_import_backup_browse.setIconSize(QSize(15, 15))
+        self.card_import_backup_browse.setToolTip("Выбрать папку резервной копии")
+        self.card_import_backup_browse.clicked.connect(self._choose_card_import_backup_directory)
+        backup_row.addWidget(self.card_import_backup_browse)
+        card_import_layout.addLayout(backup_row)
+        self.card_import_backup_destination.setEnabled(self.card_import_backup_enabled.isChecked())
+        self.card_import_backup_browse.setEnabled(self.card_import_backup_enabled.isChecked())
+        self.card_import_backup_enabled.toggled.connect(self.card_import_backup_destination.setEnabled)
+        self.card_import_backup_enabled.toggled.connect(self.card_import_backup_browse.setEnabled)
+        layout.addWidget(card_import_card)
+
         self.auto_ai_after_previews = SettingsCheckBox("Всегда запускать AI после превью")
         self.auto_ai_after_previews.setChecked(
             self.settings.value("ai/auto_after_previews", False, bool)
@@ -353,6 +400,16 @@ class SettingsDialog(QDialog):
 
     def _update_editor_choice_state(self, use_custom: bool) -> None:
         self.custom_editor_controls.setVisible(use_custom)
+
+    def _choose_card_import_backup_directory(self) -> None:
+        """Выбирает постоянную папку для резервных копий импорта с карты."""
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "Папка резервной копии",
+            self.card_import_backup_destination.text(),
+        )
+        if chosen:
+            self.card_import_backup_destination.setText(chosen)
 
     def _choose_editor_executable(self) -> None:
         if sys.platform == "win32":
@@ -628,6 +685,13 @@ class SettingsDialog(QDialog):
         self.settings.setValue(
             "transfers/auto_rename_conflicts",
             self.auto_rename_transfer_conflicts.isChecked(),
+        )
+        self.settings.setValue("card_import/flatten", self.card_import_flatten.isChecked())
+        self.settings.setValue("card_import/delete_sources", self.card_import_delete_sources.isChecked())
+        self.settings.setValue("card_import/backup_enabled", self.card_import_backup_enabled.isChecked())
+        self.settings.setValue(
+            "card_import/backup_destination",
+            self.card_import_backup_destination.text().strip(),
         )
         self.settings.setValue("ai/auto_after_previews", self.auto_ai_after_previews.isChecked())
         self.settings.setValue("interface/show_full_view_counter", self.show_full_view_counter.isChecked())
@@ -1128,6 +1192,176 @@ class BatchRenameDialog(QDialog):
         stem = Path(name).stem.upper()
         if stem in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
             raise ValueError("Шаблон создаёт зарезервированное имя Windows.")
+
+
+class CardImportDialog(QDialog):
+    """Собирает параметры импорта карты, не выполняя файловые операции сам."""
+
+    def __init__(self, sources: list[Path | tuple[Path, str]], settings: QSettings, parent=None) -> None:
+        super().__init__(parent)
+        self.sources = [
+            source if isinstance(source, tuple) else (source, str(source))
+            for source in sources
+        ]
+        self.settings = settings
+        self.options: dict | None = None
+        self.setObjectName("cardImportDialog")
+        self.setWindowTitle("Импорт с карты памяти")
+        self.setModal(True)
+        self.setFixedWidth(590)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+
+        title = QLabel("Импорт с карты памяти")
+        title.setObjectName("cardImportTitle")
+        layout.addWidget(title)
+
+        source_label = QLabel("КАРТЫ ДЛЯ ИМПОРТА")
+        source_label.setObjectName("cardImportSection")
+        layout.addWidget(source_label)
+        self.sources_list = QListWidget()
+        self.sources_list.setObjectName("cardImportSources")
+        self.sources_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        for source, label in self.sources:
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, source)
+            item.setSizeHint(QSize(0, 32))
+            self.sources_list.addItem(item)
+            check = SettingsCheckBox(label)
+            check.setObjectName("cardImportSourceOption")
+            check.setChecked(True)
+            self.sources_list.setItemWidget(item, check)
+        self.sources_list.setFixedHeight(10 + self.sources_list.count() * 32)
+        layout.addWidget(self.sources_list)
+
+        destination_box = QFrame()
+        destination_box.setObjectName("cardImportDestination")
+        destination_layout = QVBoxLayout(destination_box)
+        destination_layout.setContentsMargins(12, 9, 12, 11)
+        destination_layout.setSpacing(12)
+        destination_row = QHBoxLayout()
+        destination_row.setSpacing(8)
+        destination_label = QLabel("Куда импортировать")
+        destination_label.setObjectName("cardImportFieldLabel")
+        destination_label.setFixedWidth(156)
+        destination_row.addWidget(destination_label)
+        self.destination_edit = QLineEdit(self.settings.value("card_import/destination", "", str))
+        self.destination_edit.setObjectName("cardImportPath")
+        self.destination_edit.setReadOnly(True)
+        self.destination_edit.setFixedHeight(50)
+        self.destination_edit.setPlaceholderText("Выберите основную папку")
+        destination_row.addWidget(self.destination_edit, 1)
+        destination_browse = QToolButton()
+        destination_browse.setObjectName("cardImportBrowse")
+        destination_browse.setFixedSize(QSize(50, 50))
+        destination_browse.setIcon(_fomantic_icon("folder", 22))
+        destination_browse.setToolTip("Выбрать папку")
+        destination_browse.clicked.connect(lambda: self._choose_directory(self.destination_edit, "Папка для импорта"))
+        destination_row.addWidget(destination_browse)
+        destination_layout.addLayout(destination_row)
+
+        mode_box = QFrame()
+        mode_box.setObjectName("cardImportFolderMode")
+        mode_layout = QVBoxLayout(mode_box)
+        mode_layout.setContentsMargins(0, 0, 0, 0)
+        mode_title = QLabel("КАТАЛОГ СЪЁМКИ")
+        mode_title.setObjectName("cardImportSection")
+        mode_layout.addWidget(mode_title)
+        self.date_mode = QRadioButton("Создать каталог с датой съёмки")
+        self.name_mode = QRadioButton("Создать каталог с названием съёмки")
+        self.date_mode.setObjectName("cardImportDateMode")
+        self.name_mode.setObjectName("cardImportNameMode")
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self.date_mode)
+        mode_group.addButton(self.name_mode)
+        mode_layout.addWidget(self.date_mode)
+        mode_layout.addWidget(self.name_mode)
+        self.shoot_name = QLineEdit(self.settings.value("card_import/shoot_name", "", str))
+        self.shoot_name.setObjectName("cardImportShootName")
+        self.shoot_name.setFixedHeight(54)
+        self.shoot_name.setPlaceholderText("Название съёмки")
+        mode_layout.addWidget(self.shoot_name)
+        use_name = self.settings.value("card_import/folder_mode", "date", str) == "name"
+        (self.name_mode if use_name else self.date_mode).setChecked(True)
+        self.name_mode.toggled.connect(self.shoot_name.setEnabled)
+        self.shoot_name.setEnabled(use_name)
+        destination_layout.addWidget(mode_box)
+        layout.addWidget(destination_box)
+
+        self.status = QLabel()
+        self.status.setObjectName("cardImportStatus")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("Отмена")
+        cancel.setObjectName("settingsSecondaryButton")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        start = QPushButton("Начать")
+        start.setObjectName("settingsPrimaryButton")
+        start.clicked.connect(self._start)
+        start.setDefault(True)
+        buttons.addWidget(start)
+        layout.addLayout(buttons)
+        if use_name:
+            self.shoot_name.setFocus(Qt.FocusReason.OtherFocusReason)
+            self.shoot_name.selectAll()
+        else:
+            self.destination_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _choose_directory(self, edit: QLineEdit, title: str) -> None:
+        chosen = QFileDialog.getExistingDirectory(self, title, edit.text())
+        if chosen:
+            edit.setText(chosen)
+
+    def _start(self) -> None:
+        destination_text = self.destination_edit.text().strip()
+        if not destination_text:
+            self.status.setText("Укажите основную папку для импорта.")
+            self.destination_edit.setFocus()
+            return
+        destination = Path(destination_text).expanduser()
+        shoot_name = self.shoot_name.text().strip()
+        if self.name_mode.isChecked() and not shoot_name:
+            self.status.setText("Введите название съёмки.")
+            self.shoot_name.setFocus()
+            return
+        if shoot_name and (Path(shoot_name).name != shoot_name or shoot_name in {".", ".."}):
+            self.status.setText("Название съёмки не должно содержать путь.")
+            return
+        backup_enabled = self.settings.value("card_import/backup_enabled", False, bool)
+        backup_text = self.settings.value("card_import/backup_destination", "", str).strip()
+        if backup_enabled and backup_text in {"", "."}:
+            self.status.setText("Укажите папку резервной копии в Настройки → Поведение.")
+            return
+        backup = Path(backup_text).expanduser() if backup_text else None
+        sources = [
+            item.data(Qt.ItemDataRole.UserRole)
+            for row in range(self.sources_list.count())
+            if (item := self.sources_list.item(row))
+            and isinstance(self.sources_list.itemWidget(item), SettingsCheckBox)
+            and self.sources_list.itemWidget(item).isChecked()
+        ]
+        if not sources or not all(isinstance(source, Path) for source in sources):
+            self.status.setText("Выберите хотя бы одну карту памяти.")
+            return
+        if backup_enabled and destination == backup:
+            self.status.setText("Основная и резервная папки должны различаться.")
+            return
+        self.options = {
+            "sources": sources, "destination": destination, "folder_mode": "name" if self.name_mode.isChecked() else "date",
+            "shoot_name": shoot_name,
+            "flatten": self.settings.value("card_import/flatten", True, bool),
+            "delete_sources": self.settings.value("card_import/delete_sources", True, bool),
+            "backup_enabled": backup_enabled,
+            "backup_destination": backup,
+        }
+        for key, value in self.options.items():
+            if key in {"destination", "folder_mode", "shoot_name"}:
+                self.settings.setValue(f"card_import/{key}", str(value) if isinstance(value, Path) else value)
+        self.accept()
 
 
 class BatchResizeDialog(QDialog):

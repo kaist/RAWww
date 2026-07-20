@@ -140,6 +140,31 @@ class TransferQueueTests(unittest.TestCase):
         self.assertEqual([task.identifier for task in self.manager.pending], [first])
         self.assertFalse(self.manager.target_reserved(destination / "second.raw"))
 
+    def test_parallel_card_tasks_share_slots_when_regular_queue_is_serial(self) -> None:
+        root = Path(self.temp.name)
+        destination = root / "destination"
+        destination.mkdir()
+        first_source = root / "first.raw"
+        second_source = root / "second.raw"
+        first_source.write_bytes(b"first")
+        second_source.write_bytes(b"second")
+
+        with patch.object(self.manager._executor, "submit"):
+            first = self.manager.enqueue(
+                [TransferEntry(first_source, destination / first_source.name)],
+                destination,
+                move=False,
+                parallel=True,
+            )
+            second = self.manager.enqueue(
+                [TransferEntry(second_source, destination / second_source.name)],
+                destination,
+                move=False,
+                parallel=True,
+            )
+
+        self.assertEqual(set(self.manager.active), {first, second})
+
     def test_panel_is_visible_only_while_manager_has_work(self) -> None:
         root = Path(self.temp.name)
         source = root / "source.raw"

@@ -22,6 +22,7 @@ HOTKEY_DEFAULTS: dict[str, tuple[str, str]] = {
     "create_folder": ("Создать новую папку", "Ctrl+Shift+N"),
     "quick_copy": ("Быстрое копирование", "Shift+C"),
     "quick_move": ("Быстрое перемещение", "Shift+M"),
+    "card_import": ("Импорт с карты памяти", "Ctrl+Shift+I"),
     **{f"rating_{rating}": (f"Рейтинг {rating}" if rating else "Сбросить рейтинг", str(rating)) for rating in range(6)},
     **{f"color_{index}": (label, f"Shift+{index}") for index, label in enumerate(("Сбросить цветовую метку", "Красная метка", "Жёлтая метка", "Зелёная метка", "Синяя метка", "Фиолетовая метка"))},
 }

@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QButtonGroup,
     QToolButton,
@@ -110,9 +111,11 @@ from .theme import (
 from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence
 from .widgets import SettingsCheckBox
 from .transfer_queue import TransferEntry, TransferManager, TransferQueuePanel, TransferTask
+from .card_import import CardImportScan, build_backup_entries, build_import_entries, merge_scans, scan_card
 from .dialogs import (
     BatchRenameDialog,
     BatchResizeDialog,
+    CardImportDialog,
     HelpDialog,
     QuickTransferDialog,
     SettingsDialog,
@@ -3463,6 +3466,7 @@ class Workspace(QMainWindow):
     openFolderRequested = Signal(object)    # Путь: открыть (или выделить) вкладку папки.
     shotsyncFolderChanged = Signal(bool)    # текущая папка связана с ShotSync
     seriesModeChanged = Signal(bool)
+    cardImportRequested = Signal(object)
     _cache_maintenance_started = False
 
     def __init__(
@@ -4159,6 +4163,13 @@ class Workspace(QMainWindow):
         self.volume_icon_provider = QFileIconProvider()
         self.removable_volume_icon = _removable_volume_icon()
         self.volume_removability: dict[str, bool] = {}
+        self.card_import_button = QPushButton("Импорт с карты памяти")
+        self.card_import_button.setObjectName("cardImportButton")
+        self.card_import_button.setIcon(self.removable_volume_icon)
+        self.card_import_button.setIconSize(QSize(22, 22))
+        self.card_import_button.clicked.connect(self._request_card_import)
+        self.card_import_button.hide()
+        sidebar_layout.addWidget(self.card_import_button)
         self.drive_button_layout = QHBoxLayout()
         self.drive_button_layout.setContentsMargins(0, 0, 0, 0)
         self.drive_button_layout.setSpacing(3)
@@ -4641,6 +4652,7 @@ class Workspace(QMainWindow):
         add_hotkey("create_folder", self._create_new_folder)
         add_hotkey("quick_copy", lambda: self._show_quick_transfer(move=False))
         add_hotkey("quick_move", lambda: self._show_quick_transfer(move=True))
+        add_hotkey("card_import", self._request_card_import)
 
         for rating in range(0, 6):
             add_hotkey(f"rating_{rating}", lambda _checked=False, value=rating: self._set_selected_rating(value or None))
@@ -5727,6 +5739,8 @@ class Workspace(QMainWindow):
         не возвращает. Заодно в интерфейс не попадают недоступные носители.
         """
         volumes = _mounted_volume_paths()
+        removable_volumes = [path for path in volumes if _is_removable_volume(path)]
+        self.card_import_button.setVisible(bool(removable_volumes))
         volume_keys = {_drive_key(path) for path in volumes}
         existing = {
             button.property("volumeKey"): button
@@ -5784,6 +5798,12 @@ class Workspace(QMainWindow):
             fallback = Path.home()
             self._set_tree_root_for_path(fallback)
             self.load_directory(fallback)
+
+    def _request_card_import(self) -> None:
+        """Передаёт главному окну доступные съёмные тома для единого импорта."""
+        volumes = [path for path in _mounted_volume_paths() if _is_removable_volume(path)]
+        if volumes:
+            self.cardImportRequested.emit([(path, _volume_label(path)) for path in volumes])
 
     def _drive_selected(self, drive_path: Path) -> None:
         self._deactivate_shotsync()
@@ -10323,6 +10343,8 @@ class MainWindow(QMainWindow):
         self.settings = _application_settings()
         self.transfer_manager = TransferManager(self.settings, self)
         self.transfer_manager.taskFinished.connect(self._transfer_task_finished)
+        self._card_import_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="card-import")
+        self._card_import_backups: dict[str, tuple[list[TransferEntry], Path, Path, bool]] = {}
         self._single_photo_workspace: Workspace | None = None
         self._single_photo_origin_index: int | None = None
         self._single_photo_was_minimized = False
@@ -10607,6 +10629,9 @@ class MainWindow(QMainWindow):
         workspace.singlePhotoExitRequested.connect(self._exit_single_photo)
         workspace.singlePhotoFolderRequested.connect(self._open_single_photo_folder)
         workspace.openFolderRequested.connect(self._open_folder_tab)
+        workspace.cardImportRequested.connect(
+            lambda sources, view=workspace: self._show_card_import(sources, view)
+        )
         workspace.shotsyncFolderChanged.connect(
             lambda linked, view=workspace: self._set_workspace_shotsync_icon(view, linked)
         )
@@ -10703,6 +10728,7 @@ class MainWindow(QMainWindow):
 
     def _transfer_task_finished(self, task: TransferTask) -> None:
         """Обновляет открытые папки и сообщает ошибки завершённой операции."""
+        self._continue_card_import_backup(task)
         touched = {task.destination}
         if task.move:
             touched.update(entry.source.parent for entry in task.entries)
@@ -10716,6 +10742,143 @@ class MainWindow(QMainWindow):
                 "Файловая операция",
                 "Не удалось обработать некоторые объекты:\n" + "\n".join(task.errors),
             )
+
+    def _show_card_import(self, sources: list[tuple[Path, str]], parent: QWidget) -> None:
+        """Открывает единый диалог импорта для карт, выбранных во вкладке."""
+        dialog = CardImportDialog(sources, self.settings, parent)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.options is None:
+            return
+        self._prepare_card_import(dialog.options, parent)
+
+    def _prepare_card_import(self, options: dict, parent: QWidget) -> None:
+        """Собирает карту в фоне, чтобы большая вложенная структура не заморозила Qt."""
+        sources = [Path(source) for source in options.get("sources", [])]
+        if not sources or not all(source.is_dir() for source in sources):
+            QMessageBox.warning(parent, "Импорт с карты памяти", "Одна из выбранных карт больше недоступна.")
+            return
+        reserved_targets = self.transfer_manager.reserved_targets()
+        future = self._card_import_executor.submit(
+            self._build_card_import_plan, sources, options, reserved_targets
+        )
+        progress = QProgressDialog("Подготавливаю список файлов с карты…", None, 0, 0, parent)
+        progress.setWindowTitle("Импорт с карты памяти")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.show()
+
+        def finish() -> None:
+            if not future.done():
+                QTimer.singleShot(80, finish)
+                return
+            progress.close()
+            try:
+                scan, entries, destination, backup_destination = future.result()
+            except Exception as exc:  # noqa: BLE001 — сообщение пользователю важнее детали потока
+                QMessageBox.warning(parent, "Импорт с карты памяти", f"Не удалось прочитать карту:\n{exc}")
+                return
+            self._enqueue_card_import(scan, entries, destination, backup_destination, options, parent)
+
+        QTimer.singleShot(0, finish)
+
+    @staticmethod
+    def _build_card_import_plan(
+        sources: list[Path], options: dict, reserved_targets: set[Path]
+    ) -> tuple[CardImportScan, list[TransferEntry], Path, Path]:
+        """Собирает и сравнивает конфликтующие файлы вне UI-потока."""
+        scan = merge_scans([scan_card(source) for source in sources])
+        folder_name = str(options["shoot_name"]).strip() if options["folder_mode"] == "name" else scan.capture_date.isoformat()
+        destination = Path(options["destination"]) / folder_name
+        backup_destination = (
+            Path(options["backup_destination"]) / folder_name
+            if options["backup_enabled"]
+            else destination
+        )
+        source_roots = scan.source_roots or (scan.root,)
+        if any(destination.resolve().is_relative_to(root.resolve()) for root in source_roots):
+            raise ValueError("Основная папка не может находиться внутри импортируемой карты.")
+        if options["backup_enabled"] and any(backup_destination.resolve().is_relative_to(root.resolve()) for root in source_roots):
+            raise ValueError("Папка резервной копии не может находиться внутри импортируемой карты.")
+        entries = build_import_entries(
+            scan, destination, flatten=bool(options["flatten"]), reserved=reserved_targets.__contains__,
+        )
+        return scan, entries, destination, backup_destination
+
+    def _enqueue_card_import(
+        self,
+        scan: CardImportScan,
+        entries: list[TransferEntry],
+        destination: Path,
+        backup_destination: Path,
+        options: dict,
+        parent: QWidget,
+    ) -> None:
+        """Ставит каждую карту отдельной задачей, чтобы несколько носителей читались параллельно."""
+        if not scan.files:
+            QMessageBox.information(parent, "Импорт с карты памяти", "На выбранных картах нет файлов для импорта.")
+            return
+        if not entries:
+            QMessageBox.information(parent, "Импорт с карты памяти", "Все файлы уже есть в папке назначения.")
+            return
+        remaining = list(entries)
+        batches: list[list[TransferEntry]] = []
+        for source_root in scan.source_roots or (scan.root,):
+            card_entries: list[TransferEntry] = []
+            for entry in remaining[:]:
+                try:
+                    entry.source.relative_to(source_root)
+                except ValueError:
+                    continue
+                card_entries.append(entry)
+                remaining.remove(entry)
+            if card_entries:
+                batches.append(card_entries)
+        if remaining:
+            batches.append(remaining)
+
+        identifiers: list[tuple[str, list[TransferEntry]]] = []
+        for card_entries in batches:
+            identifier = self.transfer_manager.enqueue(
+                card_entries,
+                destination,
+                move=bool(options["delete_sources"]),
+                parallel=True,
+            )
+            if identifier is not None:
+                identifiers.append((identifier, card_entries))
+        if not identifiers:
+            QMessageBox.warning(parent, "Импорт с карты памяти", "Не удалось поставить импорт в очередь.")
+            return
+        if options["backup_enabled"]:
+            for identifier, card_entries in identifiers:
+                self._card_import_backups[identifier] = (
+                    card_entries,
+                    destination,
+                    backup_destination,
+                    bool(options["flatten"]),
+                )
+
+    def _continue_card_import_backup(self, task: TransferTask) -> None:
+        """Ставит резервную копию только после полностью успешного основного импорта."""
+        pending = self._card_import_backups.pop(task.identifier, None)
+        if pending is None:
+            return
+        entries, import_root, backup_root, flatten = pending
+        if task.status != "finished":
+            QMessageBox.warning(
+                self,
+                "Резервная копия",
+                "Основной импорт завершился с ошибкой или был отменён; резервная копия не запускалась.",
+            )
+            return
+        try:
+            backup_entries = build_backup_entries(
+                entries, import_root, backup_root, flatten=flatten, reserved=self.transfer_manager.target_reserved,
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Резервная копия", f"Не удалось подготовить резервную копию:\n{exc}")
+            return
+        self.transfer_manager.enqueue(backup_entries, backup_root, move=False)
 
     def _clear_all_caches(self) -> None:
         """Закрывает активные базы кэша перед удалением их файлов."""
@@ -10866,6 +11029,7 @@ class MainWindow(QMainWindow):
         if workspaces:
             workspaces[0].shotsync.shutdown()
         retire_executor(self._update_executor)
+        retire_executor(self._card_import_executor)
         wait_for_retired_executors()
 
     def _toggle_maximized(self) -> None:

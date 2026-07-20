@@ -82,6 +82,7 @@ class TransferTask:
     entries: list[TransferEntry]
     destination: Path
     move: bool
+    parallel: bool = False
     identifier: str = field(default_factory=lambda: uuid4().hex)
     status: str = "queued"
     completed_files: int = 0
@@ -142,11 +143,18 @@ class TransferManager(QObject):
         self._progressArrived.connect(self._apply_progress)
         self._finishedArrived.connect(self._finish_task)
 
-    def enqueue(self, entries: list[TransferEntry], destination: Path, *, move: bool) -> str | None:
+    def enqueue(
+        self,
+        entries: list[TransferEntry],
+        destination: Path,
+        *,
+        move: bool,
+        parallel: bool = False,
+    ) -> str | None:
         """Добавляет согласованную операцию и запускает её, когда доступен слот."""
         if self._closing or not entries:
             return None
-        task = TransferTask(list(entries), destination, move)
+        task = TransferTask(list(entries), destination, move, parallel=parallel)
         self._tasks[task.identifier] = task
         self.pending.append(task)
         self.changed.emit()
@@ -167,6 +175,14 @@ class TransferManager(QObject):
             for task in (*self.pending, *self.active.values())
             for entry in task.entries
         )
+
+    def reserved_targets(self) -> set[Path]:
+        """Возвращает снимок целей незавершённых задач для фоновой подготовки новой."""
+        return {
+            entry.target
+            for task in (*self.pending, *self.active.values())
+            for entry in task.entries
+        }
 
     def set_paused(self, paused: bool) -> None:
         """Приостанавливает активные задачи на ближайшей границе блока данных."""
@@ -217,8 +233,13 @@ class TransferManager(QObject):
     def _pump(self) -> None:
         if self._closing:
             return
-        limit = 1 if self.serial else PARALLEL_TRANSFER_LIMIT
+        limit = PARALLEL_TRANSFER_LIMIT
         while self.pending and len(self.active) < limit:
+            next_task = self.pending[0]
+            if self.serial and self.active and not (
+                next_task.parallel and all(task.parallel for task in self.active.values())
+            ):
+                break
             task = self.pending.pop(0)
             task.status = "preparing"
             task.started_at = monotonic()
