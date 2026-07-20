@@ -3628,6 +3628,7 @@ class Workspace(QMainWindow):
         self.shotsync.downloader.progress.connect(self._on_shotsync_selection_progress)
         self.shotsync.uploader.progress.connect(self._on_shotsync_upload_progress)
         self.shotsync.uploader.finished.connect(self._on_shotsync_upload_finished)
+        self.shotsync.uploader.finishedWithErrors.connect(self._on_shotsync_upload_finished_with_errors)
         self.shotsync.uploader.failed.connect(self._on_shotsync_upload_failed)
         self.shotsync.uploader.deleteFinished.connect(self._on_shotsync_server_deleted)
         self.shotsync.uploader.deleteFailed.connect(self._on_shotsync_server_delete_failed)
@@ -6790,6 +6791,16 @@ class Workspace(QMainWindow):
         if Path(folder) == self.current_dir:
             self._attach_shotsync_syncer()
             self._refresh_shotsync_shortcuts()
+
+    def _on_shotsync_upload_finished_with_errors(self, shooting_id: int, folder: str, failed: int) -> None:
+        """Съёмка отправлена частично: связываем папку и предлагаем догрузку."""
+        self._on_shotsync_upload_finished(shooting_id, folder)
+        QMessageBox.warning(
+            self,
+            "ShotSync",
+            f"Съёмка отправлена, но {failed} фото не удалось загрузить.\n"
+            "Повторите отправку той же папки — недостающие кадры догрузятся.",
+        )
 
     def _on_shotsync_upload_failed(self, message: str) -> None:
         self._upload_progress = None

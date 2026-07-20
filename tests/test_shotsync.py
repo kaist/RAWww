@@ -20,7 +20,15 @@ from rawww.shotsync_hub import ShotSyncHub  # noqa: E402
 from rawww.shotsync_receiver import ShotSyncReceiver, safe_filename  # noqa: E402
 from rawww.shotsync_selection import SelectionMarkSyncer  # noqa: E402
 from rawww.shotsync_socket import ShotSyncSocket  # noqa: E402
-from rawww.shotsync_upload import MarksFetcher, encode_preview, exif_original_datetime  # noqa: E402
+from PySide6.QtNetwork import QNetworkReply  # noqa: E402
+
+from rawww.shotsync_upload import (  # noqa: E402
+    MAX_UPLOAD_ATTEMPTS,
+    FolderUploader,
+    MarksFetcher,
+    encode_preview,
+    exif_original_datetime,
+)
 
 try:  # pragma: no cover — зависит от окружения
     from PySide6.QtWidgets import QApplication
@@ -475,6 +483,146 @@ class MarksFetcherTests(unittest.TestCase):
         self.fetcher.failed.connect(errors.append)
         self.fetcher.fetch(7, _CollectingCache())
         self.assertEqual(len(errors), 1)
+
+
+class _FakeReply:
+    """Минимальный двойник ``QNetworkReply`` для проверки логики загрузки."""
+
+    def __init__(self, *, body: bytes = b"", error=None, error_string: str = "") -> None:
+        self._body = body
+        self._error = error or QNetworkReply.NetworkError.NoError
+        self._error_string = error_string
+
+    def readAll(self) -> bytes:
+        return self._body
+
+    def error(self):
+        return self._error
+
+    def errorString(self) -> str:
+        return self._error_string
+
+    def deleteLater(self) -> None:
+        pass
+
+
+@unittest.skipUnless(HAVE_GUI, "FolderCache требует QtGui/libGL в этом окружении")
+class FolderUploaderResilienceTests(unittest.TestCase):
+    """Проверяет повторы, частичный успех и докачку отправки папки."""
+
+    def setUp(self) -> None:
+        _app()
+        self._tmp = TemporaryDirectory()
+        self.folder = Path(self._tmp.name)
+        self.uploader = FolderUploader(BASE_URL)
+        self.uploader.set_api_key("k")
+        self.finished: list[tuple[int, str]] = []
+        self.partial: list[tuple[int, str, int]] = []
+        self.failed: list[str] = []
+        self.uploader.finished.connect(lambda sid, f: self.finished.append((sid, f)))
+        self.uploader.finishedWithErrors.connect(
+            lambda sid, f, n: self.partial.append((sid, f, n))
+        )
+        self.uploader.failed.connect(self.failed.append)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _prime(self, images: list[Path], *, resume: bool = True, shooting_id: int = 5) -> None:
+        up = self.uploader
+        up._reset()
+        up._folder = self.folder
+        up._all_images = images
+        up._shooting_id = shooting_id
+        up._resume = resume
+        up._total = len(images)
+
+    @staticmethod
+    def _item(path: Path, attempt: int = 0):
+        return (path, b"x", None, b"", "", attempt)
+
+    def test_partial_failure_keeps_shooting_and_reports_count(self) -> None:
+        p1, p2 = self.folder / "a.jpg", self.folder / "b.jpg"
+        self._prime([p1, p2])
+        self.uploader._on_uploaded(
+            _FakeReply(body=b'{"ok": true, "photo": {"id": 11}}'), self._item(p1)
+        )
+        self.uploader._on_uploaded(_FakeReply(body=b'{"ok": false}'), self._item(p2))
+        self.assertEqual(self.partial, [(5, str(self.folder), 1)])
+        self.assertEqual(self.finished, [])
+        self.assertEqual(self.failed, [])
+
+    def test_all_success_emits_finished(self) -> None:
+        p1 = self.folder / "a.jpg"
+        self._prime([p1])
+        self.uploader._on_uploaded(
+            _FakeReply(body=b'{"ok": true, "photo": {"id": 7}}'), self._item(p1)
+        )
+        self.assertEqual(self.finished, [(5, str(self.folder))])
+        self.assertEqual(self.partial, [])
+
+    def test_transport_error_retries_without_aborting(self) -> None:
+        p1 = self.folder / "a.jpg"
+        self._prime([p1])
+        self.uploader._on_uploaded(
+            _FakeReply(error=QNetworkReply.NetworkError.TimeoutError, error_string="timeout"),
+            self._item(p1, attempt=0),
+        )
+        self.assertEqual(self.uploader._failed_names, [])
+        self.assertEqual(self.finished, [])
+        self.assertEqual(self.partial, [])
+        self.assertEqual(self.failed, [])
+
+    def test_transport_error_gives_up_after_max_attempts(self) -> None:
+        p1 = self.folder / "a.jpg"
+        self._prime([p1])
+        self.uploader._on_uploaded(
+            _FakeReply(error=QNetworkReply.NetworkError.TimeoutError, error_string="timeout"),
+            self._item(p1, attempt=MAX_UPLOAD_ATTEMPTS - 1),
+        )
+        self.assertEqual(self.partial, [(5, str(self.folder), 1)])
+
+    def test_zero_success_on_new_shooting_deletes_and_fails(self) -> None:
+        p1 = self.folder / "a.jpg"
+        self._prime([p1], resume=False)
+        deletes: list[int] = []
+        self.uploader._delete_shooting_quietly = deletes.append  # type: ignore[assignment]
+        self.uploader._on_uploaded(_FakeReply(body=b'{"ok": false}'), self._item(p1))
+        self.assertEqual(len(self.failed), 1)
+        self.assertEqual(deletes, [5])
+        self.assertEqual(self.partial, [])
+
+    def test_existing_session_reports_uploaded(self) -> None:
+        cache = FolderCache(self.folder, {"a.jpg", "b.jpg"}, load_from_disk=True)
+        cache.set_shotsync_session(9, "Trip")
+        cache.set_shotsync_photos([("a.jpg", 1, 9)])
+        cache.close(flush=True)
+        result = self.uploader._existing_session(self.folder, {"a.jpg", "b.jpg"})
+        self.assertEqual(result, (9, "Trip", {"a.jpg"}))
+
+    def test_verify_resume_skips_already_uploaded(self) -> None:
+        p1, p2 = self.folder / "a.jpg", self.folder / "b.jpg"
+        self._prime([p1, p2])
+        self.uploader._resume_uploaded = {"a.jpg"}
+        self.uploader._start_encoding = lambda: None  # type: ignore[assignment]
+        self.uploader._on_verify(_FakeReply(body=b'{"ok": true, "photos": []}'))
+        self.assertEqual(self.uploader._pending, [p2])
+        self.assertEqual(self.uploader._total, 2)
+        self.assertEqual(self.uploader._succeeded, 1)
+
+    def test_verify_stale_session_starts_new_shooting(self) -> None:
+        p1 = self.folder / "a.jpg"
+        self._prime([p1])
+        self.uploader._resume_uploaded = {"a.jpg"}
+        created: list[bool] = []
+        self.uploader._forget_stale_session = lambda: None  # type: ignore[assignment]
+        self.uploader._create_shooting = lambda: created.append(True)  # type: ignore[assignment]
+        self.uploader._on_verify(_FakeReply(body=b'{"ok": false}'))
+        self.assertTrue(created)
+        self.assertFalse(self.uploader._resume)
+        self.assertEqual(self.uploader._shooting_id, 0)
+        self.assertEqual(self.uploader._pending, [p1])
+        self.assertEqual(self.uploader._total, 1)
 
 
 if __name__ == "__main__":
