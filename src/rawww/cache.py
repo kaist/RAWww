@@ -10,10 +10,12 @@ SQLite хранит состояние каждой папки отдельно:
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from uuid import uuid4
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +64,18 @@ CREATE TABLE IF NOT EXISTS photo_selection (
     rating INTEGER,
     color_label TEXT NOT NULL DEFAULT '',
     comment TEXT NOT NULL DEFAULT '',
+    keywords_json TEXT NOT NULL DEFAULT '[]',
+    updated_ns INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS xmp_state (
+    sidecar_name TEXT PRIMARY KEY,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    mtime_ns INTEGER NOT NULL DEFAULT 0,
+    digest TEXT,
+    base_fields_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'synchronized',
+    conflicts_json TEXT NOT NULL DEFAULT '[]',
+    error TEXT NOT NULL DEFAULT '',
     updated_ns INTEGER NOT NULL
 );
 -- Lets background maintenance map a hashed cache filename back to its folder.
@@ -371,8 +385,6 @@ class FolderCache:
 
     def load_photo_details(self, *, include_metadata: bool = True) -> dict[str, dict]:
         """Возвращает кэшированные метаданные EXIF/AI и состояние локального выбора пользователя."""
-        import json
-
         details: dict[str, dict] = {}
         with self._lock:
             db = self._db_or_raise()
@@ -388,27 +400,135 @@ class FolderCache:
                 except (TypeError, ValueError):
                     faces = []
                 details.setdefault(name, {})["faces"] = faces if isinstance(faces, list) else []
-            for name, rating, color, comment in db.execute(
-                "SELECT name, rating, color_label, comment FROM photo_selection"
+            for name, rating, color, comment, keywords_json, updated_ns in db.execute(
+                "SELECT name, rating, color_label, comment, keywords_json, updated_ns FROM photo_selection"
             ):
+                try:
+                    keywords = json.loads(keywords_json)
+                except (TypeError, ValueError):
+                    keywords = []
                 details.setdefault(name, {}).update(
-                    rating=rating, color_label=color or "", comment=comment or ""
+                    rating=rating, color_label=color or "", comment=comment or "",
+                    keywords=keywords if isinstance(keywords, list) else [],
+                    _selection_updated_ns=int(updated_ns),
                 )
         for name, audio in self.load_audio_details().items():
             details.setdefault(name, {}).update(audio)
         return details
 
     def store_photo_selection(
-        self, name: str, *, rating: int | None, color_label: str, comment: str
+        self, name: str, *, rating: int | None, color_label: str, comment: str,
+        keywords: Iterable[str] | None = None,
     ) -> None:
         with self._lock:
             db = self._db_or_raise()
+            if keywords is None:
+                row = db.execute(
+                    "SELECT keywords_json FROM photo_selection WHERE name = ?", (name,)
+                ).fetchone()
+                keywords_json = str(row[0]) if row else "[]"
+            else:
+                keywords_json = json.dumps(
+                    list(dict.fromkeys(str(item).strip() for item in keywords if str(item).strip())),
+                    ensure_ascii=False, separators=(",", ":"),
+                )
             db.execute(
                 """INSERT OR REPLACE INTO photo_selection
-                   (name, rating, color_label, comment, updated_ns)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (name, rating, color_label, comment, time.time_ns()),
+                   (name, rating, color_label, comment, keywords_json, updated_ns)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (name, rating, color_label, comment, keywords_json, time.time_ns()),
             )
+            db.commit()
+
+    def load_xmp_states(self) -> dict[str, dict]:
+        """Возвращает последние синхронизированные снимки sidecar-файлов."""
+        with self._lock:
+            rows = self._db_or_raise().execute(
+                """SELECT sidecar_name, file_size, mtime_ns, digest, base_fields_json,
+                          status, conflicts_json, error
+                   FROM xmp_state"""
+            ).fetchall()
+        states = {}
+        for name, size, mtime_ns, digest, base_json, status, conflicts_json, error in rows:
+            try:
+                base_fields = json.loads(base_json)
+            except (TypeError, ValueError):
+                base_fields = {}
+            try:
+                conflicts = json.loads(conflicts_json)
+            except (TypeError, ValueError):
+                conflicts = []
+            states[str(name)] = {
+                "size": int(size), "mtime_ns": int(mtime_ns), "digest": digest,
+                "base_fields": base_fields if isinstance(base_fields, dict) else {},
+                "status": str(status),
+                "conflicts": conflicts if isinstance(conflicts, list) else [],
+                "error": str(error or ""),
+            }
+        return states
+
+    def store_xmp_state(
+        self, sidecar_name: str, *, size: int, mtime_ns: int, digest: str | None,
+        base_fields: dict, status: str = "synchronized",
+        conflicts: list[dict] | None = None, error: str = "",
+    ) -> None:
+        """Фиксирует базу трёхстороннего слияния и видимый статус XMP."""
+        with self._lock:
+            self._db_or_raise().execute(
+                """INSERT OR REPLACE INTO xmp_state
+                   (sidecar_name, file_size, mtime_ns, digest, base_fields_json,
+                    status, conflicts_json, error, updated_ns)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    sidecar_name, int(size), int(mtime_ns), digest,
+                    json.dumps(base_fields, ensure_ascii=False, separators=(",", ":")),
+                    status,
+                    json.dumps(conflicts or [], ensure_ascii=False, separators=(",", ":")),
+                    error, time.time_ns(),
+                ),
+            )
+            self._db_or_raise().commit()
+
+    def store_xmp_batch(self, selections: list[dict], states: list[dict]) -> None:
+        """Записывает импортированный XMP одним фоновым SQLite-пакетом."""
+        if not selections and not states:
+            return
+        with self._lock:
+            db = self._db_or_raise()
+            now = time.time_ns()
+            if selections:
+                db.executemany(
+                    """INSERT OR REPLACE INTO photo_selection
+                       (name, rating, color_label, comment, keywords_json, updated_ns)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        (
+                            str(item["name"]), item.get("rating"),
+                            str(item.get("color_label") or ""), str(item.get("comment") or ""),
+                            json.dumps(item.get("keywords") or [], ensure_ascii=False, separators=(",", ":")),
+                            now,
+                        )
+                        for item in selections
+                    ),
+                )
+            if states:
+                db.executemany(
+                    """INSERT OR REPLACE INTO xmp_state
+                       (sidecar_name, file_size, mtime_ns, digest, base_fields_json,
+                        status, conflicts_json, error, updated_ns)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        (
+                            str(item["sidecar_name"]), int(item.get("size") or 0),
+                            int(item.get("mtime_ns") or 0), item.get("digest"),
+                            json.dumps(item.get("base_fields") or {}, ensure_ascii=False, separators=(",", ":")),
+                            str(item.get("status") or "synchronized"),
+                            json.dumps(item.get("conflicts") or [], ensure_ascii=False, separators=(",", ":")),
+                            str(item.get("error") or ""), now,
+                        )
+                        for item in states
+                    ),
+                )
             db.commit()
 
     def rename_photo_names(self, names: dict[str, str]) -> None:
@@ -457,6 +577,46 @@ class FolderCache:
                     )
                 db.execute(f"DROP TABLE {map_table}")
                 self.live_names = {changes.get(name, name) for name in self.live_names}
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+
+    def relocate_xmp_states(self, plan: dict[str, tuple[str, ...]]) -> None:
+        """Повторяет перенос общих sidecar в производном состоянии синхронизации."""
+        if not plan:
+            return
+        with self._lock:
+            db = self._db_or_raise()
+            try:
+                db.execute("BEGIN")
+                rows = {
+                    source: db.execute(
+                        """SELECT file_size, mtime_ns, digest, base_fields_json,
+                                  status, conflicts_json, error, updated_ns
+                           FROM xmp_state WHERE sidecar_name = ?""",
+                        (source,),
+                    ).fetchone()
+                    for source in plan
+                }
+                all_targets = {target for targets in plan.values() for target in targets}
+                db.executemany(
+                    "DELETE FROM xmp_state WHERE sidecar_name = ?",
+                    ((name,) for name in set(plan) | all_targets),
+                )
+                inserts = []
+                for source, targets in plan.items():
+                    row = rows.get(source)
+                    if row is not None:
+                        inserts.extend((target, *row) for target in targets)
+                if inserts:
+                    db.executemany(
+                        """INSERT OR REPLACE INTO xmp_state
+                           (sidecar_name, file_size, mtime_ns, digest, base_fields_json,
+                            status, conflicts_json, error, updated_ns)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        inserts,
+                    )
                 db.commit()
             except Exception:
                 db.rollback()
@@ -619,6 +779,9 @@ class FolderCache:
         try:
             _configure_database(db)
             db.executescript(SCHEMA)
+            columns = {str(row[1]) for row in db.execute("PRAGMA table_info(photo_selection)")}
+            if "keywords_json" not in columns:
+                db.execute("ALTER TABLE photo_selection ADD COLUMN keywords_json TEXT NOT NULL DEFAULT '[]'")
             db.execute(
                 "INSERT OR REPLACE INTO cache_info (id, folder_path) VALUES (1, ?)",
                 (_folder_identity(self.folder),),
@@ -633,8 +796,13 @@ class FolderCache:
 
     def _remove_deleted_entries(self, db: sqlite3.Connection) -> None:
         db.execute("CREATE TEMP TABLE live_names (name TEXT PRIMARY KEY)")
+        db.execute("CREATE TEMP TABLE live_sidecars (name TEXT PRIMARY KEY)")
         try:
             db.executemany("INSERT INTO live_names VALUES (?)", ((name,) for name in self.live_names))
+            db.executemany(
+                "INSERT OR IGNORE INTO live_sidecars VALUES (?)",
+                ((Path(name).with_suffix(".xmp").name,) for name in self.live_names),
+            )
             db.execute("DELETE FROM previews WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = previews.name)")
             db.execute("DELETE FROM image_embeddings WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = image_embeddings.name)")
             db.execute("DELETE FROM face_analysis WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = face_analysis.name)")
@@ -642,8 +810,10 @@ class FolderCache:
             db.execute("DELETE FROM photo_selection WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_selection.name)")
             db.execute("DELETE FROM shotsync_photos WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = shotsync_photos.name)")
             db.execute("DELETE FROM shotsync_pending WHERE photo_id NOT IN (SELECT photo_id FROM shotsync_photos)")
+            db.execute("DELETE FROM xmp_state WHERE NOT EXISTS (SELECT 1 FROM live_sidecars WHERE live_sidecars.name = xmp_state.sidecar_name)")
         finally:
             db.execute("DROP TABLE live_names")
+            db.execute("DROP TABLE live_sidecars")
 
     def _db_or_raise(self) -> sqlite3.Connection:
         if self._db is None:

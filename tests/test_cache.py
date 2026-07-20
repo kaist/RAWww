@@ -138,6 +138,37 @@ class CacheTests(unittest.TestCase):
             self.assertTrue(all(max(item.width, item.height) <= 256 for item in loaded.values()))
             cache.close(flush=False)
 
+    def test_selection_keywords_and_xmp_sync_state_round_trip(self) -> None:
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            photo = folder / "photo.NEF"
+            photo.write_bytes(b"raw")
+            cache = FolderCache(folder, {photo.name}, cache_root=folder / "cache")
+
+            cache.store_xmp_batch(
+                [{
+                    "name": photo.name, "rating": 4, "color_label": "green",
+                    "comment": "Отбор", "keywords": ["портрет", "печать"],
+                }],
+                [{
+                    "sidecar_name": "photo.xmp", "size": 42, "mtime_ns": 10,
+                    "digest": "abc", "base_fields": {"rating": 4},
+                    "status": "conflict",
+                    "conflicts": [{"field": "rating", "local": 4, "external": 2}],
+                }],
+            )
+
+            self.assertEqual(cache.load_photo_details()[photo.name]["keywords"], ["портрет", "печать"])
+            state = cache.load_xmp_states()["photo.xmp"]
+            self.assertEqual(state["digest"], "abc")
+            self.assertEqual(state["status"], "conflict")
+            self.assertEqual(state["conflicts"][0]["external"], 2)
+            cache.relocate_xmp_states({"photo.xmp": ("renamed.xmp", "photo.xmp")})
+            relocated = cache.load_xmp_states()
+            self.assertEqual(relocated["renamed.xmp"]["digest"], "abc")
+            self.assertEqual(relocated["photo.xmp"]["digest"], "abc")
+            cache.close(flush=False)
+
     def test_process_worker_decodes_pixels(self) -> None:
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "sample.jpg"

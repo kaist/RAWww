@@ -19,7 +19,7 @@ from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMenu, QStackedWidget, QWidget
 
-from rawww.app import ChromeTabBar, FullView, MainWindow, Workspace, _application_settings, _format_remaining_time, _install_interrupt_shutdown, _scan_directory
+from rawww.app import ChromeTabBar, FullView, MainWindow, Workspace, _application_settings, _format_remaining_time, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_xmp_task
 from rawww.hotkeys import FIXED_HOTKEYS
 from rawww.theme import apply_theme
 
@@ -118,6 +118,56 @@ class AppStateTests(unittest.TestCase):
         workspace.close()
         workspace.deleteLater()
         parent.deleteLater()
+
+    def test_xmp_scan_skips_missing_sidecars_without_opening_each_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            paths = [folder / f"photo-{index}.xmp" for index in range(2_000)]
+            with patch("rawww.app.read_sidecar") as read:
+                result = _scan_xmp_task(paths, {}, set(), False)
+
+            self.assertEqual(result, [])
+            read.assert_not_called()
+
+    def test_full_xmp_scan_uses_directory_snapshot_for_missing_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            paths = [folder / f"photo-{index}.xmp" for index in range(2_000)]
+            known = {path.name: (0, 0, None) for path in paths}
+            with patch("rawww.app.read_sidecar") as read:
+                result = _scan_xmp_task(paths, known, set(), True)
+
+            self.assertEqual(len(result), len(paths))
+            self.assertTrue(all(not snapshot.exists for _path, snapshot in result))
+            read.assert_not_called()
+
+    def test_xmp_card_update_does_not_rebuild_unfiltered_view(self) -> None:
+        host = SimpleNamespace(
+            rating_filter=SimpleNamespace(currentData=lambda: None),
+            color_filter=SimpleNamespace(currentIndex=lambda: 0),
+            sort_combo=SimpleNamespace(currentData=lambda: "time"),
+            search_edit=SimpleNamespace(text=lambda: ""),
+        )
+
+        self.assertFalse(Workspace._xmp_change_requires_view_rebuild(host, {"rating", "comment"}))
+        host.rating_filter = SimpleNamespace(currentData=lambda: 5)
+        self.assertTrue(Workspace._xmp_change_requires_view_rebuild(host, {"rating"}))
+
+    def test_renaming_one_member_of_raw_jpeg_pair_keeps_and_copies_xmp(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "IMG_1.CR3").write_bytes(b"raw")
+            (folder / "IMG_1.JPG").write_bytes(b"jpeg")
+            source = folder / "IMG_1.xmp"
+            source.write_bytes(b"metadata")
+
+            plan = _plan_xmp_sidecar_relocation(
+                folder, {"IMG_1.CR3": "RENAMED.CR3", "IMG_1.JPG": "IMG_1.JPG"}
+            )
+            _relocate_xmp_sidecars(plan)
+
+            self.assertEqual(source.read_bytes(), b"metadata")
+            self.assertEqual((folder / "RENAMED.xmp").read_bytes(), b"metadata")
 
     def test_ctrl_c_schedules_normal_window_close(self) -> None:
         window = Mock()

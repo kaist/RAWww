@@ -29,7 +29,7 @@ from collections import deque
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Event
-from time import monotonic, sleep
+from time import monotonic, sleep, time_ns
 from typing import Callable
 
 from send2trash import send2trash
@@ -119,7 +119,16 @@ from .dialogs import (
     ShrinkJpegDialog,
 )
 from .workspace import WorkspaceRequest, WorkspaceState
-from .xmp import build_xmp, write_sidecar
+from .xmp import (
+    XmpChangedError,
+    XmpFields,
+    XmpParseError,
+    XmpReadResult,
+    named_face_regions,
+    read_sidecar,
+    sidecar_path,
+    update_sidecar,
+)
 from .updater import fetch_release_info, is_newer
 from .version import __version__
 
@@ -285,6 +294,8 @@ class DecodeBridge(QObject):
     renameFinished = Signal(object, object, object)
     metadataUpdated = Signal(object)
     xmpWritten = Signal(object)
+    xmpScanned = Signal(object)
+    folderChecked = Signal(object)
     schedulerFinished = Signal(object)
     faceSearchFinished = Signal(object)
 
@@ -327,14 +338,112 @@ class AiProgressBar(QProgressBar):
         super().mouseReleaseEvent(event)
 
 
-def _write_xmp_task(path: Path, detail: dict, face_sets: list[dict], replacements: dict[str, str]) -> None:
-    """Фоновая точка входа для записи XMP, чтобы дисковая операция не тормозила Qt."""
-    write_sidecar(path, build_xmp(detail, face_sets, replacements))
+def _write_xmp_task(
+    path: Path, fields: dict, regions: list[dict], expected_digest: str | None,
+):
+    """Атомарно обновляет один общий sidecar вне главного потока."""
+    return update_sidecar(
+        path, XmpFields.from_dict(fields), regions, expected_digest=expected_digest
+    )
+
+
+def _scan_xmp_task(
+    paths: list[Path], known: dict[str, tuple[int, int, str | None]],
+    needed_missing: set[str], full_hash: bool,
+) -> list[tuple[Path, object]]:
+    """По stat отбрасывает прежние sidecar и разбирает только изменившиеся."""
+    results = []
+    entries: dict[str, os.stat_result] = {}
+    if paths:
+        try:
+            with os.scandir(paths[0].parent) as iterator:
+                for entry in iterator:
+                    try:
+                        if entry.name.casefold().endswith(".xmp") and entry.is_file(follow_symlinks=False):
+                            entries[entry.name] = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+        except OSError:
+            entries = {}
+    for path in paths:
+        try:
+            previous = known.get(path.name)
+            stat = entries.get(path.name)
+            if stat is None and previous is None and path.name not in needed_missing:
+                continue
+            if stat is None:
+                # Один scandir уже доказал отсутствие файла. Не создаём тысячи
+                # заведомо неудачных open() при полном ручном перечитывании.
+                results.append((path, XmpReadResult(
+                    path, XmpFields(), None, 0, 0, False,
+                )))
+                continue
+            if not full_hash and previous is not None:
+                if stat is not None and (stat.st_size, stat.st_mtime_ns) == previous[:2]:
+                    continue
+            results.append((path, read_sidecar(path)))
+        except (OSError, XmpParseError) as exc:
+            results.append((path, exc))
+    return results
+
+
+def _plan_xmp_sidecar_relocation(directory: Path, names: dict[str, str]) -> dict[Path, tuple[Path, ...]]:
+    """Строит безопасное соответствие sidecar после переименования фото и пар."""
+    photos = []
+    try:
+        photos = [path for path in directory.iterdir() if path.is_file() and is_supported_image(path)]
+    except OSError:
+        return {}
+    targets: dict[Path, set[Path]] = {}
+    for photo in photos:
+        old_sidecar = sidecar_path(photo)
+        new_photo = photo.with_name(names.get(photo.name, photo.name))
+        targets.setdefault(old_sidecar, set()).add(sidecar_path(new_photo))
+    plan = {
+        source: tuple(sorted(destinations, key=lambda item: item.name.casefold()))
+        for source, destinations in targets.items()
+        if source.exists() and destinations != {source}
+    }
+    owners: dict[Path, Path] = {}
+    for source, destinations in plan.items():
+        for destination in destinations:
+            owner = owners.setdefault(destination, source)
+            if owner != source:
+                raise OSError(f"Несколько XMP должны получить имя «{destination.name}»")
+            if destination.exists() and destination != source and destination not in plan:
+                raise OSError(f"XMP «{destination.name}» уже существует")
+    return plan
+
+
+def _relocate_xmp_sidecars(plan: dict[Path, tuple[Path, ...]]) -> None:
+    """Публикует копии XMP атомарно и удаляет источник только после успеха всех целей."""
+    payloads = {source: source.read_bytes() for source in plan}
+    for source, destinations in plan.items():
+        payload = payloads[source]
+        for destination in destinations:
+            if destination == source:
+                continue
+            temporary = destination.with_name(f".{destination.name}.rawww-tmp")
+            try:
+                temporary.write_bytes(payload)
+                temporary.replace(destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+    for source, destinations in plan.items():
+        if source not in destinations and source not in {
+            destination for targets in plan.values() for destination in targets
+        }:
+            source.unlink()
 
 
 def _load_cache(cache: FolderCache) -> None:
     """Открывает SQLite-кэш в фоне, чтобы сразу начать чтение миниатюр."""
     cache.load_from_disk()
+
+
+def _store_xmp_cache_batch(cache: FolderCache, selections: list[dict], states: list[dict]) -> None:
+    """Фиксирует пакет XMP в SQLite вне Qt-потока."""
+    cache.store_xmp_batch(selections, states)
 
 
 def _check_cached_ai(cache: FolderCache, paths: list[Path]) -> set[Path]:
@@ -3386,6 +3495,16 @@ class Workspace(QMainWindow):
         self.preview_cache_write_timer = QTimer(self)
         self.preview_cache_write_timer.setSingleShot(True)
         self.preview_cache_write_timer.timeout.connect(self._drain_preview_cache_writes)
+        self.xmp_cache_write_timer = QTimer(self)
+        self.xmp_cache_write_timer.setSingleShot(True)
+        self.xmp_cache_write_timer.timeout.connect(self._drain_xmp_cache_writes)
+        self.xmp_bulk_timer = QTimer(self)
+        self.xmp_bulk_timer.setSingleShot(True)
+        self.xmp_bulk_timer.timeout.connect(self._drain_xmp_bulk_queue)
+        self._xmp_bulk_queue: deque[Path] = deque()
+        self._xmp_bulk_queued: set[Path] = set()
+        self._xmp_cache_selection_buffer: dict[tuple[int, str], tuple[FolderCache, dict]] = {}
+        self._xmp_cache_state_buffer: dict[tuple[int, str], tuple[FolderCache, dict]] = {}
         self.cache_maintenance_executor = ThreadPoolExecutor(max_workers=1)
         self.xmp_executor = ThreadPoolExecutor(max_workers=1)
         self.bridge = DecodeBridge()
@@ -3399,11 +3518,22 @@ class Workspace(QMainWindow):
         self.bridge.renameFinished.connect(self._on_rename_finished)
         self.bridge.metadataUpdated.connect(self._on_metadata_updated)
         self.bridge.xmpWritten.connect(self._on_xmp_written)
+        self.bridge.xmpScanned.connect(self._on_xmp_scanned)
+        self.bridge.folderChecked.connect(self._on_folder_checked)
         self.video_thumbnailer = VideoThumbnailer(self)
         self.video_thumbnailer.previewReady.connect(self._on_video_preview)
-        self._xmp_pending: dict[Path, tuple[dict, list[dict], dict[str, str]]] = {}
+        self._xmp_pending: dict[Path, tuple[dict, list[dict], str | None]] = {}
         self._xmp_running: set[Path] = set()
+        self._xmp_retry_after_change: set[Path] = set()
         self._xmp_futures: dict[Path, Future] = {}
+        self._xmp_states: dict[str, dict] = {}
+        self._xmp_pair_members: dict[Path, list[Path]] = {}
+        self._xmp_scan_future: Future | None = None
+        self._xmp_scan_generation = -1
+        self._xmp_rescan_requested = False
+        self._xmp_full_hash_requested = False
+        self._xmp_rescan_priority: str | None = None
+        self._xmp_queue_all_after_scan = False
         self._xmp_export_after_cache_load = False
         self._ignore_folder_changes_until = 0.0
         self.last_navigation_at = 0.0
@@ -3677,6 +3807,10 @@ class Workspace(QMainWindow):
         self.folder_change_timer.stop()
         self.volume_refresh_timer.stop()
         self.preview_cache_write_timer.stop()
+        self.xmp_cache_write_timer.stop()
+        self.xmp_bulk_timer.stop()
+        self._xmp_bulk_queue.clear()
+        self._xmp_bulk_queued.clear()
         self.video_thumbnailer.cancel()
         self.full_view.stop_video()
         self.full_view.stop_audio()
@@ -4277,8 +4411,8 @@ class Workspace(QMainWindow):
         self.xmp_button.setIcon(_fomantic_icon("file", 20, "#d6d6d6"))
         self.xmp_button.setIconSize(QSize(20, 20))
         self.xmp_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        self.xmp_button.setToolTip("Экспорт метаданных в XMP")
-        self.xmp_button.clicked.connect(self._show_xmp_menu)
+        self.xmp_button.setToolTip("Синхронизация метаданных XMP")
+        self.xmp_button.clicked.connect(self._handle_xmp_button)
         self.xmp_button.setFixedSize(52, 44)
 
         self.utilities_button = QToolButton()
@@ -5894,7 +6028,7 @@ class Workspace(QMainWindow):
     def _set_code_replacements(self, sets: list[dict]) -> None:
         self.code_replacement_sets = [entry for entry in sets if isinstance(entry, dict)]
         if self._xmp_auto_enabled():
-            self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+            self._queue_xmp_paths(path for path in self.all_paths if is_supported_image(path))
         active_id = self.settings.value("code_replacements/active_set_id", 0, int)
         if self.code_replacement_sets and not any(group.get("id") == active_id for group in self.code_replacement_sets):
             active_id = int(self.code_replacement_sets[0].get("id") or 0)
@@ -6777,6 +6911,18 @@ class Workspace(QMainWindow):
         self._pending_view_scroll = None
         self.photo_details = {}
         self.image_embeddings = {}
+        self._xmp_states = {}
+        self._xmp_pair_members = {}
+        self._xmp_retry_after_change.clear()
+        self._xmp_scan_future = None
+        self._xmp_scan_generation = -1
+        self._xmp_rescan_requested = False
+        self._xmp_full_hash_requested = False
+        self._xmp_rescan_priority = None
+        self._xmp_queue_all_after_scan = False
+        self.xmp_bulk_timer.stop()
+        self._xmp_bulk_queue.clear()
+        self._xmp_bulk_queued.clear()
         self._file_time_cache.clear()
         self.ai_progress_total = 0
         self.items_by_path.clear()
@@ -7345,7 +7491,7 @@ class Workspace(QMainWindow):
         return replacements
 
     def _show_xmp_menu(self) -> None:
-        """Строит меню записи XMP для текущего файла или выделения."""
+        """Показывает управление двусторонней синхронизацией XMP."""
         menu = QMenu(self.xmp_button)
         menu.setObjectName("toolbarPopup")
         content = QWidget(menu)
@@ -7356,47 +7502,97 @@ class Workspace(QMainWindow):
         title = QLabel("XMP")
         title.setObjectName("toolbarPopupTitle")
         layout.addWidget(title)
-        auto = SettingsCheckBox("Автоматически создавать XMP")
+        auto = SettingsCheckBox("Автоматически синхронизировать XMP")
         auto.setChecked(self._xmp_auto_enabled())
         layout.addWidget(auto)
-        create = QPushButton("Создать XMP файлы")
-        create.setObjectName("toolbarPopupPrimaryButton")
-        create.setIcon(_fomantic_icon("file", 16, "#ffffff"))
-        create.setIconSize(QSize(16, 16))
-        create.setEnabled(not auto.isChecked() and self.cache_ready)
-        layout.addWidget(create)
+        write_xmp = QPushButton("Записать XMP")
+        read_xmp = QPushButton("Прочитать XMP")
+        write_xmp.setIcon(_fomantic_icon("upload", 15, "#d6d6d6"))
+        read_xmp.setIcon(_fomantic_icon("download", 15, "#d6d6d6"))
+        write_xmp.setIconSize(QSize(15, 15))
+        read_xmp.setIconSize(QSize(15, 15))
+        for button in (write_xmp, read_xmp):
+            button.setObjectName("toolbarPopupUtilityButton")
+            layout.addWidget(button)
+        manual_enabled = not auto.isChecked() and self.cache_ready
+        write_xmp.setEnabled(manual_enabled)
+        read_xmp.setEnabled(manual_enabled)
 
         def set_auto(enabled: bool) -> None:
             self.settings.setValue("xmp/auto_export", enabled)
-            create.setEnabled(not enabled and self.cache_ready)
+            write_xmp.setEnabled(not enabled and self.cache_ready)
+            read_xmp.setEnabled(not enabled and self.cache_ready)
             if enabled:
-                self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+                self._xmp_queue_all_after_scan = True
+                self._scan_xmp_changes(force=True, priority="local")
 
         auto.toggled.connect(set_auto)
-        create.clicked.connect(lambda: (menu.close(), self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))))
+        read_xmp.clicked.connect(lambda: (
+            menu.close(), self._read_xmp_manually()
+        ))
+        write_xmp.clicked.connect(lambda: (
+            menu.close(), self._queue_all_xmp_after_refresh()
+        ))
         action = QWidgetAction(menu)
         action.setDefaultWidget(content)
         menu.addAction(action)
         menu.exec(self.xmp_button.mapToGlobal(QPoint(0, self.xmp_button.height())))
 
+    def _handle_xmp_button(self) -> None:
+        """Открывает две явные ручные операции и настройку автоматики."""
+        self._show_xmp_menu()
+
+    def _read_xmp_manually(self) -> None:
+        """Перечитывает sidecar: для управляемых полей приоритет имеет XMP."""
+        self._scan_xmp_changes(force=True, full_hash=True, priority="external")
+
+    def _queue_all_xmp_after_refresh(self) -> None:
+        """Сначала фиксирует внешнюю версию, затем ставит всю папку на запись."""
+        self._xmp_queue_all_after_scan = True
+        self._scan_xmp_changes(force=True, priority="local")
+
     def _queue_xmp_paths(self, paths) -> None:
+        self._rebuild_xmp_pairs()
         for path in paths:
+            target = sidecar_path(path)
+            if target in self._xmp_bulk_queued:
+                continue
+            members = self._xmp_pair_members.get(target, [path])
+            self._xmp_bulk_queue.append(members[0])
+            self._xmp_bulk_queued.add(target)
+        if self._xmp_bulk_queue and not self.xmp_bulk_timer.isActive():
+            self.xmp_bulk_timer.start(0)
+
+    def _drain_xmp_bulk_queue(self) -> None:
+        """Готовит большую XMP-очередь порциями, оставляя время просмотру и вводу."""
+        for _index in range(min(8, len(self._xmp_bulk_queue))):
+            path = self._xmp_bulk_queue.popleft()
+            self._xmp_bulk_queued.discard(sidecar_path(path))
             self._queue_xmp(path)
+        if self._xmp_bulk_queue and not self.closing:
+            self.xmp_bulk_timer.start(0)
 
     def _queue_xmp(self, path: Path) -> None:
-        if self.closing or not path.is_file() or not is_supported_image(path):
+        if self.closing or not is_supported_image(path):
             return
-        detail = dict(self.photo_details.get(path.name, {}))
-        self._xmp_pending[path] = (detail, list(self.face_sets), self._xmp_replacements(detail))
-        if path not in self._xmp_running:
-            self._start_xmp_write(path)
+        target = sidecar_path(path)
+        members = self._xmp_pair_members.get(target, [path])
+        fields = self._xmp_local_fields(target)
+        regions = []
+        for member in members:
+            detail = self.photo_details.get(member.name, {})
+            found = named_face_regions(detail, self.face_sets)
+            regions.extend(found)
+        state = self._xmp_states.get(target.name, {})
+        self._xmp_pending[target] = (fields.to_dict(), regions, state.get("digest"))
+        if target not in self._xmp_running:
+            self._start_xmp_write(target)
 
     def _start_xmp_write(self, path: Path) -> None:
         payload = self._xmp_pending.pop(path, None)
         if payload is None or self.closing:
             return
         self._xmp_running.add(path)
-        self._ignore_folder_changes_until = max(self._ignore_folder_changes_until, monotonic() + 2.0)
         future = self.xmp_executor.submit(_write_xmp_task, path, *payload)
         self._xmp_futures[path] = future
         future.add_done_callback(lambda done, target=path: self.bridge.xmpWritten.emit((target, done)))
@@ -7411,11 +7607,277 @@ class Workspace(QMainWindow):
         if future.cancelled():
             return
         try:
-            future.result()
+            written = future.result()
+        except XmpChangedError:
+            # Для начатой записи приоритет остаётся локальным. Перечитываем
+            # отпечаток и повторяем только этот sidecar, а не всю папку.
+            self._xmp_retry_after_change.add(path)
+            self._scan_xmp_changes(force=True, full_hash=True, priority="local")
         except Exception as exc:
             self.bridge.failed.emit(str(path), f"XMP: {exc}")
+            if path.parent == self.current_dir:
+                self._store_xmp_status(path, status="error", error=str(exc))
+        else:
+            if path.parent != self.current_dir or not self.cache_ready:
+                if path in self._xmp_pending:
+                    self._start_xmp_write(path)
+                return
+            state = self._xmp_states.get(path.name, {})
+            fields = written.fields.to_dict()
+            state.update(
+                size=written.size, mtime_ns=written.mtime_ns, digest=written.digest,
+                base_fields=fields, status="synchronized", conflicts=[], error="",
+            )
+            self._xmp_states[path.name] = state
+            self._persist_xmp_state(path, state)
+            self._update_xmp_button()
         if path in self._xmp_pending:
             self._start_xmp_write(path)
+
+    def _rebuild_xmp_pairs(self) -> None:
+        groups: dict[Path, list[Path]] = {}
+        for path in self.all_paths:
+            if is_supported_image(path):
+                groups.setdefault(sidecar_path(path), []).append(path)
+        self._xmp_pair_members = groups
+
+    def _xmp_local_fields(self, target: Path) -> XmpFields:
+        members = self._xmp_pair_members.get(target, [])
+        explicit = [
+            member for member in members
+            if self.photo_details.get(member.name, {}).get("_selection_updated_ns")
+        ]
+        candidates = explicit or members
+        if not candidates:
+            return XmpFields()
+        selected = max(
+            candidates,
+            key=lambda member: int(self.photo_details.get(member.name, {}).get("_selection_updated_ns") or 0),
+        )
+        if not explicit:
+            return XmpFields()
+        detail = self.photo_details.get(selected.name, {})
+        return XmpFields.from_detail(detail, self._xmp_replacements(detail))
+
+    def _apply_xmp_fields_to_pair(self, target: Path, fields: XmpFields) -> set[str]:
+        """Применяет общие XMP-поля ко всем участникам RAW+JPEG-пары."""
+        changed_fields: set[str] = set()
+        for path in self._xmp_pair_members.get(target, []):
+            detail = self.photo_details.setdefault(path.name, {})
+            values = fields.to_dict()
+            member_changed = {
+                name for name, value in values.items() if detail.get(name) != value
+            }
+            changed_fields.update(member_changed)
+            if not member_changed and detail.get("_selection_updated_ns"):
+                continue
+            detail.update(values)
+            detail["_selection_updated_ns"] = max(
+                int(detail.get("_selection_updated_ns") or 0), 1
+            )
+            item = self.items_by_path.get(path)
+            if item is not None:
+                item.setData(DETAIL_ROLE, dict(detail))
+                rect = self.grid.visualItemRect(item)
+                if rect.isValid():
+                    self.grid.viewport().update(rect)
+            if self.folder_cache is not None and self.cache_ready:
+                self._queue_xmp_cache_selection(path.name, fields)
+        if self.current_path is not None and sidecar_path(self.current_path) == target:
+            self.full_view.set_metadata(self.photo_details.get(self.current_path.name, {}))
+        selected = self._selected_paths()
+        if len(selected) == 1 and sidecar_path(selected[0]) == target:
+            self.meta_bar.set_metadata(self.photo_details.get(selected[0].name, {}))
+        return changed_fields
+
+    def _scan_xmp_changes(
+        self, *, force: bool = False, full_hash: bool = False,
+        priority: str | None = None,
+    ) -> None:
+        """Читает XMP в фоне; priority задаёт победителя явной ручной операции."""
+        if self.closing or not self.cache_ready:
+            return
+        if self._xmp_scan_future is not None:
+            self._xmp_rescan_requested = True
+            self._xmp_full_hash_requested |= full_hash
+            if priority is not None:
+                self._xmp_rescan_priority = priority
+            return
+        self._rebuild_xmp_pairs()
+        paths = list(self._xmp_pair_members)
+        if not paths:
+            return
+        generation = self.cache_load_generation
+        self._xmp_scan_generation = generation
+        known = {
+            name: (
+                int(state.get("size") or 0), int(state.get("mtime_ns") or 0), state.get("digest")
+            )
+            for name, state in self._xmp_states.items()
+        }
+        needed_missing = {
+            target.name
+            for target, members in self._xmp_pair_members.items()
+            if any(
+                self.photo_details.get(member.name, {}).get("_selection_updated_ns")
+                for member in members
+            )
+        }
+        future = self.xmp_executor.submit(
+            _scan_xmp_task, paths, known, needed_missing, full_hash
+        )
+        self._xmp_scan_future = future
+        future.add_done_callback(
+            lambda done, g=generation, requested=force, winner=priority: (
+                self.bridge.xmpScanned.emit((g, requested, winner, done))
+            )
+        )
+
+    def _on_xmp_scanned(self, payload: object) -> None:
+        generation, force, priority, future = payload
+        if self._xmp_scan_future is future:
+            self._xmp_scan_future = None
+        if self.closing or generation != self.cache_load_generation:
+            return
+        try:
+            results = future.result()
+        except Exception as exc:
+            self.bridge.failed.emit(str(self.current_dir), f"XMP: {exc}")
+            results = []
+        changed_fields: set[str] = set()
+        # Если во время обычного обхода нажали «Записать», его локальный снимок
+        # не должен быть предварительно заменён результатом уже летящего чтения.
+        superseded = self._xmp_rescan_requested and self._xmp_rescan_priority == "local"
+        if not superseded:
+            for target, result in results:
+                if isinstance(result, Exception):
+                    self._store_xmp_status(target, status="error", error=str(result))
+                    continue
+                changed_fields.update(
+                    self._merge_xmp_snapshot(target, result, priority=priority)
+                )
+        self._update_xmp_button()
+        if self._xmp_change_requires_view_rebuild(changed_fields):
+            self._apply_view()
+        elif changed_fields and self.stack.currentWidget() is self.full_view and self.current_path is not None:
+            self._refresh_full_view_navigation(self.current_path)
+        if self._xmp_rescan_requested:
+            full_hash = self._xmp_full_hash_requested
+            priority = self._xmp_rescan_priority
+            self._xmp_rescan_requested = False
+            self._xmp_full_hash_requested = False
+            self._xmp_rescan_priority = None
+            self._scan_xmp_changes(force=True, full_hash=full_hash, priority=priority)
+            return
+        if self._xmp_queue_all_after_scan:
+            self._xmp_queue_all_after_scan = False
+            self._queue_xmp_paths(
+                path for path in self.all_paths if is_supported_image(path)
+            )
+        if self._xmp_retry_after_change:
+            retry_targets = set(self._xmp_retry_after_change)
+            self._xmp_retry_after_change.clear()
+            self._queue_xmp_paths(
+                members[0]
+                for target, members in self._xmp_pair_members.items()
+                if target in retry_targets and members
+            )
+
+    def _merge_xmp_snapshot(
+        self, target: Path, snapshot, *, priority: str | None,
+    ) -> set[str]:
+        """Применяет снимок с однозначным приоритетом файла либо программы."""
+        changed_fields: set[str] = set()
+        state = dict(self._xmp_states.get(target.name, {}))
+        if state and state.get("digest") == snapshot.digest and priority is None:
+            return changed_fields
+        external = snapshot.fields
+        explicit = any(
+            self.photo_details.get(path.name, {}).get("_selection_updated_ns")
+            for path in self._xmp_pair_members.get(target, [])
+        )
+        if priority == "local":
+            # Sidecar уже прочитан для сохранения его неизвестных XML-полей, но
+            # рейтинг, метки и текст берём из текущего состояния Контрольки.
+            state.update(base_fields=external.to_dict(), status="local_changes")
+        elif snapshot.exists:
+            # Ручное чтение и внешнее файловое событие означают одно и то же:
+            # управляемые поля sidecar становятся актуальной версией.
+            changed_fields.update(self._apply_xmp_fields_to_pair(target, external))
+            state.update(base_fields=external.to_dict(), status="synchronized")
+        elif explicit:
+            # Отсутствующий sidecar — не команда стереть локальный отбор.
+            state.update(base_fields=XmpFields().to_dict(), status="local_changes")
+        else:
+            state.update(base_fields=XmpFields().to_dict(), status="synchronized")
+        state.update(conflicts=[])
+        state.update(
+            size=snapshot.size, mtime_ns=snapshot.mtime_ns, digest=snapshot.digest,
+            error="",
+        )
+        self._xmp_states[target.name] = state
+        self._persist_xmp_state(target, state)
+        if state.get("status") == "local_changes" and self._xmp_auto_enabled():
+            member = next(iter(self._xmp_pair_members.get(target, [])), None)
+            if member is not None:
+                self._queue_xmp(member)
+        return changed_fields
+
+    def _xmp_change_requires_view_rebuild(self, changed_fields: set[str]) -> bool:
+        """Перестраивает список только если XMP влияет на текущую выборку или порядок."""
+        if not changed_fields:
+            return False
+        if "rating" in changed_fields and (
+            self.rating_filter.currentData() is not None or self.sort_combo.currentData() == "rating"
+        ):
+            return True
+        if "color_label" in changed_fields and self.color_filter.currentIndex() > 0:
+            return True
+        return "comment" in changed_fields and bool(self.search_edit.text().strip())
+
+    def _persist_xmp_state(self, target: Path, state: dict) -> None:
+        if self.folder_cache is None or not self.cache_ready:
+            return
+        cache = self.folder_cache
+        payload = {
+            "sidecar_name": target.name, "size": int(state.get("size") or 0),
+            "mtime_ns": int(state.get("mtime_ns") or 0), "digest": state.get("digest"),
+            "base_fields": dict(state.get("base_fields") or {}),
+            "status": str(state.get("status") or "synchronized"),
+            "conflicts": list(state.get("conflicts") or []), "error": str(state.get("error") or ""),
+        }
+        self._xmp_cache_state_buffer[(id(cache), target.name)] = (cache, payload)
+        if not self.xmp_cache_write_timer.isActive():
+            self.xmp_cache_write_timer.start(120)
+
+    def _queue_xmp_cache_selection(self, name: str, fields: XmpFields) -> None:
+        cache = self.folder_cache
+        if cache is None:
+            return
+        payload = {"name": name, **fields.to_dict()}
+        self._xmp_cache_selection_buffer[(id(cache), name)] = (cache, payload)
+        if not self.xmp_cache_write_timer.isActive():
+            self.xmp_cache_write_timer.start(120)
+
+    def _store_xmp_status(self, target: Path, *, status: str, error: str = "") -> None:
+        state = dict(self._xmp_states.get(target.name, {}))
+        state.update(status=status, error=error)
+        self._xmp_states[target.name] = state
+        self._persist_xmp_state(target, state)
+        self._update_xmp_button()
+
+    def _update_xmp_button(self) -> None:
+        if not hasattr(self, "xmp_button"):
+            return
+        errors = sum(state.get("status") == "error" for state in self._xmp_states.values())
+        pending = sum(state.get("status") == "local_changes" for state in self._xmp_states.values())
+        self.xmp_button.setText(f"XMP · {errors}" if errors else "XMP")
+        if errors:
+            self.xmp_button.setToolTip(f"XMP: ошибок {errors}")
+        elif pending:
+            self.xmp_button.setToolTip(f"XMP: локальных изменений {pending}")
+        else:
+            self.xmp_button.setToolTip("XMP синхронизирован")
 
     def _show_utilities_menu(self) -> None:
         """Показывает место будущих пакетных инструментов без неработающих команд."""
@@ -7505,6 +7967,7 @@ class Workspace(QMainWindow):
     ) -> str | None:
         """Переименовывает файлы и кэш вне Qt-потока, сохраняя отзывчивость диалога."""
         changes = sum(old != new for old, new in names.items())
+        xmp_plan = _plan_xmp_sidecar_relocation(self.current_dir, names)
         self._rename_files_safely(
             names,
             lambda completed, total: (
@@ -7517,11 +7980,16 @@ class Workspace(QMainWindow):
                 else None
             ),
         )
+        _relocate_xmp_sidecars(xmp_plan)
         if cache is None:
             return None
         self.bridge.renameCacheUpdating.emit(dialog)
         try:
             cache.rename_photo_names(names)
+            cache.relocate_xmp_states({
+                source.name: tuple(target.name for target in targets)
+                for source, targets in xmp_plan.items()
+            })
         except Exception as exc:
             return str(exc)
         return None
@@ -7804,8 +8272,6 @@ class Workspace(QMainWindow):
     def _folder_changed(self, path: str) -> None:
         if self._selection_progress is not None or self._upload_progress is not None:
             return
-        if monotonic() < self._ignore_folder_changes_until:
-            return
         if not self.closing and Path(path) == self.current_dir:
             self.folder_change_timer.start(FOLDER_CHANGE_DEBOUNCE_MS)
 
@@ -7813,6 +8279,25 @@ class Workspace(QMainWindow):
         if self._selection_progress is not None or self._upload_progress is not None:
             return
         if not self.closing and self.current_dir.is_dir():
+            self._scan_xmp_changes(force=True)
+            generation = self.cache_load_generation
+            directory = self.current_dir
+            future = self.directory_scan_executor.submit(_scan_directory, directory)
+            future.add_done_callback(
+                lambda done, g=generation, d=directory: self.bridge.folderChecked.emit((g, d, done))
+            )
+
+    def _on_folder_checked(self, payload: object) -> None:
+        """Перезагружает папку лишь при изменении фото, а не после записи XMP."""
+        generation, directory, future = payload
+        if self.closing or generation != self.cache_load_generation or directory != self.current_dir:
+            return
+        try:
+            paths = future.result()
+        except Exception:
+            self.load_directory(self.current_dir)
+            return
+        if set(paths) != set(self.all_paths):
             self.load_directory(self.current_dir)
 
     def _refresh_ai_status(self) -> None:
@@ -8028,7 +8513,13 @@ class Workspace(QMainWindow):
                 continue
             path = Path(name)
             detail = self.photo_details.setdefault(path.name, {})
+            selection = {
+                key: detail.get(key)
+                for key in ("rating", "color_label", "comment", "keywords")
+                if detail.get("_selection_updated_ns")
+            }
             detail.update(metadata)
+            detail.update(selection)
             camera_key = self._camera_filter_key(detail)
             if camera_key is not None:
                 changed_camera_keys.add(camera_key)
@@ -8256,16 +8747,25 @@ class Workspace(QMainWindow):
             self.photo_details = self.folder_cache.load_photo_details(
                 include_metadata=ENABLE_EXIF_METADATA
             )
+            self._xmp_states = self.folder_cache.load_xmp_states()
+            for state in self._xmp_states.values():
+                if state.get("status") == "conflict":
+                    # Старое состояние мигрирует в новую модель приоритетов при
+                    # ближайшем чтении, без отдельного окна разрешения.
+                    state.update(size=0, mtime_ns=0, status="synchronized", conflicts=[])
+            self._rebuild_xmp_pairs()
             self.image_embeddings = self.folder_cache.load_image_embeddings()
             # Данные лиц заменены целиком, поэтому прежний RAM-индекс им больше
             # не соответствует (при старте он также мог быть ещё пустым).
             self._face_search_index = None
             for path, item in self.items_by_path.items():
                 item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
-        if self._xmp_export_after_cache_load:
-            self._xmp_export_after_cache_load = False
-            if self._xmp_auto_enabled():
-                self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+        export_xmp_after_load = self._xmp_export_after_cache_load
+        self._xmp_export_after_cache_load = False
+        if export_xmp_after_load and self._xmp_auto_enabled():
+            self._xmp_queue_all_after_scan = True
+        self._scan_xmp_changes()
+        self._update_xmp_button()
         self._refresh_camera_filter()
         self._apply_view()
         if self.face_reference is not None:
@@ -8514,9 +9014,18 @@ class Workspace(QMainWindow):
                 else:
                     targets.append(path)
             paths = list(dict.fromkeys(targets))
+        if {"rating", "color_label", "comment", "keywords"}.intersection(changes):
+            self._rebuild_xmp_pairs()
+            paths = list(dict.fromkeys(
+                member
+                for path in paths
+                for member in self._xmp_pair_members.get(sidecar_path(path), [path])
+            ))
+        auto_xmp_targets: dict[Path, Path] = {}
         for path in paths:
             detail = self.photo_details.setdefault(path.name, {})
             detail.update(changes)
+            detail["_selection_updated_ns"] = time_ns()
             item = self.items_by_path.get(path)
             if item is not None:
                 item.setData(DETAIL_ROLE, dict(detail))
@@ -8526,11 +9035,14 @@ class Workspace(QMainWindow):
                     rating=detail.get("rating"),
                     color_label=detail.get("color_label", ""),
                     comment=detail.get("comment", ""),
+                    keywords=detail.get("keywords") or [],
                 )
             if self._shotsync_syncer is not None:
                 self._shotsync_syncer.queue_mark(path.name, detail=dict(detail), changes=changes)
             if self._xmp_auto_enabled():
-                self._queue_xmp(path)
+                auto_xmp_targets.setdefault(sidecar_path(path), path)
+        for path in auto_xmp_targets.values():
+            self._queue_xmp(path)
         self.grid.viewport().update()
         if self.stack.currentWidget() is self.grid_page:
             self.meta_bar.set_metadata(
@@ -8713,7 +9225,7 @@ class Workspace(QMainWindow):
             self._save_face_sets()
             self._update_analysis_controls()
             if self._xmp_auto_enabled():
-                self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+                self._queue_xmp_paths(path for path in self.all_paths if is_supported_image(path))
             self._push_face_set(entry)
             toast_message = "Лицо добавлено в набор."
         self._show_face_sets(toast_message)
@@ -8821,7 +9333,7 @@ class Workspace(QMainWindow):
             entry["name"] = name.strip() or "Без имени"
             self._save_face_sets()
             if self._xmp_auto_enabled():
-                self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+                self._queue_xmp_paths(path for path in self.all_paths if is_supported_image(path))
             server_id = entry.get("server_id")
             if server_id and self.shotsync_client.has_key():
                 self.shotsync_client.request_json(
@@ -8836,7 +9348,7 @@ class Workspace(QMainWindow):
         self.face_sets = [entry for entry in self.face_sets if entry.get("id") != face_id]
         self._save_face_sets()
         if self._xmp_auto_enabled():
-            self._queue_xmp_paths(path for path in self.all_paths if path.is_file() and is_supported_image(path))
+            self._queue_xmp_paths(path for path in self.all_paths if is_supported_image(path))
         server_id = (removed or {}).get("server_id")
         if server_id and self.shotsync_client.has_key():
             self.shotsync_client.request_json(
@@ -9729,6 +10241,7 @@ class Workspace(QMainWindow):
         if cache is None:
             return
         self._drain_preview_cache_writes(cache)
+        self._drain_xmp_cache_writes(cache)
         future = self.cache_flush_executor.submit(_flush_and_close, cache, close)
         if wait:
             future.result()
@@ -9757,6 +10270,30 @@ class Workspace(QMainWindow):
         for cache, previews in grouped.items():
             try:
                 self.cache_flush_executor.submit(_store_cache_pixels, cache, previews)
+            except RuntimeError:
+                if not self.closing:
+                    raise
+
+    def _drain_xmp_cache_writes(self, only_cache: FolderCache | None = None) -> None:
+        """Объединяет импорт XMP в одну транзакцию на папку вне UI-потока."""
+        grouped: dict[FolderCache, tuple[list[dict], list[dict]]] = {}
+        for key, (cache, payload) in list(self._xmp_cache_selection_buffer.items()):
+            if only_cache is not None and cache is not only_cache:
+                continue
+            self._xmp_cache_selection_buffer.pop(key, None)
+            grouped.setdefault(cache, ([], []))[0].append(payload)
+        for key, (cache, payload) in list(self._xmp_cache_state_buffer.items()):
+            if only_cache is not None and cache is not only_cache:
+                continue
+            self._xmp_cache_state_buffer.pop(key, None)
+            grouped.setdefault(cache, ([], []))[1].append(payload)
+        if not self._xmp_cache_selection_buffer and not self._xmp_cache_state_buffer:
+            self.xmp_cache_write_timer.stop()
+        for cache, (selections, states) in grouped.items():
+            try:
+                self.cache_flush_executor.submit(
+                    _store_xmp_cache_batch, cache, selections, states
+                )
             except RuntimeError:
                 if not self.closing:
                     raise
