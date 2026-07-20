@@ -17,9 +17,16 @@ from .runtime_paths import data_path
 MODEL_DIR = data_path("models") / "insightface" / "models" / "buffalo_s_shotsync"
 DETECTOR_MODEL = MODEL_DIR / "det_500m.onnx"
 RECOGNITION_MODEL = MODEL_DIR / "w600k_mbf.onnx"
-EYE_STATE_MODEL = data_path("models") / "eye_state" / "mobilenetv2_eyes.onnx"
+LANDMARK_MODEL = MODEL_DIR / "2d106det.onnx"
 DETECTOR_SIZE = (640, 640)
-EYE_STATE_SIZE = 224
+LANDMARK_SIZE = 192
+# Сторона квадратного кропа лица как доля большей стороны рамки: так
+# insightface выравнивает лицо под модель 106 точек (без поворота).
+LANDMARK_SCALE = 1.5
+# Индексы контура глаз в разметке 106 точек: углы (out/inn) и веки
+# (top/bot) для eye aspect ratio. Левый и правый глаз на кадре.
+LEFT_EYE = {"out": 35, "inn": 42, "top": (40, 41), "bot": (33, 36, 37, 39)}
+RIGHT_EYE = {"out": 93, "inn": 89, "top": (94, 95, 96), "bot": (87, 90, 91)}
 FACE_TEMPLATE = np.array(
     [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
      [41.5493, 92.3655], [70.7299, 92.3655]],
@@ -31,9 +38,11 @@ FACE_TEMPLATE = np.array(
 class Face:
     """Найденное лицо: рамка, ориентиры и вектор для сравнения с наборами.
 
-    ``eyes_open`` — вероятность, что глаза открыты, по классификатору целого лица
-    (модель обучена на кадрах лиц, поэтому надёжнее на лице, чем на кропах
-    отдельных глаз). ``None`` — если модель состояния глаз недоступна.
+    ``eyes_open`` — раскрытость более открытого глаза (eye aspect ratio) по
+    разметке 106 точек: ``max`` по двум глазам, так «закрыто» означает
+    закрытые оба глаза, а подмигивание кадр не бракует. Значение —
+    геометрическое отношение, а не вероятность. ``None`` — если модель
+    разметки недоступна.
     """
 
     bbox: np.ndarray
@@ -45,7 +54,7 @@ class Face:
 
 _detector_session = None
 _recognition_session = None
-_eye_state_session = None
+_landmark_session = None
 
 
 def _session(model: Path):
@@ -75,46 +84,71 @@ def _recognition():
     return _recognition_session
 
 
-def _eye_state():
-    global _eye_state_session
-    if _eye_state_session is None:
-        _eye_state_session = _session(EYE_STATE_MODEL)
-    return _eye_state_session
+def _landmark():
+    global _landmark_session
+    if _landmark_session is None:
+        _landmark_session = _session(LANDMARK_MODEL)
+    return _landmark_session
 
 
-def _face_patch(image: Image.Image, box: np.ndarray) -> np.ndarray:
-    """Вырезает лицо по рамке и готовит вход классификатора (mean=std=0.5)."""
+def _landmark_input(image: Image.Image, box: np.ndarray) -> np.ndarray:
+    """Готовит квадратный кроп лица под модель 106 точек (сырые RGB 0..255)."""
     left, top, right, bottom = (float(value) for value in box[:4])
-    patch = image.crop((left, top, right, bottom)).resize(
-        (EYE_STATE_SIZE, EYE_STATE_SIZE), Image.Resampling.BILINEAR
-    )
-    values = (np.asarray(patch.convert("RGB"), dtype=np.float32) / 255.0 - 0.5) / 0.5
-    return values.transpose(2, 0, 1)
+    center_x, center_y = (left + right) / 2.0, (top + bottom) / 2.0
+    side = max(right - left, bottom - top) * LANDMARK_SCALE
+    crop = image.crop((
+        center_x - side / 2.0, center_y - side / 2.0,
+        center_x + side / 2.0, center_y + side / 2.0,
+    )).resize((LANDMARK_SIZE, LANDMARK_SIZE), Image.Resampling.BILINEAR)
+    return np.asarray(crop.convert("RGB"), dtype=np.float32).transpose(2, 0, 1)
+
+
+def _eye_aspect_ratio(points: np.ndarray, eye: dict) -> float:
+    """Считает eye aspect ratio: раскрытие век к ширине глаза.
+
+    Раскрытие берётся как расстояние между средними точками век вдоль
+    нормали к оси глаза (угол–угол), поэтому наклон головы не мешает.
+    """
+    outer, inner = points[eye["out"]], points[eye["inn"]]
+    axis = inner - outer
+    width = float(np.hypot(axis[0], axis[1]))
+    if width < 1e-3:
+        return 0.0
+    normal = np.array([-axis[1], axis[0]], dtype=np.float32) / width
+    top = float(np.mean([np.dot(points[i] - outer, normal) for i in eye["top"]]))
+    bottom = float(np.mean([np.dot(points[i] - outer, normal) for i in eye["bot"]]))
+    return abs(bottom - top) / width
 
 
 def _classify_eyes(image: Image.Image, boxes: np.ndarray) -> list[float | None]:
-    """Возвращает вероятность открытых глаз для каждого лица одним прогоном модели.
+    """Возвращает раскрытость глаз (EAR) для каждого лица одним прогоном модели.
 
-    Классификатор обучен на кадрах лица целиком, поэтому на вход идёт кроп
-    лица по рамке детектора, а не кропы отдельных глаз: на мелких и повёрнутых
-    лицах он так заметно точнее. При отсутствии модели глаз возвращаются
-    ``None``, чтобы конвейер лиц продолжал работать без состояния глаз.
+    Для каждого лица модель 106 точек даёт контур век, по которому геометрически
+    считается eye aspect ratio каждого глаза; итог — ``max`` двух, так что лицо
+    считается закрытым лишь когда закрыты оба глаза. Геометрия устойчивее
+    к контровому свету, чем вероятность сети. Прогон идёт по одному лицу, как и
+    распознавание: у модели фиксирован размер пакета 1. При отсутствии модели
+    разметки возвращаются ``None``, чтобы конвейер лиц продолжал работать.
     """
     if not len(boxes):
         return []
     try:
-        session = _eye_state()
+        session = _landmark()
     except Exception:
         return [None] * len(boxes)
-    patches = [_face_patch(image, box) for box in boxes]
-    try:
-        logits = session.run(None, {session.get_inputs()[0].name: np.stack(patches)})[0]
-    except Exception:
-        return [None] * len(boxes)
-    logits = logits - logits.max(axis=1, keepdims=True)
-    probabilities = np.exp(logits)
-    probabilities /= probabilities.sum(axis=1, keepdims=True)
-    return [float(value) for value in probabilities[:, 1]]
+    input_name = session.get_inputs()[0].name
+    result = []
+    for box in boxes:
+        try:
+            prediction = session.run(None, {input_name: _landmark_input(image, box)[None]})[0]
+        except Exception:
+            result.append(None)
+            continue
+        points = (prediction.reshape(-1, 2) + 1.0) * (LANDMARK_SIZE / 2.0)
+        left = _eye_aspect_ratio(points, LEFT_EYE)
+        right = _eye_aspect_ratio(points, RIGHT_EYE)
+        result.append(max(left, right))
+    return result
 
 
 def _detector_input(image: Image.Image) -> tuple[np.ndarray, float]:
