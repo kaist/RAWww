@@ -68,9 +68,9 @@ class FaceAnalysisTests(unittest.TestCase):
         record = json.loads(results[0][1])[0]
         self.assertEqual(record["eyes_open"], 0.1235)
 
-    def test_classify_eyes_takes_the_more_open_eye_per_face(self) -> None:
+    def test_classify_eyes_returns_probability_per_face_from_face_crops(self) -> None:
         image = Image.new("RGB", (224, 224))
-        landmarks = np.repeat(FACE_TEMPLATE[None], 2, axis=0)
+        boxes = np.array([[1, 2, 60, 62], [70, 71, 130, 131]], dtype=np.float32)
 
         class Session:
             """Заглушка модели глаз: закрыт=[5,0], открыт=[0,5] по softmax."""
@@ -79,27 +79,24 @@ class FaceAnalysisTests(unittest.TestCase):
                 return [type("Input", (), {"name": "pixel_values"})()]
 
             def run(self, _, feeds):
-                # Порядок патчей: лев/прав первого лица, затем второго.
-                logits = np.array(
-                    [[0.0, 5.0], [5.0, 0.0], [5.0, 0.0], [5.0, 0.0]],
-                    dtype=np.float32,
-                )
-                assert feeds["pixel_values"].shape == (4, 3, 224, 224)
+                # Один кроп лица на каждое лицо: первое открыто, второе закрыто.
+                logits = np.array([[0.0, 5.0], [5.0, 0.0]], dtype=np.float32)
+                assert feeds["pixel_values"].shape == (2, 3, 224, 224)
                 return [logits]
 
         with patch("rawww.face_analysis._eye_state", return_value=Session()):
-            states = _classify_eyes(image, landmarks)
+            states = _classify_eyes(image, boxes)
 
         self.assertEqual(len(states), 2)
-        self.assertGreater(states[0], 0.5)  # один глаз открыт → лицо не закрыто
-        self.assertLess(states[1], 0.5)  # оба глаза закрыты → лицо закрыто
+        self.assertGreater(states[0], 0.5)  # лицо с открытыми глазами
+        self.assertLess(states[1], 0.5)  # лицо с закрытыми глазами
 
     def test_classify_eyes_returns_none_without_a_model(self) -> None:
         image = Image.new("RGB", (224, 224))
-        landmarks = np.repeat(FACE_TEMPLATE[None], 2, axis=0)
+        boxes = np.array([[1, 2, 60, 62], [70, 71, 130, 131]], dtype=np.float32)
 
         with patch("rawww.face_analysis._eye_state", side_effect=RuntimeError):
-            states = _classify_eyes(image, landmarks)
+            states = _classify_eyes(image, boxes)
 
         self.assertEqual(states, [None, None])
 

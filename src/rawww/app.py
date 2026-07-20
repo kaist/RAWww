@@ -4539,15 +4539,13 @@ class Workspace(QMainWindow):
         self.eyes_panel_title = QLabel("ГЛАЗА")
         self.eyes_panel_title.setObjectName("aiPanelTitle")
         eyes_layout.addWidget(self.eyes_panel_title)
-        self.eyes_buttons: dict[object, QToolButton] = {}
-        for label, value in (("Все", None), ("Закрытые", "closed")):
-            button = QToolButton()
-            button.setObjectName("shotFilter")
-            button.setText(label)
-            button.setCheckable(True)
-            button.clicked.connect(lambda _checked=False, target=value: self._set_eyes_filter(target))
-            self.eyes_buttons[value] = button
-            eyes_layout.addWidget(button)
+        # Один переключатель: нажатие включает фильтр брака, повторное — снимает.
+        self.eyes_toggle = QToolButton()
+        self.eyes_toggle.setObjectName("shotFilter")
+        self.eyes_toggle.setText("Закрытые глаза")
+        self.eyes_toggle.setCheckable(True)
+        self.eyes_toggle.clicked.connect(self._toggle_eyes_filter)
+        eyes_layout.addWidget(self.eyes_toggle)
 
         ai_layout.addStretch(1)
         ai_layout.addWidget(self.eyes_group)
@@ -8695,19 +8693,17 @@ class Workspace(QMainWindow):
                 label = button.property("shotLabel") or button.text().split("  ")[0]
                 button.setProperty("shotLabel", label)
                 button.setText(f"{label}  {count}")
-            eyes_counts = {None: len(matching_paths), "closed": closed_eyes_count}
-            for value, button in self.eyes_buttons.items():
-                button.setChecked(self.eyes_filter.currentData() == value)
-                label = button.property("shotLabel") or button.text().split("  ")[0]
-                button.setProperty("shotLabel", label)
-                button.setText(f"{label}  {eyes_counts.get(value, 0)}")
+            self.eyes_toggle.setChecked(self.eyes_filter.currentData() == "closed")
+            self.eyes_toggle.setText(f"Закрытые глаза  {closed_eyes_count}")
 
     def _set_shot_filter(self, value: str | None) -> None:
         index = self.shot_filter.findData(value)
         if index >= 0:
             self.shot_filter.setCurrentIndex(index)
 
-    def _set_eyes_filter(self, value: str | None) -> None:
+    def _toggle_eyes_filter(self) -> None:
+        # Кнопка-переключатель: включена → показываем брак по глазам, иначе все.
+        value = "closed" if self.eyes_toggle.isChecked() else None
         index = self.eyes_filter.findData(value)
         if index >= 0:
             self.eyes_filter.setCurrentIndex(index)
@@ -8716,10 +8712,10 @@ class Workspace(QMainWindow):
     def _eyes_closed(detail: dict) -> bool:
         """Признак брака по глазам: закрыты глаза у ключевого лица кадра.
 
-        Брак, если закрыты оба глаза у крупнейшего лица; либо когда лиц с
-        известным состоянием глаз не больше трёх и закрыто хотя бы одно из них.
-        В больших группах учитываем только крупнейшее лицо, чтобы моргнувший на
-        фоне не браковал кадр. Лица без состояния глаз игнорируются.
+        Брак, если закрыто крупнейшее лицо; либо когда лиц с известным
+        состоянием глаз не больше трёх и закрыто хотя бы одно из них. В больших
+        группах учитываем только крупнейшее лицо, чтобы моргнувший на фоне не
+        браковал кадр. Лица без состояния глаз игнорируются.
         """
         faces = [face for face in (detail.get("faces") or []) if isinstance(face, dict)]
         known = 0
