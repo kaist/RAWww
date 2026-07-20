@@ -171,13 +171,16 @@ def recognize_face_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[str
             records = []
             for face in faces:
                 left, top, right, bottom = (float(value) for value in face.bbox)
-                records.append({
+                record = {
                     "bbox": {"x": max(0.0, left / width), "y": max(0.0, top / height),
                              "width": max(0.0, (right - left) / width),
                              "height": max(0.0, (bottom - top) / height)},
                     "embedding": [round(float(value), 6) for value in face.embedding],
                     "confidence": float(face.confidence),
-                })
+                }
+                if face.eyes_open is not None:
+                    record["eyes_open"] = round(float(face.eyes_open), 4)
+                records.append(record)
             results.append((path, json.dumps(records, separators=(",", ":"))))
         except Exception:
             continue

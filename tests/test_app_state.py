@@ -467,6 +467,42 @@ class AppStateTests(unittest.TestCase):
             workspace.close()
             workspace.deleteLater()
 
+    def test_eyes_closed_flags_a_single_closed_face(self) -> None:
+        detail = {"faces": [{"bbox": {"width": 0.4}, "eyes_open": 0.2}]}
+        self.assertTrue(Workspace._eyes_closed(detail))
+
+    def test_eyes_closed_ignores_a_single_open_face(self) -> None:
+        detail = {"faces": [{"bbox": {"width": 0.4}, "eyes_open": 0.8}]}
+        self.assertFalse(Workspace._eyes_closed(detail))
+
+    def test_eyes_closed_when_largest_face_is_closed(self) -> None:
+        detail = {
+            "faces": [
+                {"bbox": {"width": 0.5}, "eyes_open": 0.1},
+                {"bbox": {"width": 0.2}, "eyes_open": 0.9},
+            ]
+        }
+        self.assertTrue(Workspace._eyes_closed(detail))
+
+    def test_eyes_closed_for_small_group_when_any_face_is_closed(self) -> None:
+        detail = {
+            "faces": [
+                {"bbox": {"width": 0.5}, "eyes_open": 0.9},
+                {"bbox": {"width": 0.3}, "eyes_open": 0.1},
+            ]
+        }
+        self.assertTrue(Workspace._eyes_closed(detail))
+
+    def test_eyes_open_in_a_large_group_when_only_a_small_face_is_closed(self) -> None:
+        faces = [{"bbox": {"width": 0.5}, "eyes_open": 0.9}]
+        faces += [{"bbox": {"width": 0.1}, "eyes_open": 0.9} for _ in range(3)]
+        faces.append({"bbox": {"width": 0.1}, "eyes_open": 0.1})
+        self.assertFalse(Workspace._eyes_closed({"faces": faces}))
+
+    def test_eyes_closed_skips_faces_without_eye_state(self) -> None:
+        detail = {"faces": [{"bbox": {"width": 0.4}}]}
+        self.assertFalse(Workspace._eyes_closed(detail))
+
     def test_photo_face_uses_matching_saved_face_as_canonical_reference(self) -> None:
         saved = {"embedding": [1.0, 0.0], "avatar": ""}
         host = SimpleNamespace(
