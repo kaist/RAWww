@@ -138,8 +138,9 @@ from .version import __version__
 
 THUMB_SIZE = 256
 ORIGINAL_SIZE = 0
-# Ниже этого значения вероятности «глаз открыт» глаз считается закрытым.
-EYES_OPEN_THRESHOLD = 0.5
+# Ниже этого eye aspect ratio глаз считается закрытым (порог подобран на кадрах:
+# у открытых глаз EAR заметно выше, у закрытых — ниже).
+EYES_OPEN_THRESHOLD = 0.25
 CARD_HARD_MIN_WIDTH = 96
 CARD_TARGET_WIDTH = 200
 CARD_MAX_WIDTH = 280

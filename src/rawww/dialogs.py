@@ -598,10 +598,9 @@ class SettingsDialog(QDialog):
         author.setOpenExternalLinks(True)
         layout.addWidget(author)
         credits = QLabel(
-            "<b>Определение закрытых глаз:</b> модель "
-            "<a href=\"https://huggingface.co/MichalMlodawski/"
-            "open-closed-eye-classification-mobilev2\">open-closed-eye-classification-mobilev2</a> "
-            "(Michał Młodawski, лицензия CC BY-NC-ND 4.0), используется без изменений."
+            "<b>Определение закрытых глаз:</b> разметка лица "
+            "<a href=\"https://github.com/deepinsight/insightface\">InsightFace</a> "
+            "(модель 2d106det), по контуру век считается eye aspect ratio."
         )
         credits.setObjectName("settingsHint")
         credits.setWordWrap(True)
