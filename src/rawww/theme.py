@@ -447,6 +447,65 @@ def apply_theme(app: QApplication) -> None:
         QWidget#directoryPanel {
             background: transparent;
         }
+        QFrame#transferQueuePanel {
+            background: #292929;
+            border: 1px solid #464646;
+            border-radius: 6px;
+        }
+        QFrame#transferQueuePanel QLabel,
+        QWidget#transferQueueContainer,
+        QWidget#transferQueueRow {
+            background: transparent;
+            border: 0;
+        }
+        QLabel#transferQueueTitle {
+            color: #b5b5b5;
+            font-size: 10px;
+            font-weight: 700;
+        }
+        QLabel#transferQueueActive {
+            color: #ededed;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        QLabel#transferQueueDetail, QLabel#transferQueueCaption {
+            color: #b5b5b5;
+            font-size: 10px;
+        }
+        QLabel#transferQueueItem {
+            color: #d5d5d5;
+            font-size: 10px;
+        }
+        QProgressBar#transferQueueProgress {
+            min-height: 13px;
+            max-height: 13px;
+            background: transparent;
+            border: 1px solid #505050;
+            border-radius: 4px;
+            text-align: center;
+        }
+        QProgressBar#transferQueueProgress::chunk {
+            background: #919191;
+            border-radius: 3px;
+        }
+        QToolButton#transferQueueAction, QToolButton#transferQueueCancel,
+        QToolButton#transferQueueItemCancel {
+            min-width: 20px;
+            max-width: 20px;
+            min-height: 20px;
+            max-height: 20px;
+            padding: 0;
+            border: 1px solid #555555;
+            border-radius: 3px;
+            background: transparent;
+            color: #e8e8e8;
+        }
+        QToolButton#transferQueueAction:hover { background: #484848; }
+        QToolButton#transferQueueCancel:hover,
+        QToolButton#transferQueueItemCancel:hover {
+            background: #633536;
+            border-color: #a65c5d;
+        }
         QLabel#directoryTitle {
             background: transparent;
             color: #a9a9a9;

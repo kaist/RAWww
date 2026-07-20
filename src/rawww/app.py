@@ -109,6 +109,7 @@ from .theme import (
 )
 from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence
 from .widgets import SettingsCheckBox
+from .transfer_queue import TransferEntry, TransferManager, TransferQueuePanel, TransferTask
 from .dialogs import (
     BatchRenameDialog,
     BatchResizeDialog,
@@ -1867,10 +1868,10 @@ class FullView(QFrame):
         face_loader_layout = QVBoxLayout(self.face_search_loader)
         face_loader_layout.setContentsMargins(20, 12, 20, 12)
         face_loader_layout.setSpacing(7)
-        face_loader_label = QLabel("Ищу похожие лица")
-        face_loader_label.setObjectName("faceSearchLoaderText")
-        face_loader_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        face_loader_layout.addWidget(face_loader_label)
+        self.face_search_loader_label = QLabel("Ищу похожие лица")
+        self.face_search_loader_label.setObjectName("faceSearchLoaderText")
+        self.face_search_loader_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        face_loader_layout.addWidget(self.face_search_loader_label)
         face_loader_progress = QProgressBar()
         face_loader_progress.setObjectName("faceSearchLoaderProgress")
         face_loader_progress.setRange(0, 0)
@@ -2404,9 +2405,14 @@ class FullView(QFrame):
 
     def set_face_search_loading(self, loading: bool) -> None:
         """Показывает состояние поиска, пока Workspace фильтрует большую папку."""
-        if not loading:
+        self.set_busy_loading("Ищу похожие лица" if loading else None)
+
+    def set_busy_loading(self, text: str | None) -> None:
+        """Показывает общий индикатор долгой операции поверх FullView."""
+        if not text:
             self.face_search_loader.hide()
             return
+        self.face_search_loader_label.setText(text)
         self._position_face_search_loader()
         self.face_search_loader.show()
         self.face_search_loader.raise_()
@@ -3355,6 +3361,7 @@ class Workspace(QMainWindow):
         initial_directory: Path | None = None,
         *,
         defer_initial_scan: bool = False,
+        transfer_manager: TransferManager | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -3396,6 +3403,7 @@ class Workspace(QMainWindow):
         self.video_thumbnailer.previewReady.connect(self._on_video_preview)
         self._xmp_pending: dict[Path, tuple[dict, list[dict], dict[str, str]]] = {}
         self._xmp_running: set[Path] = set()
+        self._xmp_futures: dict[Path, Future] = {}
         self._xmp_export_after_cache_load = False
         self._ignore_folder_changes_until = 0.0
         self.last_navigation_at = 0.0
@@ -3449,6 +3457,7 @@ class Workspace(QMainWindow):
         self._file_time_cache: dict[Path, float] = {}
         self._metadata_view_refresh_needed = False
         self.settings = _application_settings()
+        self.transfer_manager = transfer_manager
         self.destination_paths_provider: Callable[[], list[Path]] | None = None
 
         self.shotsync_active = False
@@ -3532,10 +3541,12 @@ class Workspace(QMainWindow):
         self.workspace_active = False
         self._folder_context_active = False
         self._pending_folder_grid_context: tuple[list[str], int] | None = None
+        self._pending_folder_grid_restore = False
         self._pending_view_cursor_path: Path | None = None
         self._pending_view_selection: set[Path] = set()
         self._pending_view_scroll: int | None = None
         self._restoring_folder_grid_context = False
+        self._restoring_view_context = False
         self.folder_cache: FolderCache | None = None
         self._ai_pipeline = None
         self._metadata_pipeline = None
@@ -3550,6 +3561,7 @@ class Workspace(QMainWindow):
         self._upload_progress: tuple[int, int] | None = None
         self._receive_progress: tuple[int, int, int] | None = None
         self._selection_progress: tuple[int, int] | None = None
+        self._file_mutation_waiting = False
         self._shotsync_pending_marks = 0
         self._shotsync_marks_fetching = False
         self.statusBar().hide()
@@ -3716,6 +3728,139 @@ class Workspace(QMainWindow):
     @property
     def visible_thumb_pending(self) -> set[tuple[Path, int]]:
         return self.scheduler.visible_thumb_pending
+
+    def _paths_touch_current_workspace(self, paths: list[Path]) -> bool:
+        """Проверяет, может ли активная вкладка держать один из изменяемых путей."""
+        for path in paths:
+            try:
+                if (
+                    path == self.current_dir
+                    or path.parent == self.current_dir
+                    or self.current_dir.is_relative_to(path)
+                ):
+                    return True
+            except (OSError, ValueError):
+                continue
+        return False
+
+    def _run_after_file_consumers_release(
+        self,
+        paths: list[Path],
+        operation: Callable[[], None],
+        *,
+        restart_consumers: bool = True,
+        loading_text: str = "Выполняется файловая операция",
+    ) -> None:
+        """Откладывает файловую операцию до освобождения исходников воркерами.
+
+        Отмена Future не останавливает уже начатый RAW/AI/ExifTool. Мы запрещаем
+        новые задания, но ждём работающие асинхронно через event loop, чтобы Qt
+        не зависал и Windows получил закрытые файловые дескрипторы.
+        """
+        if self.closing:
+            return
+        if getattr(self, "_file_mutation_waiting", False):
+            QTimer.singleShot(
+                50,
+                lambda targets=list(paths), callback=operation, restart=restart_consumers, text=loading_text:
+                self._run_after_file_consumers_release(
+                    targets,
+                    callback,
+                    restart_consumers=restart,
+                    loading_text=text,
+                ),
+            )
+            return
+
+        self._file_mutation_waiting = True
+        original_dir = self.current_dir
+        original_generation = self.directory_generation
+        touches_workspace = self._paths_touch_current_workspace(paths)
+        futures = set(self.scheduler.pending_futures()) if touches_workspace else set()
+        if touches_workspace:
+            self.populate_timer.stop()
+            self.thumb_timer.stop()
+            self.visible_thumb_timer.stop()
+            self.full_request_timer.stop()
+            self.grid_full_request_timer.stop()
+            self.pending_full_request = None
+            self.pending_grid_full_request = None
+            self.scheduler.cancel_pending()
+            self.scheduler.abandon_preview_decode_work()
+            self.video_thumbnailer.cancel()
+            self.full_view.stop_video()
+            self._cancel_face_search()
+            self._set_face_search_loading(False)
+
+        had_ai = False
+        if touches_workspace and self._ai_pipeline is not None:
+            ai_futures = self._ai_pipeline.pending_futures()
+            if ai_futures:
+                had_ai = True
+                futures.update(ai_futures)
+                self._ai_pipeline.shutdown()
+                self._ai_pipeline = None
+                self.ai_progress_timer.stop()
+
+        had_metadata = False
+        if touches_workspace and self._metadata_pipeline is not None:
+            metadata_futures = self._metadata_pipeline.pending_futures()
+            if metadata_futures:
+                had_metadata = True
+                futures.update(metadata_futures)
+                self._metadata_pipeline.shutdown()
+                self._metadata_pipeline = None
+
+        if touches_workspace:
+            xmp_futures = tuple(self._xmp_futures.values())
+            futures.update(xmp_futures)
+            for future in xmp_futures:
+                future.cancel()
+            self._xmp_pending.clear()
+
+        self.grid_restore_loader_label.setText(loading_text)
+        self._set_grid_restore_loader_visible(True)
+        self.full_view.set_busy_loading(loading_text)
+
+        def finish_when_released() -> None:
+            if self.closing:
+                self._file_mutation_waiting = False
+                return
+            if any(not future.done() for future in futures):
+                QTimer.singleShot(25, finish_when_released)
+                return
+            self._file_mutation_waiting = False
+            try:
+                operation()
+            finally:
+                self.full_view.set_busy_loading(None)
+                if self._restoring_folder_grid_context:
+                    self.grid_restore_loader_label.setText("Папка открывается")
+                    self._schedule_grid_restore_loader()
+                elif self._restoring_view_context:
+                    self.grid_restore_loader_label.setText("Обновляю список")
+                    self._schedule_grid_restore_loader()
+                else:
+                    self._hide_grid_restore_loader()
+            if (
+                restart_consumers
+                and self.current_dir == original_dir
+                and self.directory_generation == original_generation
+                and self.current_dir.is_dir()
+                and self.workspace_active
+            ):
+                self._schedule_visible_thumb_priority()
+                self.thumb_timer.start()
+                if had_metadata and self.folder_cache is not None and self.cache_ready:
+                    self.metadata_pipeline.scan(
+                        [path for path in self.view_paths if is_supported_image(path)],
+                        self.folder_cache,
+                        self.bridge.metadataUpdated.emit,
+                    )
+                if had_ai:
+                    self._start_ai_analysis()
+
+        QTimer.singleShot(0, finish_when_released)
 
     def _start_cache_maintenance(self) -> None:
         """Запускает обслуживание кэша после срочных стартовых задач."""
@@ -3979,8 +4124,13 @@ class Workspace(QMainWindow):
         self.favorites_splitter.setChildrenCollapsible(False)
         self.favorites_splitter.addWidget(directory_panel)
         self.favorites_splitter.addWidget(favorites)
+        if self.transfer_manager is not None:
+            self.transfer_queue_panel = TransferQueuePanel(self.transfer_manager)
+            self.favorites_splitter.addWidget(self.transfer_queue_panel)
         self.favorites_splitter.setStretchFactor(0, 1)
         self.favorites_splitter.setStretchFactor(1, 0)
+        if self.favorites_splitter.count() == 3:
+            self.favorites_splitter.setStretchFactor(2, 0)
         self.favorites_splitter.splitterMoved.connect(lambda *_: self._save_favorites_height())
         local_layout.addWidget(self.favorites_splitter, 1)
         QTimer.singleShot(0, self._restore_favorites_height)
@@ -4354,6 +4504,7 @@ class Workspace(QMainWindow):
         add_hotkey("fullscreen", self.toggle_fullscreen)
         add_hotkey("quick_mark", self._apply_quick_mark)
         add_hotkey("comment", self._show_comment_dialog)
+        add_hotkey("create_folder", self._create_new_folder)
         add_hotkey("quick_copy", lambda: self._show_quick_transfer(move=False))
         add_hotkey("quick_move", lambda: self._show_quick_transfer(move=True))
 
@@ -4398,8 +4549,8 @@ class Workspace(QMainWindow):
             operation,
             self._quick_transfer_destinations(),
             _hotkey_sequence(self.settings, identifier),
-            lambda destination, update_recent, progress: self._quick_transfer_to(
-                sources, destination, move, update_recent, progress
+            lambda destination, update_recent: self._quick_transfer_to(
+                sources, destination, move, update_recent
             ),
             self,
         )
@@ -4416,14 +4567,13 @@ class Workspace(QMainWindow):
             for action, was_enabled in zip(quick_actions, enabled):
                 action.setEnabled(was_enabled)
 
-    def _quick_transfer_to(self, sources: list[Path], destination: Path, move: bool, update_recent: bool, progress: Callable[[int, int], None]) -> None:
+    def _quick_transfer_to(self, sources: list[Path], destination: Path, move: bool, update_recent: bool) -> None:
         if update_recent:
             self._remember_quick_transfer_destination(destination)
         self._receive_dropped_paths(
             sources,
             destination,
             Qt.DropAction.MoveAction if move else Qt.DropAction.CopyAction,
-            progress=progress,
         )
 
     def _install_grid_page_key_filters(self) -> None:
@@ -4494,6 +4644,10 @@ class Workspace(QMainWindow):
     def _show_grid_restore_loader_if_needed(self) -> None:
         """Показывает оверлей лишь для ещё не завершённого восстановления позиции."""
         if self._restoring_folder_grid_context:
+            self.grid_restore_loader_label.setText("Папка открывается")
+            self._set_grid_restore_loader_visible(True)
+        elif self._restoring_view_context:
+            self.grid_restore_loader_label.setText("Обновляю список")
             self._set_grid_restore_loader_visible(True)
 
     def _hide_grid_restore_loader(self) -> None:
@@ -4503,6 +4657,11 @@ class Workspace(QMainWindow):
 
     def _set_face_search_loading(self, loading: bool) -> None:
         """Показывает поиск лица там, где пользователь увидит его до перестройки списка."""
+        if getattr(self, "_file_mutation_waiting", False):
+            # Поздний callback отменённого поиска не должен переименовать
+            # индикатор уже начатой файловой операции.
+            self.full_view.set_face_search_loading(False)
+            return
         # Пользователь может сменить grid на FullView, пока запрос работает.
         # Оба оверлея должны разделять состояние, иначе один останется поверх результата.
         self.full_view.set_face_search_loading(loading)
@@ -4792,9 +4951,26 @@ class Workspace(QMainWindow):
         if not hasattr(self, "favorites_splitter"):
             return
         requested = self.settings.value("sidebar/favorites_height", 144, int)
-        available = max(48, self.favorites_splitter.height() - self.favorites_splitter.handleWidth())
+        visible_widgets = sum(
+            not self.favorites_splitter.widget(index).isHidden()
+            for index in range(self.favorites_splitter.count())
+        )
+        handles = max(0, visible_widgets - 1)
+        available = max(
+            48,
+            self.favorites_splitter.height() - self.favorites_splitter.handleWidth() * handles,
+        )
         height = max(48, min(int(requested), max(48, available - 48)))
-        self.favorites_splitter.setSizes([max(48, available - height), height])
+        if self.favorites_splitter.count() == 3:
+            transfer_height = (
+                max(108, self.transfer_queue_panel.sizeHint().height())
+                if not self.transfer_queue_panel.isHidden()
+                else 0
+            )
+            directory_height = max(48, available - height - transfer_height)
+            self.favorites_splitter.setSizes([directory_height, height, transfer_height])
+        else:
+            self.favorites_splitter.setSizes([max(48, available - height), height])
 
     def _save_favorites_height(self) -> None:
         if hasattr(self, "favorites_panel") and self.favorites_panel.height() >= 48:
@@ -5028,7 +5204,15 @@ class Workspace(QMainWindow):
             return "replace"
         return "cancel"
 
-    def _receive_dropped_paths(self, paths: list[Path], destination: Path | None, action, progress: Callable[..., None] | None = None) -> None:
+    def _receive_dropped_paths(
+        self,
+        paths: list[Path],
+        destination: Path | None,
+        action,
+        progress: Callable[..., None] | None = None,
+        *,
+        _consumers_released: bool = False,
+    ) -> None:
         """Копирует внешние файлы или переносит внутреннее перетаскивание в цель."""
         if destination is None:
             destination = self.current_dir
@@ -5036,6 +5220,9 @@ class Workspace(QMainWindow):
             return
         sources = list(dict.fromkeys(path for path in paths if path.exists()))
         if not sources:
+            return
+        if self.transfer_manager is not None:
+            self._enqueue_transfer(sources, destination, action)
             return
         # Для индикатора считаем байты самих файлов. Папки остаются в общем
         # счётчике объектов: обходить весь их состав до начала операции означало
@@ -5047,6 +5234,35 @@ class Workspace(QMainWindow):
         if progress is not None:
             progress(0, len(sources), 0, total_bytes)
         move = action == Qt.DropAction.MoveAction
+        if (
+            self._selection_progress is not None
+            or self._upload_progress is not None
+            or self._receive_progress is not None
+        ):
+            QMessageBox.information(
+                self,
+                "Файловая операция",
+                "Дождитесь завершения текущего приёма, отбора или отправки ShotSync.",
+            )
+            return
+        if not _consumers_released and self._paths_touch_current_workspace([*sources, destination]):
+            self._run_after_file_consumers_release(
+                [*sources, destination],
+                lambda selected=list(sources), target=destination, drop_action=action, callback=progress:
+                self._receive_dropped_paths(
+                    selected,
+                    target,
+                    drop_action,
+                    callback,
+                    _consumers_released=True,
+                ),
+                loading_text=(
+                    "Выполняется перемещение"
+                    if move
+                    else "Выполняется копирование"
+                ),
+            )
+            return
         if move and self.current_dir in sources:
             self.load_directory(self.current_dir.parent)
         errors: list[str] = []
@@ -5135,10 +5351,79 @@ class Workspace(QMainWindow):
         if errors:
             QMessageBox.warning(self, "Копирование файлов", "Не удалось обработать некоторые объекты:\n" + "\n".join(errors))
 
+    def _enqueue_transfer(self, sources: list[Path], destination: Path, action) -> None:
+        """Согласует корневые конфликты и передаёт операцию глобальному менеджеру."""
+        if self.transfer_manager is None:
+            return
+        move = action == Qt.DropAction.MoveAction
+        auto_rename = self.settings.value("transfers/auto_rename_conflicts", True, bool)
+        entries: list[TransferEntry] = []
+        errors: list[str] = []
+        for source in sources:
+            try:
+                source_resolved = source.resolve()
+                destination_resolved = destination.resolve()
+            except OSError:
+                source_resolved, destination_resolved = source, destination
+            if source.parent == destination:
+                if not move:
+                    errors.append(f"{source.name}: уже находится в этой папке")
+                continue
+            if source.is_dir() and destination_resolved.is_relative_to(source_resolved):
+                errors.append(f"{source.name}: нельзя поместить папку внутрь самой себя")
+                continue
+            target = destination / source.name
+            replace = False
+            if target.exists() or self.transfer_manager.target_reserved(target):
+                resolution = "rename" if auto_rename else self._resolve_transfer_conflict(source, target, move)
+                if resolution == "cancel":
+                    break
+                if resolution == "skip":
+                    continue
+                if resolution == "rename":
+                    try:
+                        target = self._queued_renamed_transfer_target(target)
+                    except OSError as exc:
+                        errors.append(f"{source.name}: {exc}")
+                        continue
+                else:
+                    replace = True
+            entries.append(TransferEntry(source, target, replace))
+        if entries:
+            self.transfer_manager.enqueue(entries, destination, move=move)
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Файловая операция",
+                "Не удалось поставить некоторые объекты в очередь:\n" + "\n".join(errors),
+            )
+
+    def _queued_renamed_transfer_target(self, target: Path) -> Path:
+        """Подбирает имя с учётом диска и ещё не запущенных заданий очереди."""
+        for number in range(2, 10_000):
+            candidate = target.with_name(f"{target.stem} ({number}){target.suffix}")
+            if not candidate.exists() and not (
+                self.transfer_manager is not None
+                and self.transfer_manager.target_reserved(candidate)
+            ):
+                return candidate
+        raise OSError("Не удалось подобрать свободное имя")
+
     def _delete_paths(self, paths: list[Path], *, permanent: bool) -> None:
         """Удаляет выбранные файлы или папки, учитывая локальные копии ShotSync."""
         targets = list(dict.fromkeys(path for path in paths if path.exists()))
         if not targets:
+            return
+        if (
+            self._selection_progress is not None
+            or self._upload_progress is not None
+            or self._receive_progress is not None
+        ):
+            QMessageBox.information(
+                self,
+                "Удаление",
+                "Дождитесь завершения текущего приёма, отбора или отправки ShotSync.",
+            )
             return
         files = [path for path in targets if path.is_file()]
         try:
@@ -5178,6 +5463,16 @@ class Workspace(QMainWindow):
             dialog.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
             if dialog.exec() != QMessageBox.StandardButton.Yes:
                 return
+
+        self._run_after_file_consumers_release(
+            targets,
+            lambda selected=list(targets), remove_permanently=permanent:
+            self._delete_paths_now(selected, permanent=remove_permanently),
+            loading_text="Выполняется удаление",
+        )
+
+    def _delete_paths_now(self, targets: list[Path], *, permanent: bool) -> None:
+        """Удаляет подтверждённые пути после освобождения фоновых читателей."""
 
         deleting_current_folder = self.current_dir in targets
         if deleting_current_folder:
@@ -6471,6 +6766,7 @@ class Workspace(QMainWindow):
         self._refresh_shotsync_current_shooting()
         self._restore_series_mode(directory)
         self._pending_folder_grid_context = self._load_folder_grid_context(directory)
+        self._pending_folder_grid_restore = True
         self.settings.setValue("last_directory", str(directory))
         self.setWindowTitle(_workspace_title(directory))
         self.all_paths = []
@@ -6484,10 +6780,12 @@ class Workspace(QMainWindow):
         self._file_time_cache.clear()
         self.ai_progress_total = 0
         self.items_by_path.clear()
+        self._restoring_view_context = False
         self.grid.setUpdatesEnabled(True)
         self.grid.clear()
         self._restoring_folder_grid_context = self._pending_folder_grid_context is not None
         if self._restoring_folder_grid_context:
+            self.grid_restore_loader_label.setText("Папка открывается")
             self.grid.setUpdatesEnabled(False)
             self._schedule_grid_restore_loader()
         else:
@@ -6566,6 +6864,9 @@ class Workspace(QMainWindow):
         self.settings.setValue(f"{prefix}/grid_scroll", self.grid.verticalScrollBar().value())
 
     def _restore_folder_grid_context(self) -> None:
+        if not self._pending_folder_grid_restore:
+            return
+        self._pending_folder_grid_restore = False
         context = self._pending_folder_grid_context
         if context is None:
             self._reset_grid_cursor()
@@ -6590,16 +6891,52 @@ class Workspace(QMainWindow):
 
     def _remember_view_context(self) -> None:
         """Запоминает курсор и выделение перед перестройкой фильтрованного грида."""
-        if self._pending_folder_grid_context is not None or self.grid.count() == 0:
+        if self._pending_folder_grid_restore or self.grid.count() == 0:
             return
-        current = self.grid.currentItem()
-        if current is not None and self._pending_view_cursor_path is None:
-            value = current.data(Qt.ItemDataRole.UserRole)
-            if value:
-                self._pending_view_cursor_path = Path(value)
-        self._pending_view_selection.update(self._selected_paths())
-        if self._pending_view_scroll is None:
-            self._pending_view_scroll = self.grid.verticalScrollBar().value()
+        # Несколько сигналов фильтров могут прийти раньше, чем закончат добавляться
+        # карточки после первого. Контекст должен оставаться одним снимком, иначе
+        # временное выделение нового грида смешается с исходным.
+        if (
+            self._pending_view_cursor_path is not None
+            or self._pending_view_selection
+            or self._pending_view_scroll is not None
+        ):
+            return
+        if self.stack.currentWidget() is self.full_view:
+            # В FullView именно current_path является курсором. Скрытый grid может
+            # всё ещё указывать на кадр, с которого просмотр был когда-то открыт.
+            self._pending_view_cursor_path = self.current_path
+            self._pending_view_selection = (
+                {self.current_path} if self.current_path is not None else set()
+            )
+        else:
+            current = self.grid.currentItem()
+            if current is not None:
+                value = current.data(Qt.ItemDataRole.UserRole)
+                if value:
+                    self._pending_view_cursor_path = Path(value)
+            self._pending_view_selection = set(self._selected_paths())
+        self._pending_view_scroll = self.grid.verticalScrollBar().value()
+
+    def _begin_view_context_restore(self) -> None:
+        """Замораживает отрисовку грида до возврата курсора после фильтра."""
+        if (
+            self._restoring_view_context
+            or not self.workspace_active
+            or (
+                self._pending_view_cursor_path is None
+                and not self._pending_view_selection
+                and self._pending_view_scroll is None
+            )
+        ):
+            return
+        # QListWidget автоматически назначает первую добавленную карточку текущей.
+        # Не показываем этот промежуточный кадр: пользователь должен увидеть уже
+        # окончательный список с восстановленным курсором.
+        self._restoring_view_context = True
+        self.grid.setUpdatesEnabled(False)
+        self.grid_restore_loader_label.setText("Обновляю список")
+        self._schedule_grid_restore_loader()
 
     def _restore_pending_view_cursor(self) -> None:
         """Возвращает сохранившиеся курсор, выделение и позицию после фильтра."""
@@ -6617,9 +6954,12 @@ class Workspace(QMainWindow):
         current_item = self.items_by_path.get(path) if path is not None else None
         if current_item is None and selected_items:
             current_item = selected_items[0]
+        self.grid.clearSelection()
         if current_item is not None:
-            self.grid.setCurrentItem(current_item)
-            current_item.setSelected(True)
+            self.grid.setCurrentItem(
+                current_item,
+                QItemSelectionModel.SelectionFlag.NoUpdate,
+            )
             for item in selected_items:
                 item.setSelected(True)
             self.grid.doItemsLayout()
@@ -6627,6 +6967,11 @@ class Workspace(QMainWindow):
         elif scroll_value is not None:
             scroll_bar = self.grid.verticalScrollBar()
             scroll_bar.setValue(min(scroll_value, scroll_bar.maximum()))
+        if self._restoring_view_context:
+            self._restoring_view_context = False
+            self.grid.setUpdatesEnabled(True)
+            self.grid.viewport().update()
+            self._hide_grid_restore_loader()
 
     def _reset_grid_cursor(self) -> None:
         """Ставит курсор навигации на первый элемент текущей папки."""
@@ -6777,7 +7122,7 @@ class Workspace(QMainWindow):
                 or self._pending_view_scroll is not None
             ):
                 QTimer.singleShot(0, self._restore_pending_view_cursor)
-            if self.cache_ready:
+            if self.cache_ready and self._pending_folder_grid_restore:
                 QTimer.singleShot(0, self._restore_folder_grid_context)
             self._refresh_status_panel()
 
@@ -7053,12 +7398,17 @@ class Workspace(QMainWindow):
         self._xmp_running.add(path)
         self._ignore_folder_changes_until = max(self._ignore_folder_changes_until, monotonic() + 2.0)
         future = self.xmp_executor.submit(_write_xmp_task, path, *payload)
+        self._xmp_futures[path] = future
         future.add_done_callback(lambda done, target=path: self.bridge.xmpWritten.emit((target, done)))
 
     def _on_xmp_written(self, result: object) -> None:
         path, future = result
         self._xmp_running.discard(path)
+        if self._xmp_futures.get(path) is future:
+            self._xmp_futures.pop(path, None)
         if self.closing:
+            return
+        if future.cancelled():
             return
         try:
             future.result()
@@ -7130,6 +7480,20 @@ class Workspace(QMainWindow):
         if not changes:
             return
         dialog.set_renaming(changes)
+        paths = [
+            self.current_dir / old
+            for old, new in names.items()
+            if old != new
+        ]
+        self._run_after_file_consumers_release(
+            paths,
+            lambda view=dialog, plan=dict(names): self._submit_file_rename(view, plan),
+            restart_consumers=False,
+            loading_text="Выполняется переименование",
+        )
+
+    def _submit_file_rename(self, dialog: BatchRenameDialog, names: dict[str, str]) -> None:
+        """Запускает переименование после освобождения исходников воркерами."""
         cache = self.folder_cache
         future = self.rename_executor.submit(self._rename_files_with_cache, names, cache, dialog)
         future.add_done_callback(
@@ -7972,6 +8336,7 @@ class Workspace(QMainWindow):
         if not hasattr(self, "rating_filter"):
             return
         self._remember_view_context()
+        self._begin_view_context_restore()
         rating = self.rating_filter.currentData()
         color = self.color_filter.currentData()
         media = self.media_filter.currentData()
@@ -8684,9 +9049,6 @@ class Workspace(QMainWindow):
         self._set_face_search_loading(False)
 
     def _clear_face_search(self) -> None:
-        # Файл текущего просмотра остаётся валидным после снятия фильтра и
-        # должен быть точкой возврата, а не исчезнуть в начале длинной сетки.
-        self._pending_view_cursor_path = self.current_path
         self._cancel_face_search()
         self.face_reference = None
         self._face_match_names = None
@@ -9015,7 +9377,14 @@ class Workspace(QMainWindow):
         item = self.items_by_path.get(path)
         if item is None:
             return
-        self.grid.setCurrentItem(item)
+        # FullView представляет ровно один текущий файл. Старое выделение грида
+        # не должно переживать навигацию в просмотрщике вторым активным кадром.
+        self.grid.clearSelection()
+        self.grid.setCurrentItem(
+            item,
+            QItemSelectionModel.SelectionFlag.NoUpdate,
+        )
+        item.setSelected(True)
         self.grid.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
 
     def toggle_fullscreen(self) -> None:
@@ -9415,6 +9784,8 @@ class MainWindow(QMainWindow):
     def __init__(self, open_target: Path | None = None) -> None:
         super().__init__()
         self.settings = _application_settings()
+        self.transfer_manager = TransferManager(self.settings, self)
+        self.transfer_manager.taskFinished.connect(self._transfer_task_finished)
         self._single_photo_workspace: Workspace | None = None
         self._single_photo_origin_index: int | None = None
         self._single_photo_was_minimized = False
@@ -9682,6 +10053,7 @@ class MainWindow(QMainWindow):
         workspace = Workspace(
             directory,
             defer_initial_scan=defer_initial_scan,
+            transfer_manager=self.transfer_manager,
             parent=self.workspace_stack,
         )
         workspace.single_photo_mode = single_photo
@@ -9780,6 +10152,9 @@ class MainWindow(QMainWindow):
             self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.transfer_manager.set_serial(
+                self.settings.value("transfers/use_queue", True, bool)
+            )
             for workspace_index in range(self.workspace_stack.count()):
                 candidate = self.workspace_stack.widget(workspace_index)
                 if isinstance(candidate, Workspace):
@@ -9788,6 +10163,22 @@ class MainWindow(QMainWindow):
                     candidate.full_view.refresh_mark_indicator()
         if workspace.shotsync_client.has_key():
             workspace._sync_code_replacements()
+
+    def _transfer_task_finished(self, task: TransferTask) -> None:
+        """Обновляет открытые папки и сообщает ошибки завершённой операции."""
+        touched = {task.destination}
+        if task.move:
+            touched.update(entry.source.parent for entry in task.entries)
+        for index in range(self.workspace_stack.count()):
+            workspace = self.workspace_stack.widget(index)
+            if isinstance(workspace, Workspace) and workspace.current_dir in touched:
+                workspace.load_directory(workspace.current_dir)
+        if task.errors and task.status != "cancelled":
+            QMessageBox.warning(
+                self,
+                "Файловая операция",
+                "Не удалось обработать некоторые объекты:\n" + "\n".join(task.errors),
+            )
 
     def _clear_all_caches(self) -> None:
         """Закрывает активные базы кэша перед удалением их файлов."""
@@ -9887,6 +10278,17 @@ class MainWindow(QMainWindow):
         if self._closing:
             super().closeEvent(event)
             return
+        if self.transfer_manager.active or self.transfer_manager.pending:
+            answer = QMessageBox.question(
+                self,
+                "Файловые операции не завершены",
+                "Копирование или перемещение ещё выполняется. Выйти и отменить все операции?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
         self._closing = True
         directories = [
             str(workspace.current_dir)
@@ -9919,6 +10321,7 @@ class MainWindow(QMainWindow):
             if isinstance(workspace, Workspace):
                 workspaces.append(workspace)
                 workspace.begin_shutdown()
+        self.transfer_manager.shutdown()
         # После общего запрета новой работы можно безопасно закрыть дочерние
         # окна и дождаться всех очередей, включая оставшиеся от прежних папок.
         for workspace in workspaces:

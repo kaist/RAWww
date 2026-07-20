@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import re
 import sys
-from time import monotonic
 
 from PySide6.QtCore import QEvent, QKeyCombination, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -22,27 +21,6 @@ from .shotsync_client import ShotSyncClient
 from .theme import _fomantic_icon
 from .widgets import CodeCompletingLineEdit, CodeReplacementsEditor, SettingsCheckBox
 from .version import __version__ as APP_VERSION
-
-
-def _format_transfer_size(value: float) -> str:
-    """Показывает скорость без ложной точности в десятках знаков."""
-    for unit in ("Б", "КБ", "МБ", "ГБ"):
-        if value < 1024 or unit == "ГБ":
-            return f"{value:.1f} {unit}" if unit != "Б" else f"{value:.0f} {unit}"
-        value /= 1024
-    return "0 Б"
-
-
-def _format_transfer_eta(seconds: float) -> str:
-    """Форматирует оценку оставшегося времени для короткого статуса."""
-    seconds = round(seconds)
-    if seconds < 60:
-        return f"{seconds} с"
-    minutes, seconds = divmod(seconds, 60)
-    if minutes < 60:
-        return f"{minutes} мин {seconds:02d} с"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours} ч {minutes:02d} мин"
 
 
 class HelpDialog(QDialog):
@@ -235,6 +213,27 @@ class SettingsDialog(QDialog):
             self.settings.value("behavior/delete_permanently_on_del", False, bool)
         )
         layout.addWidget(self.delete_permanently_on_del)
+        self.use_transfer_queue = SettingsCheckBox(
+            "Выполнять копирование и перемещение последовательно"
+        )
+        self.use_transfer_queue.setChecked(
+            self.settings.value("transfers/use_queue", True, bool)
+        )
+        layout.addWidget(self.use_transfer_queue)
+        transfer_queue_hint = QLabel(
+            "Новые файловые операции становятся в общую очередь. Если выключить, "
+            "до трёх операций смогут выполняться одновременно."
+        )
+        transfer_queue_hint.setObjectName("settingsHint")
+        transfer_queue_hint.setWordWrap(True)
+        layout.addWidget(transfer_queue_hint)
+        self.auto_rename_transfer_conflicts = SettingsCheckBox(
+            "Не спрашивать при совпадении имён, сразу переименовывать"
+        )
+        self.auto_rename_transfer_conflicts.setChecked(
+            self.settings.value("transfers/auto_rename_conflicts", True, bool)
+        )
+        layout.addWidget(self.auto_rename_transfer_conflicts)
         self.auto_ai_after_previews = SettingsCheckBox("Всегда запускать AI после превью")
         self.auto_ai_after_previews.setChecked(
             self.settings.value("ai/auto_after_previews", False, bool)
@@ -625,6 +624,11 @@ class SettingsDialog(QDialog):
         self.settings.setValue("restore_workspaces", self.restore_workspaces.isChecked())
         self.settings.setValue("behavior/delete_without_confirmation", self.delete_without_confirmation.isChecked())
         self.settings.setValue("behavior/delete_permanently_on_del", self.delete_permanently_on_del.isChecked())
+        self.settings.setValue("transfers/use_queue", self.use_transfer_queue.isChecked())
+        self.settings.setValue(
+            "transfers/auto_rename_conflicts",
+            self.auto_rename_transfer_conflicts.isChecked(),
+        )
         self.settings.setValue("ai/auto_after_previews", self.auto_ai_after_previews.isChecked())
         self.settings.setValue("interface/show_full_view_counter", self.show_full_view_counter.isChecked())
         self.settings.setValue(
@@ -654,6 +658,7 @@ class QuickTransferDialog(QDialog):
     def __init__(self, operation: str, destinations: list[Path], hotkey: QKeySequence, accepted: Callable, parent=None) -> None:
         super().__init__(parent)
         self.hotkey, self._accepted = hotkey, accepted
+        self._submitted = False
         self.setObjectName("quickTransferDialog")
         self.setWindowTitle(f"Быстрое {operation}")
         self.setModal(True)
@@ -668,10 +673,6 @@ class QuickTransferDialog(QDialog):
         hint.setObjectName("quickTransferHint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(True)
-        self.progress.hide()
-        layout.addWidget(self.progress)
         self.destinations = QListWidget()
         self.destinations.setObjectName("quickTransferDestinations")
         self.destinations.installEventFilter(self)
@@ -684,6 +685,15 @@ class QuickTransferDialog(QDialog):
         self.repeat_shortcut = QShortcut(hotkey, self)
         self.repeat_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.repeat_shortcut.activated.connect(lambda: self._choose_selected(True))
+        self.confirm_shortcuts: list[QShortcut] = []
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(lambda: self._choose_selected(True))
+            self.confirm_shortcuts.append(shortcut)
+        self.escape_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
+        self.escape_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.escape_shortcut.activated.connect(self.reject)
         buttons = QHBoxLayout()
         add_path = QPushButton("Добавить путь…")
         add_path.setObjectName("settingsSecondaryButton")
@@ -728,30 +738,25 @@ class QuickTransferDialog(QDialog):
         self._choose_item(self.destinations.currentItem(), update_recent)
 
     def _choose_item(self, item: QListWidgetItem | None, update_recent: bool) -> None:
-        if item is None:
+        if item is None or self._submitted:
             return
         destination = item.data(Qt.ItemDataRole.UserRole)
         if isinstance(destination, Path) and destination.is_dir():
+            self._submitted = True
             self.destinations.setEnabled(False)
-            self.progress.setValue(0)
-            self._transfer_started = monotonic()
-            self.progress.show()
-            self._accepted(destination, update_recent, self._set_progress)
+            self._accepted(destination, update_recent)
             self.accept()
 
-    def _set_progress(self, completed: int, total: int, transferred: int = 0, total_bytes: int = 0) -> None:
-        self.progress.setRange(0, max(1, total))
-        self.progress.setValue(completed)
-        elapsed = max(0.001, monotonic() - self._transfer_started)
-        speed = transferred / elapsed
-        remaining = max(0, total_bytes - transferred)
-        eta = remaining / speed if speed > 0 and transferred else None
-        speed_text = _format_transfer_size(speed) + "/с" if transferred else "подготовка…"
-        eta_text = _format_transfer_eta(eta) if eta is not None else "—"
-        self.progress.setFormat(f"{completed} из {total} · {speed_text} · осталось {eta_text}")
-        QApplication.processEvents()
-
     def keyPressEvent(self, event) -> None:  # noqa: N802
+        if (
+            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+            and event.modifiers() in (
+                Qt.KeyboardModifier.NoModifier,
+                Qt.KeyboardModifier.KeypadModifier,
+            )
+        ):
+            self._choose_selected(True)
+            return
         if self._choose_number(event):
             return
         sequence = QKeySequence(QKeyCombination(event.modifiers(), Qt.Key(event.key())))
@@ -761,8 +766,12 @@ class QuickTransferDialog(QDialog):
         super().keyPressEvent(event)
 
     def eventFilter(self, watched, event) -> bool:
-        if watched is self.destinations and event.type() == QEvent.Type.KeyPress and self._choose_number(event):
-            return True
+        if watched is self.destinations and event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._choose_selected(True)
+                return True
+            if self._choose_number(event):
+                return True
         return super().eventFilter(watched, event)
 
     def _choose_number(self, event) -> bool:

@@ -421,6 +421,10 @@ class DecodeScheduler:
         for future in pending.values():
             future.cancel()
 
+    def pending_futures(self) -> tuple[Future, ...]:
+        """Возвращает снимок работ, которые могут ещё держать исходные файлы открытыми."""
+        return tuple(dict.fromkeys(self.pending.values()))
+
     def shutdown(self) -> None:
         """Останавливает очереди и передаёт их общей финальной фазе приложения."""
         self.cancel_pending()

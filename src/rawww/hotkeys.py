@@ -19,6 +19,7 @@ HOTKEY_DEFAULTS: dict[str, tuple[str, str]] = {
     "fullscreen": ("Полный экран", "F11"),
     "quick_mark": ("Быстрая метка", "M"),
     "comment": ("Комментарий", "C"),
+    "create_folder": ("Создать новую папку", "Ctrl+Shift+N"),
     "quick_copy": ("Быстрое копирование", "Shift+C"),
     "quick_move": ("Быстрое перемещение", "Shift+M"),
     **{f"rating_{rating}": (f"Рейтинг {rating}" if rating else "Сбросить рейтинг", str(rating)) for rating in range(6)},

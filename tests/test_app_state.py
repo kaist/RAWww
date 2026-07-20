@@ -7,6 +7,7 @@ import os
 import signal
 import tempfile
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
@@ -156,16 +157,185 @@ class AppStateTests(unittest.TestCase):
         old_items[removed].setSelected(True)
 
         workspace._remember_view_context()
+        workspace.workspace_active = True
+        workspace._begin_view_context_restore()
+        self.assertFalse(workspace.grid.updatesEnabled())
         workspace.grid.clear()
         new_items = {path: item(path) for path in (first, second)}
         for new_item in new_items.values():
             workspace.grid.addItem(new_item)
         workspace.items_by_path = new_items
         workspace._restore_pending_view_cursor()
+        # Завершение пакетного наполнения после фильтра не является повторной
+        # загрузкой папки и не должно затем сбрасывать курсор на первый файл.
+        workspace._restore_folder_grid_context()
 
         self.assertIs(workspace.grid.currentItem(), new_items[second])
         self.assertTrue(new_items[first].isSelected())
         self.assertTrue(new_items[second].isSelected())
+        self.assertTrue(workspace.grid.updatesEnabled())
+        workspace.close()
+        workspace.deleteLater()
+
+    def test_full_view_filter_rebuild_uses_open_file_as_single_cursor(self) -> None:
+        workspace = Workspace(defer_initial_scan=True)
+        old_grid_path = Path("/photos/old-grid.jpg")
+        open_path = Path("/photos/open.jpg")
+
+        old_grid_item = QListWidgetItem(old_grid_path.name)
+        old_grid_item.setData(Qt.ItemDataRole.UserRole, str(old_grid_path))
+        workspace.grid.addItem(old_grid_item)
+        workspace.items_by_path = {old_grid_path: old_grid_item}
+        workspace.grid.setCurrentItem(old_grid_item)
+        workspace.stack.setCurrentWidget(workspace.full_view)
+        workspace.current_path = open_path
+
+        workspace._remember_view_context()
+        workspace.grid.clear()
+        new_items = {}
+        for path in (old_grid_path, open_path):
+            item = QListWidgetItem(path.name)
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            workspace.grid.addItem(item)
+            new_items[path] = item
+        workspace.items_by_path = new_items
+        workspace._restore_pending_view_cursor()
+
+        self.assertIs(workspace.grid.currentItem(), new_items[open_path])
+        self.assertEqual(workspace.grid.selectedItems(), [new_items[open_path]])
+        workspace.close()
+        workspace.deleteLater()
+
+    def test_repeated_filter_rebuild_does_not_merge_transient_selection(self) -> None:
+        workspace = Workspace(defer_initial_scan=True)
+        original = Path("/photos/original.jpg")
+        transient = Path("/photos/transient.jpg")
+
+        items = {}
+        for path in (original, transient):
+            item = QListWidgetItem(path.name)
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            workspace.grid.addItem(item)
+            items[path] = item
+        workspace.items_by_path = items
+        workspace.grid.setCurrentItem(items[original])
+        workspace._remember_view_context()
+
+        workspace.grid.clearSelection()
+        workspace.grid.setCurrentItem(items[transient])
+        workspace._remember_view_context()
+        workspace._restore_pending_view_cursor()
+
+        self.assertIs(workspace.grid.currentItem(), items[original])
+        self.assertEqual(workspace.grid.selectedItems(), [items[original]])
+        workspace.close()
+        workspace.deleteLater()
+
+    def test_slow_filter_rebuild_reuses_delayed_folder_loader(self) -> None:
+        workspace = Workspace(defer_initial_scan=True)
+        path = Path("/photos/current.jpg")
+        item = QListWidgetItem(path.name)
+        item.setData(Qt.ItemDataRole.UserRole, str(path))
+        workspace.grid.addItem(item)
+        workspace.items_by_path = {path: item}
+        workspace.grid.setCurrentItem(item)
+        workspace.workspace_active = True
+
+        workspace._remember_view_context()
+        workspace._begin_view_context_restore()
+
+        self.assertTrue(workspace.grid_restore_loader_timer.isActive())
+        self.assertTrue(workspace.grid_restore_loader.isHidden())
+        workspace._show_grid_restore_loader_if_needed()
+        self.assertFalse(workspace.grid_restore_loader.isHidden())
+        self.assertEqual(workspace.grid_restore_loader_label.text(), "Обновляю список")
+
+        workspace._restore_pending_view_cursor()
+
+        self.assertTrue(workspace.grid_restore_loader.isHidden())
+        self.assertFalse(workspace.grid_restore_loader_timer.isActive())
+        workspace.close()
+        workspace.deleteLater()
+
+    def test_file_mutation_waits_for_running_decoder_and_shows_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(Path(directory), defer_initial_scan=True)
+            path = Path(directory) / "busy.raw"
+            path.touch()
+            running = Future()
+            self.assertTrue(running.set_running_or_notify_cancel())
+            workspace.scheduler.pending[(path, 256)] = running
+            operation = Mock()
+
+            workspace._run_after_file_consumers_release(
+                [path],
+                operation,
+                loading_text="Выполняется удаление",
+            )
+            self.app.processEvents()
+
+            operation.assert_not_called()
+            self.assertFalse(workspace.grid_restore_loader.isHidden())
+            self.assertEqual(
+                workspace.grid_restore_loader_label.text(),
+                "Выполняется удаление",
+            )
+
+            running.set_result(None)
+            QTest.qWait(60)
+
+            operation.assert_called_once_with()
+            self.assertTrue(workspace.grid_restore_loader.isHidden())
+            workspace.close()
+            workspace.deleteLater()
+
+    def test_delete_waits_for_busy_photo_before_unlinking_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(Path(directory), defer_initial_scan=True)
+            workspace.settings.setValue("behavior/delete_without_confirmation", True)
+            path = Path(directory) / "busy.raw"
+            path.touch()
+            running = Future()
+            self.assertTrue(running.set_running_or_notify_cancel())
+            workspace.scheduler.pending[(path, 256)] = running
+
+            workspace._delete_paths([path], permanent=True)
+            self.app.processEvents()
+
+            self.assertTrue(path.exists())
+            self.assertEqual(
+                workspace.grid_restore_loader_label.text(),
+                "Выполняется удаление",
+            )
+
+            running.set_result(None)
+            QTest.qWait(60)
+
+            self.assertFalse(path.exists())
+            self.assertTrue(workspace.grid_restore_loader.isHidden())
+            workspace.close()
+            workspace.deleteLater()
+
+    def test_return_from_full_view_replaces_stale_grid_selection(self) -> None:
+        workspace = Workspace(defer_initial_scan=True)
+        old_path = Path("/photos/old.jpg")
+        current_path = Path("/photos/current.jpg")
+        items = {}
+        for path in (old_path, current_path):
+            item = QListWidgetItem(path.name)
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            workspace.grid.addItem(item)
+            items[path] = item
+        workspace.items_by_path = items
+        workspace.grid.setCurrentItem(items[old_path])
+        workspace.stack.setCurrentWidget(workspace.full_view)
+        workspace.current_path = current_path
+        workspace.workspace_state.current_photo = current_path
+
+        workspace._restore_grid_context()
+
+        self.assertIs(workspace.grid.currentItem(), items[current_path])
+        self.assertEqual(workspace.grid.selectedItems(), [items[current_path]])
         workspace.close()
         workspace.deleteLater()
 
@@ -208,6 +378,42 @@ class AppStateTests(unittest.TestCase):
             self.assertEqual(workspace.view_paths, [paths[1], paths[3]])
             self.assertEqual(workspace.grid.count(), 2)
             self.assertEqual(workspace.full_view.photo_strip.count(), 2)
+            workspace.close()
+            workspace.deleteLater()
+
+    def test_face_filter_clear_reveals_grid_only_after_cursor_restore(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(defer_initial_scan=True)
+            paths = [Path(directory) / f"photo-{index}.jpg" for index in range(4)]
+            for path in paths:
+                path.touch()
+            workspace.workspace_active = True
+            workspace.cache_ready = True
+            workspace.all_paths = paths
+            workspace.photo_details = {path.name: {} for path in paths}
+            workspace._apply_view()
+            self.app.processEvents()
+            workspace.grid.setCurrentItem(workspace.items_by_path[paths[2]])
+
+            workspace.face_reference = [1.0, 0.0]
+            workspace._face_match_names = {paths[1].name, paths[2].name}
+            workspace._apply_view()
+            self.assertFalse(workspace.grid.updatesEnabled())
+            self.app.processEvents()
+            self.assertIs(
+                workspace.grid.currentItem(),
+                workspace.items_by_path[paths[2]],
+            )
+
+            workspace._clear_face_search()
+
+            self.assertFalse(workspace.grid.updatesEnabled())
+            self.app.processEvents()
+            self.assertTrue(workspace.grid.updatesEnabled())
+            self.assertIs(
+                workspace.grid.currentItem(),
+                workspace.items_by_path[paths[2]],
+            )
             workspace.close()
             workspace.deleteLater()
 

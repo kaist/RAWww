@@ -353,6 +353,11 @@ class AiPipeline:
                 return job.pending if job is not None else 0
             return len(self.futures)
 
+    def pending_futures(self) -> tuple[Future, ...]:
+        """Возвращает потокобезопасный снимок незавершённых AI-задач."""
+        with self._futures_lock:
+            return tuple(self.futures)
+
     def progress(self, folder: Path) -> tuple[int, int, bool]:
         with self._futures_lock:
             job = self.jobs.get(folder)

@@ -375,3 +375,8 @@ class MetadataPipeline:
             future.cancel()
         if workers is not None:
             retire_executor(workers)
+
+    def pending_futures(self) -> tuple[Future, ...]:
+        """Возвращает снимок пакетов ExifTool перед файловой операцией."""
+        with self._lock:
+            return tuple(self.futures)
