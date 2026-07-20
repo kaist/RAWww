@@ -23,13 +23,38 @@ NS = {
     "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
     "xmp": "http://ns.adobe.com/xap/1.0/",
     "dc": "http://purl.org/dc/elements/1.1/",
+    "photoshop": "http://ns.adobe.com/photoshop/1.0/",
     "mwg-rs": "http://www.metadataworkinggroup.com/schemas/regions/",
     "stArea": "http://ns.adobe.com/xmp/sType/Area#",
     "rawww": "https://shotsync.ru/ns/ctrlka/1.0/",
 }
 XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
 CONTROLLED_FIELDS = ("rating", "color_label", "comment", "keywords")
+
+# Цветовая метка → имя xmp:Label с заглавной буквы и число photoshop:Urgency.
+# Lightroom и Bridge сопоставляют xmp:Label по имени цвета из активного набора
+# меток, поэтому значение обязано быть капитализированным ("Red", а не "red").
+# Capture One опирается на ту же пару и на photoshop:Urgency (Red→1, Green→2,
+# Blue→3, Pink→4, Purple→5, Orange→6, Yellow→7), поэтому пишем оба поля.
+COLOR_LABELS: dict[str, tuple[str, str]] = {
+    "red": ("Red", "1"),
+    "green": ("Green", "2"),
+    "blue": ("Blue", "3"),
+    "pink": ("Pink", "4"),
+    "purple": ("Purple", "5"),
+    "orange": ("Orange", "6"),
+    "yellow": ("Yellow", "7"),
+}
 _UNSET = object()
+
+
+def color_label_output(color_label: str) -> tuple[str, str | None]:
+    """Переводит внутреннюю метку в имя xmp:Label и число photoshop:Urgency."""
+    value = (color_label or "").strip()
+    if not value:
+        return "", None
+    return COLOR_LABELS.get(value.casefold(), (value, None))
+
 
 for _prefix, _uri in NS.items():
     ET.register_namespace(_prefix, _uri)
@@ -282,14 +307,24 @@ def update_xmp_document(
     for existing in _descriptions(document):
         _remove_property(existing, "xmp", "Rating")
         _remove_property(existing, "xmp", "Label")
+        _remove_property(existing, "photoshop", "Urgency")
         _remove_property(existing, "dc", "description")
         _remove_property(existing, "dc", "subject")
     description = _ensure_description(document)
     description.set(_q("rawww", "Creator"), "Контролька")
+    # Имена распознанных людей попадают и в ключевые слова, а не только в
+    # регионы mwg-rs: Capture One не читает регионы лиц, поэтому без dc:subject
+    # человек в нём не появился бы.
+    keywords = tuple(dict.fromkeys([
+        *fields.keywords,
+        *(name for name in (str(region.get("name") or "").strip() for region in regions) if name),
+    ]))
+    label_text, urgency = color_label_output(fields.color_label)
     _replace_simple_property(description, "xmp", "Rating", fields.rating)
-    _replace_simple_property(description, "xmp", "Label", fields.color_label)
+    _replace_simple_property(description, "xmp", "Label", label_text)
+    _replace_simple_property(description, "photoshop", "Urgency", urgency)
     _replace_alt_property(description, "dc", "description", fields.comment)
-    _replace_bag_property(description, "dc", "subject", fields.keywords)
+    _replace_bag_property(description, "dc", "subject", keywords)
     _merge_face_regions(description, regions)
     if not _document_has_metadata(document):
         # Чужой пустой sidecar не удаляем: оставляем минимальный пакет с маркером.

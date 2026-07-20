@@ -31,6 +31,22 @@ class XmpTests(unittest.TestCase):
         self.assertIn("<rdf:li>Anna</rdf:li>", xmp)
         self.assertIn('stArea:x="0.250000"', xmp)
 
+    def test_color_label_is_capitalized_with_urgency(self) -> None:
+        # Capture One и Lightroom не сопоставляют метку в нижнем регистре, а
+        # Capture One дополнительно опирается на photoshop:Urgency.
+        xmp = build_xmp({"rating": 3, "color_label": "red"}, [], {})
+        self.assertIn("<xmp:Label>Red</xmp:Label>", xmp)
+        self.assertIn("<photoshop:Urgency>1</photoshop:Urgency>", xmp)
+        self.assertNotIn("<xmp:Label>red</xmp:Label>", xmp)
+
+    def test_named_face_lands_in_keywords_and_regions(self) -> None:
+        # Имя человека нужно и в регионах (Lightroom), и в ключевых словах, так
+        # как Capture One не читает mwg-rs регионы лиц.
+        detail = {"faces": [{"embedding": [1.0, 0.0], "bbox": {"x": .1, "y": .2, "width": .3, "height": .4}}]}
+        xmp = build_xmp(detail, [{"name": "Иванов", "embedding": [1.0, 0.0]}], {})
+        self.assertIn("<mwg-rs:Name>Иванов</mwg-rs:Name>", xmp)
+        self.assertIn("<rdf:li>Иванов</rdf:li>", xmp)
+
     def test_empty_metadata_does_not_leave_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             photo = Path(directory) / "image.NEF"
