@@ -106,6 +106,7 @@ from .theme import (
     _chrome_icon,
     _color_swatch_icon,
     _fomantic_icon,
+    _orientation_icon,
     _title_bar_icon,
 )
 from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence
@@ -146,6 +147,9 @@ CARD_TARGET_WIDTH = 200
 CARD_MAX_WIDTH = 280
 CARD_SIZE_TARGETS = (120, 150, CARD_TARGET_WIDTH, 280)
 CARD_ASPECT = 3 / 2
+# Максимальный размер виджета в Qt: нужен, чтобы снять фиксированную ширину или
+# высоту ленты при смене её ориентации (setFixedWidth/Height ставит min==max).
+QT_WIDGET_SIZE_MAX = 16777215
 RAM_CACHE_LIMIT = 96
 THUMBNAIL_RAM_CACHE_LIMIT_BYTES = 700 * 1024 * 1024
 FULL_PRELOAD_RADIUS = 10
@@ -648,6 +652,7 @@ class PhotoGrid(QListWidget):
         self.setMovement(QListWidget.Movement.Static)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.card_size = 1
+        self.vertical = False
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
@@ -831,7 +836,10 @@ class PhotoGrid(QListWidget):
         columns = max(min_columns, min(max_columns, round(available / target_width)))
         layout_width = max(1, available - 2)
         width, remainder = divmod(layout_width, columns)
-        height = int((available / columns) / CARD_ASPECT)
+        # Портретные кадры выше ширины, поэтому в вертикальном режиме соотношение
+        # переворачивается: сетка вытягивает карточки под вертикальные снимки.
+        aspect = 1 / CARD_ASPECT if self.vertical else CARD_ASPECT
+        height = int((available / columns) / aspect)
         icon_size = QSize(width + bool(remainder), height)
         grid_size = QSize()
         spacing = 0
@@ -871,6 +879,14 @@ class PhotoGrid(QListWidget):
         self._last_icon_size = QSize()
         self._update_card_size()
         self.cardSizeChanged.emit(self.card_size)
+
+    def set_vertical(self, vertical: bool) -> None:
+        """Переключает ориентацию карточек между альбомной и портретной."""
+        if vertical == self.vertical:
+            return
+        self.vertical = vertical
+        self._last_icon_size = QSize()
+        self._update_card_size()
 
 
 class AudioToggleButton(QToolButton):
@@ -1154,9 +1170,10 @@ class ViewerStrip(QListWidget):
     seriesToggleRequested = Signal(Path)
     viewportChanged = Signal()
 
-    def __init__(self, *, vertical: bool = False) -> None:
+    def __init__(self, *, vertical: bool = False, portrait: bool = False) -> None:
         super().__init__()
         self.vertical = vertical
+        self.portrait = portrait
         self._paths: list[Path] = []
         self._items_by_path: dict[Path, QListWidgetItem] = {}
         self.setObjectName("seriesStrip" if vertical else "photoStrip")
@@ -1168,26 +1185,68 @@ class ViewerStrip(QListWidget):
         self.setWordWrap(False)
         self.setSpacing(3)
         self.setItemDelegate(PhotoCardDelegate(self, compact=True))
-        if vertical:
+        self._apply_strip_metrics()
+        self.itemClicked.connect(self._activate)
+        self._connected_scroll_bar = None
+        self._connect_scroll_signal()
+
+    def _connect_scroll_signal(self) -> None:
+        """Подписывает viewportChanged на ту полосу прокрутки, вдоль которой идёт лента."""
+        bar = self.verticalScrollBar() if self.vertical else self.horizontalScrollBar()
+        bar.valueChanged.connect(self.viewportChanged)
+        self._connected_scroll_bar = bar
+
+    def _apply_strip_metrics(self) -> None:
+        """Задаёт форму карточек и направление ленты под текущую ориентацию.
+
+        Портретные снимки получают вытянутые карточки, а сама лента становится
+        либо горизонтальной внизу, либо вертикальной сбоку. Фиксируется только
+        поперечный размер; вдоль ленты остаётся прокрутка.
+        """
+        if self.portrait:
+            grid = QSize(104, 138)
+            icon = QSize(98, 132)
+        else:
+            grid = QSize(118, 104)
+            icon = QSize(112, 98)
+        self.setWrapping(False)
+        self.setGridSize(grid)
+        self.setIconSize(icon)
+        if self.vertical:
             self.setFlow(QListWidget.Flow.TopToBottom)
-            self.setWrapping(False)
-            self.setGridSize(QSize(118, 104))
-            self.setIconSize(QSize(112, 98))
-            self.setFixedWidth(136)
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(QT_WIDGET_SIZE_MAX)
+            self.setFixedWidth(grid.width() + 18)
             self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         else:
             self.setFlow(QListWidget.Flow.LeftToRight)
-            self.setWrapping(False)
-            self.setGridSize(QSize(118, 104))
-            self.setIconSize(QSize(112, 98))
-            self.setFixedHeight(108)
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(QT_WIDGET_SIZE_MAX)
+            self.setFixedHeight(grid.height() + 4)
             self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.setHorizontalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
-        self.itemClicked.connect(self._activate)
-        scroll_bar = self.verticalScrollBar() if vertical else self.horizontalScrollBar()
-        scroll_bar.valueChanged.connect(self.viewportChanged)
+
+    def set_orientation(self, *, vertical: bool | None = None, portrait: bool | None = None) -> None:
+        """Переносит ленту между нижним и боковым положением и меняет форму карточек."""
+        new_vertical = self.vertical if vertical is None else vertical
+        new_portrait = self.portrait if portrait is None else portrait
+        if new_vertical == self.vertical and new_portrait == self.portrait:
+            return
+        flow_changed = new_vertical != self.vertical
+        if flow_changed and self._connected_scroll_bar is not None:
+            try:
+                self._connected_scroll_bar.valueChanged.disconnect(self.viewportChanged)
+            except (TypeError, RuntimeError):
+                pass
+            self._connected_scroll_bar = None
+        self.vertical = new_vertical
+        self.portrait = new_portrait
+        self._apply_strip_metrics()
+        if flow_changed:
+            self._connect_scroll_signal()
 
     def _activate(self, item: QListWidgetItem) -> None:
         """Синхронизирует визуальный выбор и просит рабочую вкладку открыть путь."""
@@ -2053,19 +2112,42 @@ class FullView(QFrame):
 
         self.strip_panel = QFrame(self)
         self.strip_panel.setObjectName("stripPanel")
-        strip_layout = QVBoxLayout(self.strip_panel)
-        strip_layout.setContentsMargins(0, 0, 0, 0)
-        strip_layout.setSpacing(0)
-        strip_layout.addWidget(strip_header)
-        strip_layout.addWidget(self.photo_strip)
+        self._strip_layout = QVBoxLayout(self.strip_panel)
+        self._strip_layout.setContentsMargins(0, 0, 0, 0)
+        self._strip_layout.setSpacing(0)
+        self._strip_layout.addWidget(strip_header)
+        self._strip_layout.addWidget(self.photo_strip)
+
+        # Боковой контейнер: в вертикальном режиме сюда переезжает лента превью,
+        # чтобы под портретные снимки она шла справа, а не занимала низ кадра.
+        self.right_strip_panel = QFrame(self)
+        self.right_strip_panel.setObjectName("stripPanel")
+        self._right_strip_layout = QVBoxLayout(self.right_strip_panel)
+        self._right_strip_layout.setContentsMargins(0, 0, 0, 0)
+        self._right_strip_layout.setSpacing(0)
+        self.right_strip_panel.hide()
+
+        self._vertical = False
         self._strip_level = self._load_strip_level()
         self._apply_strip_level()
+
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
+        left_layout.addWidget(stage, 1)
+        left_layout.addWidget(self.strip_panel)
+
+        content_row = QHBoxLayout()
+        content_row.setContentsMargins(0, 0, 0, 0)
+        content_row.setSpacing(0)
+        content_row.addWidget(left_column, 1)
+        content_row.addWidget(self.right_strip_panel)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(stage, 1)
-        layout.addWidget(self.strip_panel)
+        layout.addLayout(content_row)
         self.zoom_action = QAction(self)
         self.zoom_action.setShortcut(QKeySequence("Z"))
         self.zoom_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -2083,11 +2165,33 @@ class FullView(QFrame):
         return self.STRIP_COLLAPSED if settings.value("viewer_strip_collapsed", False, bool) else self.STRIP_FULL
 
     def _apply_strip_level(self) -> None:
+        strip_full = self._strip_level == self.STRIP_FULL
+        # Панель с метабаром и переключателем остаётся снизу в любом режиме; в
+        # вертикальном сама лента живёт в боковом контейнере, поэтому её
+        # видимость управляется отдельно.
         self.strip_panel.setVisible(self._strip_level != self.STRIP_HIDDEN)
-        self.photo_strip.setVisible(self._strip_level == self.STRIP_FULL)
-        collapsed = self._strip_level != self.STRIP_FULL
+        self.photo_strip.setVisible(strip_full)
+        self.right_strip_panel.setVisible(self._vertical and strip_full)
+        collapsed = not strip_full
         self.strip_toggle.setIcon(_fomantic_icon("chevron-up" if collapsed else "chevron-down", 12))
         self.strip_toggle.setToolTip("Развернуть ленту превью" if collapsed else "Свернуть ленту превью")
+
+    def set_vertical(self, vertical: bool) -> None:
+        """Переносит ленту превью вниз или вправо и переводит карточки в портрет."""
+        if vertical == self._vertical:
+            return
+        self._vertical = vertical
+        if vertical:
+            self._strip_layout.removeWidget(self.photo_strip)
+            self.photo_strip.set_orientation(vertical=True, portrait=True)
+            self._right_strip_layout.addWidget(self.photo_strip)
+        else:
+            self._right_strip_layout.removeWidget(self.photo_strip)
+            self.photo_strip.set_orientation(vertical=False, portrait=False)
+            self._strip_layout.addWidget(self.photo_strip)
+        self.series_strip.set_orientation(portrait=vertical)
+        self._apply_strip_level()
+        QTimer.singleShot(0, self._position_video_controls)
 
     def set_strip_level(self, level: int) -> None:
         level = max(self.STRIP_FULL, min(self.STRIP_HIDDEN, level))
@@ -3122,11 +3226,23 @@ class CenteredSearchEdit(QLineEdit):
 
 
 class GridZoomControls(QFrame):
-    """Компактные элементы управления наложением для изменения размера миниатюр."""
+    """Компактные элементы управления наложением для изменения размера миниатюр.
 
-    def __init__(self, changed: Callable[[int], None], parent=None) -> None:
+    Кроме кнопок масштаба здесь живёт переключатель ориентации сетки: одна
+    кнопка меняет альбомный режим на портретный и обратно, а её значок отражает
+    текущее состояние.
+    """
+
+    def __init__(
+        self,
+        changed: Callable[[int], None],
+        orientation_toggled: Callable[[], None] | None = None,
+        vertical: bool = False,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("gridZoomControls")
+        self._vertical = vertical
         layout = QHBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(1)
@@ -3142,7 +3258,28 @@ class GridZoomControls(QFrame):
             button.setToolTip(tooltip)
             button.clicked.connect(lambda _checked=False, amount=delta: changed(amount))
             layout.addWidget(button)
+        self.orientation_button = QToolButton(self)
+        self.orientation_button.setObjectName("gridZoomButton")
+        self.orientation_button.setIconSize(QSize(18, 18))
+        self.orientation_button.setFixedSize(22, 22)
+        if orientation_toggled is not None:
+            self.orientation_button.clicked.connect(lambda _checked=False: orientation_toggled())
+        layout.addWidget(self.orientation_button)
+        self._refresh_orientation_button()
         self.adjustSize()
+
+    def set_vertical(self, vertical: bool) -> None:
+        """Обновляет значок и подсказку кнопки под текущую ориентацию сетки."""
+        self._vertical = vertical
+        self._refresh_orientation_button()
+
+    def _refresh_orientation_button(self) -> None:
+        self.orientation_button.setIcon(_orientation_icon(self._vertical, 18, "#aeb5bf"))
+        self.orientation_button.setToolTip(
+            "Вертикальная ориентация — нажмите для горизонтальной"
+            if self._vertical
+            else "Горизонтальная ориентация — нажмите для вертикальной"
+        )
 
 
 class FavoritesTrashButton(QToolButton):
@@ -3670,6 +3807,7 @@ class Workspace(QMainWindow):
         self.current_dir = initial_directory or self._initial_directory()
         thumbnail_size = max(0, min(3, self.settings.value("thumbnail_size", 1, int)))
         self.workspace_state = WorkspaceState(self.current_dir, thumbnail_size=thumbnail_size)
+        self.vertical_orientation = self.settings.value("interface/vertical_orientation", False, bool)
         self.folder_watcher = QFileSystemWatcher(self)
         self.folder_watcher.directoryChanged.connect(self._folder_changed)
         self.folder_change_timer = QTimer(self)
@@ -3711,6 +3849,7 @@ class Workspace(QMainWindow):
         self.stack = QStackedWidget(self)
         self.grid_page = self._build_grid_page()
         self.full_view = FullView(self.stack)
+        self.full_view.set_vertical(self.vertical_orientation)
         self.full_view.exitRequested.connect(self.show_grid)
         self.full_view.originalRequested.connect(self._request_original_zoom)
         self.full_view.nextRequested.connect(self.next_image)
@@ -4137,6 +4276,7 @@ class Workspace(QMainWindow):
 
         self.grid = PhotoGrid()
         self.grid.card_size = self.workspace_state.thumbnail_size
+        self.grid.vertical = self.vertical_orientation
         self.grid._last_icon_size = QSize()
         self.grid._update_card_size()
         self.grid.cardSizeChanged.connect(self._remember_thumbnail_size)
@@ -4587,7 +4727,12 @@ class Workspace(QMainWindow):
         self.grid_restore_loader_timer.setSingleShot(True)
         self.grid_restore_loader_timer.setInterval(100)
         self.grid_restore_loader_timer.timeout.connect(self._show_grid_restore_loader_if_needed)
-        self.grid_zoom_controls = GridZoomControls(self.grid.change_card_size, self.grid_content_stack)
+        self.grid_zoom_controls = GridZoomControls(
+            self.grid.change_card_size,
+            self._toggle_orientation,
+            self.vertical_orientation,
+            self.grid_content_stack,
+        )
         self.grid_content_stack.installEventFilter(self)
         self._position_grid_zoom_controls()
         content_layout.addWidget(self.grid_content_stack, 1)
@@ -10004,6 +10149,16 @@ class Workspace(QMainWindow):
     def _remember_thumbnail_size(self, size: int) -> None:
         self.workspace_state.thumbnail_size = size
         self.settings.setValue("thumbnail_size", size)
+        QTimer.singleShot(0, self._keep_current_grid_item_visible)
+
+    def _toggle_orientation(self) -> None:
+        """Переключает всю раскладку между альбомной и портретной ориентацией."""
+        self.vertical_orientation = not self.vertical_orientation
+        self.settings.setValue("interface/vertical_orientation", self.vertical_orientation)
+        self.grid.set_vertical(self.vertical_orientation)
+        self.grid_zoom_controls.set_vertical(self.vertical_orientation)
+        self.full_view.set_vertical(self.vertical_orientation)
+        self._position_grid_zoom_controls()
         QTimer.singleShot(0, self._keep_current_grid_item_visible)
 
     def _keep_current_grid_item_visible(self) -> None:

@@ -1930,6 +1930,29 @@ def _color_swatch_icon(color: str | None) -> QIcon:
     painter.end()
     return QIcon(pixmap)
 
+def _orientation_icon(vertical: bool, size: int = 18, color: str = "#aeb5bf") -> QIcon:
+    """Рисует значок ориентации сетки: портрет для вертикали, ландшафт для горизонтали.
+
+    Значок отражает текущее состояние переключателя, поэтому одна кнопка и
+    показывает режим, и намекает на то, что его можно сменить.
+    """
+    pixmap = QPixmap(size * 2, size * 2)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color), max(2, size // 8))
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    full = pixmap.rect()
+    if vertical:
+        rect = QRect(full.width() // 2 - size * 6 // 10, size * 3 // 10, size * 12 // 10, size * 18 // 10)
+    else:
+        rect = QRect(size * 3 // 10, full.height() // 2 - size * 6 // 10, size * 18 // 10, size * 12 // 10)
+    painter.drawRoundedRect(rect, size // 6, size // 6)
+    painter.end()
+    return QIcon(pixmap)
+
 def _chrome_icon(kind: str) -> QIcon:
     """Рисует небольшие единообразные значки для элементов оконной рамки."""
     pixmap = QPixmap(32, 32)
