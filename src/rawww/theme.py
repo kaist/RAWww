@@ -1580,63 +1580,6 @@ def apply_theme(app: QApplication) -> None:
             border-color: #79aaff;
             color: #ffffff;
         }
-        QToolButton#qualityButton {
-            min-height: 21px;
-            border: 1px solid #363636;
-            border-radius: 12px;
-            background: #242424;
-            color: #c9c9c9;
-            padding: 0 9px;
-            font-size: 10px;
-        }
-        QToolButton#qualityButton::menu-indicator { image: none; width: 0; }
-        QToolButton#qualityButton:hover { background: #303030; color: #f0f0f0; }
-        QToolButton#qualityButton:checked {
-            background: #315b80;
-            border-color: #79aaff;
-            color: #ffffff;
-        }
-        QMenu#qualityPopup {
-            background: #202020;
-            border: 1px solid #363636;
-            border-radius: 10px;
-            padding: 0;
-        }
-        QMenu#qualityPopup::item { background: transparent; padding: 0; }
-        QWidget#qualityPopupBody { background: transparent; }
-        QLabel#qualityPopupHeading {
-            color: #f0f0f0;
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 0.5px;
-        }
-        QLabel#qualityPopupHint {
-            color: #8a8f98;
-            font-size: 9px;
-            padding-bottom: 4px;
-        }
-        QLabel#qualityRowTitle { color: #c9c9c9; font-size: 10px; font-weight: 600; }
-        QLabel#qualityRowValue { color: #79aaff; font-size: 11px; font-weight: 700; min-width: 16px; }
-        QSlider#qualitySlider { background: transparent; min-height: 18px; }
-        QSlider#qualitySlider::groove:horizontal {
-            height: 4px;
-            background: #1b1b1b;
-            border-radius: 2px;
-        }
-        QSlider#qualitySlider::sub-page:horizontal {
-            height: 4px;
-            background: #3d6f9d;
-            border-radius: 2px;
-        }
-        QSlider#qualitySlider::handle:horizontal {
-            width: 12px;
-            height: 12px;
-            margin: -5px 0;
-            background: #dcdcdc;
-            border-radius: 6px;
-        }
-        QSlider#qualitySlider::handle:horizontal:hover { background: #ffffff; }
-        QSlider#qualitySlider::tick:horizontal { background: #363636; }
         QProgressBar {
             border: 1px solid #171717;
             border-radius: 2px;

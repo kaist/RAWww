@@ -57,7 +57,7 @@ class CacheTests(unittest.TestCase):
             worker_thread_ids.append(threading.get_ident())
             started.set()
             release.wait(2)
-            return PreparedCache(), [], [], []
+            return PreparedCache(), [], []
 
         with patch.object(pipeline, "_prepare_job", prepare):
             caller_thread_id = threading.get_ident()

@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QEvent, QRect, QSettings, QStringListModel, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QRect, QSettings, QStringListModel, QTimer, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QCheckBox, QComboBox, QCompleter, QFileDialog, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMenu, QMessageBox, QPushButton, QSlider, QStyle, QStyleOptionButton, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QWidgetAction
+from PySide6.QtWidgets import QCheckBox, QComboBox, QCompleter, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox, QPushButton, QStyle, QStyleOptionButton, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
 from typing import Callable
 from uuid import uuid4
 from .shotsync_client import ShotSyncClient
@@ -523,113 +523,3 @@ class CodeCompletingLineEdit(QLineEdit):
         self.setText(updated)
         self.setCursorPosition(start)
         self.textEdited.emit(updated)
-
-
-class QualityFilterButton(QToolButton):
-    """Кнопка «Качество» со всплывающим попапом из двух ползунков.
-
-    Ползунки задают минимальные баллы NIMA по шкале 0–10: техническое качество и
-    эстетику. Значение ``0`` отключает ось (кадры не отсеиваются), значение ``N``
-    оставляет только кадры с баллом не ниже ``N`` — фильтрация идёт от худших к
-    лучшим. Итог отдаём наружу сигналом ``thresholdsChanged`` и, по требованию
-    интерфейса, только по **отпусканию** ползунка, чтобы список не пересобирался
-    на каждый пиксель перетаскивания.
-    """
-
-    thresholdsChanged = Signal(int, int)
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setObjectName("qualityButton")
-        self.setText("Качество")
-        self.setCheckable(True)
-        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._menu = QMenu(self)
-        self._menu.setObjectName("qualityPopup")
-        self._menu.aboutToShow.connect(lambda: self.setChecked(True))
-        self._menu.aboutToHide.connect(self._sync_checked)
-        action = QWidgetAction(self._menu)
-        action.setDefaultWidget(self._build_body())
-        self._menu.addAction(action)
-        self.setMenu(self._menu)
-        self._update_text()
-
-    def _build_body(self) -> QWidget:
-        body = QWidget()
-        body.setObjectName("qualityPopupBody")
-        layout = QGridLayout(body)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setHorizontalSpacing(10)
-        layout.setVerticalSpacing(6)
-        heading = QLabel("Порог качества")
-        heading.setObjectName("qualityPopupHeading")
-        layout.addWidget(heading, 0, 0, 1, 3)
-        hint = QLabel("0 — без фильтра, дальше от худших к лучшим")
-        hint.setObjectName("qualityPopupHint")
-        layout.addWidget(hint, 1, 0, 1, 3)
-        self._quality_slider, self._quality_value = self._add_row(layout, 2, "Качество")
-        self._aesthetic_slider, self._aesthetic_value = self._add_row(layout, 4, "Эстетика")
-        return body
-
-    def _add_row(self, layout: QGridLayout, row: int, title: str) -> tuple[QSlider, QLabel]:
-        name = QLabel(title)
-        name.setObjectName("qualityRowTitle")
-        value = QLabel("0")
-        value.setObjectName("qualityRowValue")
-        value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setObjectName("qualitySlider")
-        slider.setMinimum(0)
-        slider.setMaximum(10)
-        slider.setSingleStep(1)
-        slider.setPageStep(1)
-        slider.setTickInterval(1)
-        slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        slider.setFixedWidth(200)
-        slider.valueChanged.connect(lambda amount, label=value: label.setText(str(amount)))
-        slider.sliderReleased.connect(self._emit)
-        # Клавиатура и клик по дорожке не дают sliderReleased, но обязаны
-        # применяться сразу; отличаем их от перетаскивания по sliderDown.
-        slider.actionTriggered.connect(lambda _action, control=slider: self._changed_by_step(control))
-        layout.addWidget(name, row, 0)
-        layout.addWidget(value, row, 2)
-        layout.addWidget(slider, row + 1, 0, 1, 3)
-        return slider, value
-
-    def _changed_by_step(self, slider: QSlider) -> None:
-        if not slider.isSliderDown():
-            self._emit()
-
-    def _emit(self) -> None:
-        self._update_text()
-        self.thresholdsChanged.emit(self.quality_threshold(), self.aesthetic_threshold())
-
-    def _sync_checked(self) -> None:
-        self.setChecked(self.quality_threshold() > 0 or self.aesthetic_threshold() > 0)
-
-    def _update_text(self) -> None:
-        quality = self.quality_threshold()
-        aesthetic = self.aesthetic_threshold()
-        parts = []
-        if quality > 0:
-            parts.append(f"К≥{quality}")
-        if aesthetic > 0:
-            parts.append(f"Э≥{aesthetic}")
-        self.setText("Качество  " + " ".join(parts) if parts else "Качество")
-        self.setChecked(quality > 0 or aesthetic > 0)
-
-    def quality_threshold(self) -> int:
-        return self._quality_slider.value()
-
-    def aesthetic_threshold(self) -> int:
-        return self._aesthetic_slider.value()
-
-    def reset(self) -> None:
-        """Возвращает оба порога в 0, не поднимая сигнал (вызывается при смене папки)."""
-        for slider in (self._quality_slider, self._aesthetic_slider):
-            slider.blockSignals(True)
-            slider.setValue(0)
-            slider.blockSignals(False)
-        self._quality_value.setText("0")
-        self._aesthetic_value.setText("0")
-        self._update_text()

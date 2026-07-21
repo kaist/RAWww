@@ -85,7 +85,6 @@ from .decode_scheduler import DecodeScheduler
 from .shotsync_client import ShotSyncClient
 from .face_sets_sync import merge_server_faces, upload_fields_for_entry
 from .face_search import FACE_MATCH_THRESHOLD, FaceSearchIndex, indexed_face_matches
-from .nima import quality_scores
 from .shotsync_login import ShotSyncLoginDialog
 from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
@@ -110,7 +109,7 @@ from .theme import (
     _title_bar_icon,
 )
 from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence
-from .widgets import QualityFilterButton, SettingsCheckBox
+from .widgets import SettingsCheckBox
 from .transfer_queue import TransferEntry, TransferManager, TransferQueuePanel, TransferTask
 from .card_import import CardImportScan, build_backup_entries, build_import_entries, merge_scans, scan_card
 from .dialogs import (
@@ -4549,23 +4548,8 @@ class Workspace(QMainWindow):
         self.eyes_toggle.clicked.connect(self._toggle_eyes_filter)
         eyes_layout.addWidget(self.eyes_toggle)
 
-        self.quality_group = QWidget()
-        self.quality_group.setObjectName("aiPanelGroup")
-        quality_layout = QHBoxLayout(self.quality_group)
-        quality_layout.setContentsMargins(0, 0, 0, 0)
-        quality_layout.setSpacing(3)
-        self.quality_panel_title = QLabel("КАЧЕСТВО")
-        self.quality_panel_title.setObjectName("aiPanelTitle")
-        quality_layout.addWidget(self.quality_panel_title)
-        # Кнопка открывает попап с двумя ползунками порогов NIMA (качество и
-        # эстетика); фильтр применяется по отпусканию ползунка.
-        self.quality_button = QualityFilterButton()
-        self.quality_button.thresholdsChanged.connect(self._apply_view)
-        quality_layout.addWidget(self.quality_button)
-
         ai_layout.addStretch(1)
         ai_layout.addWidget(self.eyes_group)
-        ai_layout.addWidget(self.quality_group)
         ai_layout.addWidget(self.shot_group)
         self.ai_panel.hide()
 
@@ -8654,16 +8638,14 @@ class Workspace(QMainWindow):
         if not hasattr(self, "faces_panel_button"):
             return
         has_faces = any(detail.get("faces") for detail in self.photo_details.values())
-        has_quality = any(detail.get("quality") for detail in self.photo_details.values())
         has_series = self._has_available_series(self.view_paths or self.all_paths)
         if hasattr(self, "ai_panel"):
-            self.ai_panel.setVisible(has_faces or has_quality or has_series)
+            self.ai_panel.setVisible(has_faces or has_series)
             self.series_faces_group.setVisible(has_faces or has_series)
             self.series_toggle.setVisible(True)
             self.faces_panel_button.setVisible(has_faces)
             self.shot_group.setVisible(has_faces)
             self.eyes_group.setVisible(has_faces)
-            self.quality_group.setVisible(has_quality)
             counts = {value: 0 for value in self.shot_buttons}
             rating = self.rating_filter.currentData()
             color = self.color_filter.currentData()
@@ -8970,7 +8952,6 @@ class Workspace(QMainWindow):
         if not hasattr(self, "eyes_filter"):
             return
         has_faces = any(detail.get("faces") for detail in self.photo_details.values())
-        has_quality = any(detail.get("quality") for detail in self.photo_details.values())
         stale = []
         if not has_faces and self.eyes_filter.currentData() is not None:
             stale.append(self.eyes_filter)
@@ -8980,9 +8961,6 @@ class Workspace(QMainWindow):
             control.blockSignals(True)
             control.setCurrentIndex(0)
             control.blockSignals(False)
-        if not has_quality and hasattr(self, "quality_button"):
-            if self.quality_button.quality_threshold() or self.quality_button.aesthetic_threshold():
-                self.quality_button.reset()
 
     def _apply_view(self, *_args) -> None:
         """Перестраивает видимый список по фильтрам, поиску и режиму серий."""
@@ -8998,8 +8976,6 @@ class Workspace(QMainWindow):
         camera_key = self.camera_filter.currentData()
         shot = self.shot_filter.currentData()
         eyes = self.eyes_filter.currentData()
-        quality_min = self.quality_button.quality_threshold() if hasattr(self, "quality_button") else 0
-        aesthetic_min = self.quality_button.aesthetic_threshold() if hasattr(self, "quality_button") else 0
         needle = self.search_edit.text().strip().casefold()
 
         def visible(path: Path) -> bool:
@@ -9027,14 +9003,6 @@ class Workspace(QMainWindow):
                 return False
             if eyes == "closed" and not self._eyes_closed(detail):
                 return False
-            if quality_min or aesthetic_min:
-                quality_score, aesthetic_score = quality_scores(detail)
-                # Порог >0 требует подтверждённого балла: кадр без оценки NIMA
-                # (ещё не обработан) не может считаться прошедшим фильтр.
-                if quality_min and (quality_score is None or quality_score < quality_min):
-                    return False
-                if aesthetic_min and (aesthetic_score is None or aesthetic_score < aesthetic_min):
-                    return False
             if (
                 self.face_reference is not None
                 and self._face_match_names is not None
