@@ -36,5 +36,6 @@ where = ["src"]
 
 [dependency-groups]
 dev = [
+    "nuitka>=4.1.3",
     "pyinstaller>=6.21.0",
 ]
