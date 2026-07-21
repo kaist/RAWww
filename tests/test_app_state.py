@@ -231,15 +231,14 @@ class AppStateTests(unittest.TestCase):
         # Скрытый активный AI-фильтр не должен оставлять пустой список при
         # переходе в папку без соответствующих данных.
         workspace = Workspace(defer_initial_scan=True)
-        workspace.photo_details = {"a.jpg": {"quality": {"quality": 5.0, "aesthetic": 5.0}}}
-        workspace.quality_button._quality_slider.setValue(4)
+        workspace.photo_details = {"a.jpg": {"faces": [{"eyes_open": False}]}}
+        workspace.eyes_filter.setCurrentIndex(workspace.eyes_filter.findData("closed"))
         workspace._reset_unavailable_ai_filters()
-        self.assertEqual(workspace.quality_button.quality_threshold(), 4)
+        self.assertEqual(workspace.eyes_filter.currentData(), "closed")
 
         workspace.photo_details = {"b.jpg": {}}
         workspace._reset_unavailable_ai_filters()
-        self.assertEqual(workspace.quality_button.quality_threshold(), 0)
-        self.assertEqual(workspace.quality_button.aesthetic_threshold(), 0)
+        self.assertIsNone(workspace.eyes_filter.currentData())
         workspace.close()
         workspace.deleteLater()
 

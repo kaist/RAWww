@@ -14,7 +14,6 @@ from time import perf_counter
 from PySide6.QtCore import QSettings
 
 from .ai import (
-    analyze_quality_batch,
     extract_embedding_batch,
     prepare_analysis_batch,
     recognize_face_batch,
@@ -51,8 +50,6 @@ def main() -> None:
         warm_faces, face_warm_s = timed(recognize_face_batch, sources[1:])
         faces = [*first_faces, *warm_faces]
         _, face_write_s = timed(cache.store_face_analysis, faces)
-        quality, quality_s = timed(analyze_quality_batch, sources)
-        _, quality_write_s = timed(cache.store_quality_analysis, quality)
         _, exif_write_s = timed(cache.store_photo_metadata, exif)
         with closing(sqlite3.connect(cache.path)) as db:
             face_count = sum(len(json.loads(row[0])) for row in db.execute("SELECT faces_json FROM face_analysis"))
@@ -68,15 +65,9 @@ def main() -> None:
     show("InsightFace cold + first image", len(first_faces), face_cold_s)
     show("InsightFace warm images", len(warm_faces), face_warm_s)
     show("Face SQLite write", len(faces), face_write_s)
-    show("Quality analysis (NIMA)", len(quality), quality_s)
-    show("Quality SQLite write", len(quality), quality_write_s)
     show("EXIF SQLite write", len(exif), exif_write_s)
     baseline_s = source_s + clip_cold_s + clip_warm_s + face_cold_s + face_warm_s
     show("AI baseline (source+CLIP+faces)", len(paths), baseline_s)
-    show("AI baseline + quality", len(paths), baseline_s + quality_s + quality_write_s)
-    added_ms = (quality_s + quality_write_s) * 1000 / len(paths) if paths else 0.0
-    overhead = (quality_s + quality_write_s) / baseline_s * 100 if baseline_s else 0.0
-    print(f"Quality overhead: +{added_ms:.2f} ms/img  (+{overhead:.1f}% over AI baseline)")
     print(f"Faces found: {face_count}")
     print(f"Temporary cache size: {cache_size / 1048576:.2f} MiB")
 
