@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QCheckBox, QComboBox, QCompleter, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox, QPushButton, QStyle, QStyleOptionButton, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
 from typing import Callable
 from uuid import uuid4
+from .scrolling import enable_smooth_wheel
 from .shotsync_client import ShotSyncClient
 from .theme import _fomantic_icon
 from .i18n import gettext as _
@@ -72,6 +73,7 @@ class CodeReplacementsEditor(QWidget):
             toolbar.addWidget(button)
         layout.addLayout(toolbar)
         self.table = QTableWidget(0, 3)
+        enable_smooth_wheel(self.table)
         self.table.setHorizontalHeaderLabels([_("Код"), _("Значение"), ""])
         self.table.setColumnWidth(0, 150)
         self.table.setColumnWidth(2, 44)
