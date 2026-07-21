@@ -34,6 +34,22 @@ class _Settings:
         self.values.append((key, value))
 
 
+class _MemorySettings:
+    """Настройки в памяти с чтением и записью, как у QSettings, для тестов."""
+
+    def __init__(self, initial: dict | None = None) -> None:
+        self.store = dict(initial or {})
+
+    def contains(self, key: str) -> bool:
+        return key in self.store
+
+    def value(self, key: str, default: object = None, type: object = None) -> object:
+        return self.store.get(key, default)
+
+    def setValue(self, key: str, value: object) -> None:
+        self.store[key] = value
+
+
 class _Signal:
     """Простая запись подключённых обработчиков вместо сигнала Qt."""
 
@@ -1079,3 +1095,84 @@ class AppStateTests(unittest.TestCase):
 
         self.assertEqual(settings.values, [("view/series_enabled", False)])
         self.assertEqual(changed.values, [False])
+
+    def test_orientation_toggle_saves_globally_and_per_folder(self) -> None:
+        settings = _Settings()
+        applied: list[bool] = []
+        folder = Path("/tmp/shoot")
+        workspace = SimpleNamespace(
+            settings=settings,
+            vertical_orientation=False,
+            current_dir=folder,
+            _folder_settings_prefix=Workspace._folder_settings_prefix,
+            _apply_orientation=lambda vertical: applied.append(vertical),
+        )
+
+        Workspace._toggle_orientation(workspace)
+
+        prefix = Workspace._folder_settings_prefix(folder)
+        self.assertEqual(
+            settings.values,
+            [
+                ("interface/vertical_orientation", True),
+                (f"{prefix}/vertical_orientation", True),
+            ],
+        )
+        self.assertEqual(applied, [True])
+
+    def test_folder_orientation_prefers_per_folder_value(self) -> None:
+        folder = Path("/tmp/shoot")
+        prefix = Workspace._folder_settings_prefix(folder)
+        settings = _MemorySettings({
+            "interface/vertical_orientation": False,
+            f"{prefix}/vertical_orientation": True,
+        })
+        workspace = SimpleNamespace(
+            settings=settings,
+            _folder_settings_prefix=Workspace._folder_settings_prefix,
+        )
+
+        self.assertTrue(Workspace._folder_orientation(workspace, folder))
+
+    def test_folder_orientation_falls_back_to_global_default(self) -> None:
+        folder = Path("/tmp/other")
+        settings = _MemorySettings({"interface/vertical_orientation": True})
+        workspace = SimpleNamespace(
+            settings=settings,
+            _folder_settings_prefix=Workspace._folder_settings_prefix,
+        )
+
+        self.assertTrue(Workspace._folder_orientation(workspace, folder))
+
+    def test_restore_orientation_applies_stored_folder_value(self) -> None:
+        folder = Path("/tmp/shoot")
+        prefix = Workspace._folder_settings_prefix(folder)
+        settings = _MemorySettings({f"{prefix}/vertical_orientation": True})
+        applied: list[bool] = []
+        workspace = SimpleNamespace(
+            settings=settings,
+            vertical_orientation=False,
+            _folder_settings_prefix=Workspace._folder_settings_prefix,
+            _apply_orientation=lambda vertical: applied.append(vertical),
+        )
+        workspace._folder_orientation = lambda directory: Workspace._folder_orientation(workspace, directory)
+
+        Workspace._restore_orientation(workspace, folder)
+
+        self.assertEqual(applied, [True])
+
+    def test_restore_orientation_skips_when_unchanged(self) -> None:
+        folder = Path("/tmp/shoot")
+        settings = _MemorySettings({"interface/vertical_orientation": False})
+        applied: list[bool] = []
+        workspace = SimpleNamespace(
+            settings=settings,
+            vertical_orientation=False,
+            _folder_settings_prefix=Workspace._folder_settings_prefix,
+            _apply_orientation=lambda vertical: applied.append(vertical),
+        )
+        workspace._folder_orientation = lambda directory: Workspace._folder_orientation(workspace, directory)
+
+        Workspace._restore_orientation(workspace, folder)
+
+        self.assertEqual(applied, [])
