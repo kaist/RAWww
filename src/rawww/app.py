@@ -85,7 +85,7 @@ from .decode_scheduler import DecodeScheduler
 from .shotsync_client import ShotSyncClient
 from .face_sets_sync import merge_server_faces, upload_fields_for_entry
 from .face_search import FACE_MATCH_THRESHOLD, FaceSearchIndex, indexed_face_matches
-from .focus import focus_is_defect
+from .nima import quality_scores
 from .shotsync_login import ShotSyncLoginDialog
 from .shotsync_hub import shotsync_hub
 from .shotsync_panel import ShotSyncPanel
@@ -110,7 +110,7 @@ from .theme import (
     _title_bar_icon,
 )
 from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence
-from .widgets import SettingsCheckBox
+from .widgets import QualityFilterButton, SettingsCheckBox
 from .transfer_queue import TransferEntry, TransferManager, TransferQueuePanel, TransferTask
 from .card_import import CardImportScan, build_backup_entries, build_import_entries, merge_scans, scan_card
 from .dialogs import (
@@ -4368,10 +4368,6 @@ class Workspace(QMainWindow):
         for label, value in (("Все глаза", None), ("Закрытые глаза", "closed")):
             self.eyes_filter.addItem(label, value)
         self.eyes_filter.hide()
-        self.focus_filter = FilterComboBox()
-        for label, value in (("Весь фокус", None), ("Не в фокусе / смаз", "defect")):
-            self.focus_filter.addItem(label, value)
-        self.focus_filter.hide()
         self.sort_combo = FilterComboBox()
         for label, value in (("По имени ↑", "name"), ("По имени ↓", "name_desc"), ("По времени ↑", "time"), ("По времени ↓", "time_desc"), ("По рейтингу", "rating")):
             self.sort_combo.addItem(label, value)
@@ -4390,7 +4386,7 @@ class Workspace(QMainWindow):
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setFixedWidth(112)
         self.search_edit.setFixedHeight(self.media_filter.sizeHint().height())
-        for control in (self.rating_filter, self.color_filter, self.media_filter, self.file_type_filter, self.camera_filter, self.shot_filter, self.eyes_filter, self.focus_filter, self.sort_combo):
+        for control in (self.rating_filter, self.color_filter, self.media_filter, self.file_type_filter, self.camera_filter, self.shot_filter, self.eyes_filter, self.sort_combo):
             control.currentIndexChanged.connect(self._apply_view)
             filter_layout.addWidget(control)
         self.search_edit.textChanged.connect(self._apply_view)
@@ -4553,25 +4549,23 @@ class Workspace(QMainWindow):
         self.eyes_toggle.clicked.connect(self._toggle_eyes_filter)
         eyes_layout.addWidget(self.eyes_toggle)
 
-        self.focus_group = QWidget()
-        self.focus_group.setObjectName("aiPanelGroup")
-        focus_layout = QHBoxLayout(self.focus_group)
-        focus_layout.setContentsMargins(0, 0, 0, 0)
-        focus_layout.setSpacing(3)
-        self.focus_panel_title = QLabel("ФОКУС")
-        self.focus_panel_title.setObjectName("aiPanelTitle")
-        focus_layout.addWidget(self.focus_panel_title)
-        # Переключатель брака по фокусу/смазу по аналогии с «Закрытые глаза».
-        self.focus_toggle = QToolButton()
-        self.focus_toggle.setObjectName("shotFilter")
-        self.focus_toggle.setText("Не в фокусе / смаз")
-        self.focus_toggle.setCheckable(True)
-        self.focus_toggle.clicked.connect(self._toggle_focus_filter)
-        focus_layout.addWidget(self.focus_toggle)
+        self.quality_group = QWidget()
+        self.quality_group.setObjectName("aiPanelGroup")
+        quality_layout = QHBoxLayout(self.quality_group)
+        quality_layout.setContentsMargins(0, 0, 0, 0)
+        quality_layout.setSpacing(3)
+        self.quality_panel_title = QLabel("КАЧЕСТВО")
+        self.quality_panel_title.setObjectName("aiPanelTitle")
+        quality_layout.addWidget(self.quality_panel_title)
+        # Кнопка открывает попап с двумя ползунками порогов NIMA (качество и
+        # эстетика); фильтр применяется по отпусканию ползунка.
+        self.quality_button = QualityFilterButton()
+        self.quality_button.thresholdsChanged.connect(self._apply_view)
+        quality_layout.addWidget(self.quality_button)
 
         ai_layout.addStretch(1)
         ai_layout.addWidget(self.eyes_group)
-        ai_layout.addWidget(self.focus_group)
+        ai_layout.addWidget(self.quality_group)
         ai_layout.addWidget(self.shot_group)
         self.ai_panel.hide()
 
@@ -8660,16 +8654,16 @@ class Workspace(QMainWindow):
         if not hasattr(self, "faces_panel_button"):
             return
         has_faces = any(detail.get("faces") for detail in self.photo_details.values())
-        has_focus = any(detail.get("focus") for detail in self.photo_details.values())
+        has_quality = any(detail.get("quality") for detail in self.photo_details.values())
         has_series = self._has_available_series(self.view_paths or self.all_paths)
         if hasattr(self, "ai_panel"):
-            self.ai_panel.setVisible(has_faces or has_focus or has_series)
+            self.ai_panel.setVisible(has_faces or has_quality or has_series)
             self.series_faces_group.setVisible(has_faces or has_series)
             self.series_toggle.setVisible(True)
             self.faces_panel_button.setVisible(has_faces)
             self.shot_group.setVisible(has_faces)
             self.eyes_group.setVisible(has_faces)
-            self.focus_group.setVisible(has_focus)
+            self.quality_group.setVisible(has_quality)
             counts = {value: 0 for value in self.shot_buttons}
             rating = self.rating_filter.currentData()
             color = self.color_filter.currentData()
@@ -8707,14 +8701,11 @@ class Workspace(QMainWindow):
                     continue
                 matching_paths.append(path)
             closed_eyes_count = 0
-            focus_defect_count = 0
             for path in matching_paths:
                 detail = self.photo_details.get(path.name, {})
                 counts[self._shot_size(detail)] = counts.get(self._shot_size(detail), 0) + 1
                 if self._eyes_closed(detail):
                     closed_eyes_count += 1
-                if focus_is_defect(detail):
-                    focus_defect_count += 1
             for value, button in self.shot_buttons.items():
                 button.setChecked(self.shot_filter.currentData() == value)
                 count = len(matching_paths) if value is None else counts.get(value, 0)
@@ -8723,8 +8714,6 @@ class Workspace(QMainWindow):
                 button.setText(f"{label}  {count}")
             self.eyes_toggle.setChecked(self.eyes_filter.currentData() == "closed")
             self.eyes_toggle.setText(f"Закрытые глаза  {closed_eyes_count}")
-            self.focus_toggle.setChecked(self.focus_filter.currentData() == "defect")
-            self.focus_toggle.setText(f"Не в фокусе / смаз  {focus_defect_count}")
 
     def _set_shot_filter(self, value: str | None) -> None:
         index = self.shot_filter.findData(value)
@@ -8737,13 +8726,6 @@ class Workspace(QMainWindow):
         index = self.eyes_filter.findData(value)
         if index >= 0:
             self.eyes_filter.setCurrentIndex(index)
-
-    def _toggle_focus_filter(self) -> None:
-        # Кнопка-переключатель: включена → показываем брак по фокусу/смазу.
-        value = "defect" if self.focus_toggle.isChecked() else None
-        index = self.focus_filter.findData(value)
-        if index >= 0:
-            self.focus_filter.setCurrentIndex(index)
 
     @staticmethod
     def _eyes_closed(detail: dict) -> bool:
@@ -8978,20 +8960,18 @@ class Workspace(QMainWindow):
     def _reset_unavailable_ai_filters(self) -> None:
         """Сбрасывает AI-фильтры, для которых в текущей папке нет данных.
 
-        Панель AI и её группы скрываются, когда в папке нет лиц или анализа
-        фокуса. Скрытый активный фильтр (например, «Не в фокусе / смаз») иначе
+        Панель AI и её группы скрываются, когда в папке нет лиц или оценок
+        качества. Скрытый активный фильтр (например, порог качества) иначе
         продолжал бы отбирать кадры и при переходе в такую папку оставил бы
         пустой список без видимого способа это исправить. Возвращаем такие
         фильтры в нейтральное состояние. Сигналы гасим: вызов идёт из
         перестройки вида, которая тут же применит уже актуальные значения.
         """
-        if not hasattr(self, "focus_filter"):
+        if not hasattr(self, "eyes_filter"):
             return
         has_faces = any(detail.get("faces") for detail in self.photo_details.values())
-        has_focus = any(detail.get("focus") for detail in self.photo_details.values())
+        has_quality = any(detail.get("quality") for detail in self.photo_details.values())
         stale = []
-        if not has_focus and self.focus_filter.currentData() is not None:
-            stale.append(self.focus_filter)
         if not has_faces and self.eyes_filter.currentData() is not None:
             stale.append(self.eyes_filter)
         if not has_faces and self.shot_filter.currentData() is not None:
@@ -9000,6 +8980,9 @@ class Workspace(QMainWindow):
             control.blockSignals(True)
             control.setCurrentIndex(0)
             control.blockSignals(False)
+        if not has_quality and hasattr(self, "quality_button"):
+            if self.quality_button.quality_threshold() or self.quality_button.aesthetic_threshold():
+                self.quality_button.reset()
 
     def _apply_view(self, *_args) -> None:
         """Перестраивает видимый список по фильтрам, поиску и режиму серий."""
@@ -9015,7 +8998,8 @@ class Workspace(QMainWindow):
         camera_key = self.camera_filter.currentData()
         shot = self.shot_filter.currentData()
         eyes = self.eyes_filter.currentData()
-        focus = self.focus_filter.currentData()
+        quality_min = self.quality_button.quality_threshold() if hasattr(self, "quality_button") else 0
+        aesthetic_min = self.quality_button.aesthetic_threshold() if hasattr(self, "quality_button") else 0
         needle = self.search_edit.text().strip().casefold()
 
         def visible(path: Path) -> bool:
@@ -9043,8 +9027,14 @@ class Workspace(QMainWindow):
                 return False
             if eyes == "closed" and not self._eyes_closed(detail):
                 return False
-            if focus == "defect" and not focus_is_defect(detail):
-                return False
+            if quality_min or aesthetic_min:
+                quality_score, aesthetic_score = quality_scores(detail)
+                # Порог >0 требует подтверждённого балла: кадр без оценки NIMA
+                # (ещё не обработан) не может считаться прошедшим фильтр.
+                if quality_min and (quality_score is None or quality_score < quality_min):
+                    return False
+                if aesthetic_min and (aesthetic_score is None or aesthetic_score < aesthetic_min):
+                    return False
             if (
                 self.face_reference is not None
                 and self._face_match_names is not None

@@ -55,9 +55,9 @@ CREATE TABLE IF NOT EXISTS face_analysis (
     name TEXT PRIMARY KEY, file_size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
     faces_json TEXT NOT NULL, processed_ns INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS focus_analysis (
+CREATE TABLE IF NOT EXISTS quality_analysis (
     name TEXT PRIMARY KEY, file_size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
-    focus_json TEXT NOT NULL, processed_ns INTEGER NOT NULL
+    quality_json TEXT NOT NULL, processed_ns INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS photo_metadata (
     name TEXT PRIMARY KEY, file_size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
@@ -304,7 +304,7 @@ class FolderCache:
                         SELECT name FROM previews
                         UNION SELECT name FROM image_embeddings
                         UNION SELECT name FROM face_analysis
-                        UNION SELECT name FROM focus_analysis
+                        UNION SELECT name FROM quality_analysis
                         UNION SELECT name FROM photo_metadata
                         UNION SELECT name FROM photo_selection
                         UNION SELECT name FROM shotsync_photos
@@ -318,7 +318,7 @@ class FolderCache:
                 db.execute("DROP TABLE live_names")
 
     def missing_ai_paths(self, paths: list[Path], table: str) -> list[Path]:
-        if table not in {"image_embeddings", "face_analysis", "focus_analysis"}:
+        if table not in {"image_embeddings", "face_analysis", "quality_analysis"}:
             raise ValueError(f"Unknown AI cache table: {table}")
         return self._missing_paths(paths, table)
 
@@ -356,17 +356,17 @@ class FolderCache:
     def store_face_analysis(self, results: list[tuple[str, str]]) -> None:
         self._store_ai_results("face_analysis", "faces_json", results)
 
-    def store_focus_analysis(self, results: list[tuple[str, str]]) -> None:
-        self._store_ai_results("focus_analysis", "focus_json", results)
+    def store_quality_analysis(self, results: list[tuple[str, str]]) -> None:
+        self._store_ai_results("quality_analysis", "quality_json", results)
 
-    def load_focus_analysis(self) -> dict[str, str]:
-        """Возвращает сохранённый JSON анализа фокуса отдельно для каждого файла."""
+    def load_quality_analysis(self) -> dict[str, str]:
+        """Возвращает сохранённый JSON оценок NIMA отдельно для каждого файла."""
         with self._lock:
             db = self._db_or_raise()
             return {
-                str(name): focus_json
-                for name, focus_json in db.execute("SELECT name, focus_json FROM focus_analysis")
-                if focus_json
+                str(name): quality_json
+                for name, quality_json in db.execute("SELECT name, quality_json FROM quality_analysis")
+                if quality_json
             }
 
     def load_face_analysis(self) -> dict[str, str]:
@@ -418,13 +418,13 @@ class FolderCache:
                 except (TypeError, ValueError):
                     faces = []
                 details.setdefault(name, {})["faces"] = faces if isinstance(faces, list) else []
-            for name, payload in db.execute("SELECT name, focus_json FROM focus_analysis"):
+            for name, payload in db.execute("SELECT name, quality_json FROM quality_analysis"):
                 try:
-                    focus = json.loads(payload)
+                    quality = json.loads(payload)
                 except (TypeError, ValueError):
-                    focus = None
-                if isinstance(focus, dict):
-                    details.setdefault(name, {})["focus"] = focus
+                    quality = None
+                if isinstance(quality, dict):
+                    details.setdefault(name, {})["quality"] = quality
             for name, rating, color, comment, keywords_json, updated_ns in db.execute(
                 "SELECT name, rating, color_label, comment, keywords_json, updated_ns FROM photo_selection"
             ):
@@ -571,7 +571,7 @@ class FolderCache:
             raise ValueError("Renamed filenames must be unique")
 
         tables = (
-            "previews", "image_embeddings", "face_analysis", "focus_analysis",
+            "previews", "image_embeddings", "face_analysis", "quality_analysis",
             "photo_metadata", "photo_selection",
         )
         map_table = f"rename_map_{uuid4().hex}"
@@ -831,7 +831,7 @@ class FolderCache:
             db.execute("DELETE FROM previews WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = previews.name)")
             db.execute("DELETE FROM image_embeddings WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = image_embeddings.name)")
             db.execute("DELETE FROM face_analysis WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = face_analysis.name)")
-            db.execute("DELETE FROM focus_analysis WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = focus_analysis.name)")
+            db.execute("DELETE FROM quality_analysis WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = quality_analysis.name)")
             db.execute("DELETE FROM photo_metadata WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_metadata.name)")
             db.execute("DELETE FROM photo_selection WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_selection.name)")
             db.execute("DELETE FROM shotsync_photos WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = shotsync_photos.name)")
@@ -1011,7 +1011,7 @@ def maintain_folder_caches(root: Path | None = None) -> dict[str, int]:
                         SELECT name FROM previews
                         UNION SELECT name FROM image_embeddings
                         UNION SELECT name FROM face_analysis
-                        UNION SELECT name FROM focus_analysis
+                        UNION SELECT name FROM quality_analysis
                         UNION SELECT name FROM photo_metadata
                         UNION SELECT name FROM photo_selection
                         UNION SELECT name FROM shotsync_photos
