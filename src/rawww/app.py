@@ -34,7 +34,7 @@ from typing import Callable
 
 from send2trash import send2trash
 
-from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
+from PySide6.QtCore import QBuffer, QDir, QEasingCurve, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
 from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPixmapCache, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -780,6 +780,27 @@ class _EdgeAutoScroller(QObject):
             self.stop()
 
 
+def _animate_scroll_to(view: QListWidget, anim: QPropertyAnimation, bar, index, hint) -> None:
+    """Плавно доскролливает вид к элементу вместо мгновенного прыжка Qt.
+
+    Штатный ``scrollTo`` при клавиатурной навигации мгновенно перекидывает полосу,
+    чтобы удержать выделение на экране, — отсюда рывок. Даём базовому классу
+    вычислить конечную позицию, затем возвращаем полосу на старт и анимируем к
+    цели. Если элемент и так виден (позиция не меняется), ничего не делаем.
+    """
+    start = bar.value()
+    QListWidget.scrollTo(view, index, hint)
+    end = bar.value()
+    if end == start:
+        return
+    bar.setValue(start)
+    anim.stop()
+    anim.setTargetObject(bar)
+    anim.setStartValue(start)
+    anim.setEndValue(end)
+    anim.start()
+
+
 class PhotoGrid(QListWidget):
     """Главная сетка фотографий и папок в рабочей вкладке.
 
@@ -804,6 +825,9 @@ class PhotoGrid(QListWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        # Флаг ставится до первых setScrollMode/scrollTo, которые Qt дёргает уже
+        # в конструкторе, иначе переопределённый scrollTo упадёт на его чтении.
+        self._smooth_scroll_to = False
         self.setObjectName("photoGrid")
         self._last_icon_size = QSize()
         self._last_grid_size = QSize()
@@ -819,6 +843,11 @@ class PhotoGrid(QListWidget):
         self._scroller = _MomentumScroller(self)
         # Плавный автоскролл у края при перетаскивании файлов вместо рывков Qt.
         self._edge_scroller = _EdgeAutoScroller(self)
+        # Плавный доскролл к выделению при навигации с клавиатуры вместо прыжка.
+        self._nav_anim = QPropertyAnimation(self)
+        self._nav_anim.setPropertyName(b"value")
+        self._nav_anim.setDuration(200)
+        self._nav_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.card_size = 1
         self.vertical = False
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -918,7 +947,20 @@ class PhotoGrid(QListWidget):
             self.deleteRequested.emit(bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
             event.accept()
             return
-        super().keyPressEvent(event)
+        # Доскролл к новому выделению во время навигации анимируем, а не прыгаем.
+        self._smooth_scroll_to = True
+        try:
+            super().keyPressEvent(event)
+        finally:
+            self._smooth_scroll_to = False
+
+    def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible) -> None:  # noqa: N802
+        """Плавно доводит выделение до экрана при навигации; остальное — как в Qt."""
+        if self._smooth_scroll_to:
+            self._scroller.stop()
+            _animate_scroll_to(self, self._nav_anim, self.verticalScrollBar(), index, hint)
+        else:
+            super().scrollTo(index, hint)
 
     def startDrag(self, supported_actions) -> None:  # noqa: N802
         """Упаковывает выбранные пути в стандартный MIME-набор для приложения и Проводника."""
@@ -1422,6 +1464,8 @@ class ViewerStrip(QListWidget):
 
     def __init__(self, *, vertical: bool = False, portrait: bool = False) -> None:
         super().__init__()
+        # Ставится до setScrollMode/scrollTo, которые Qt зовёт уже в конструкторе.
+        self._smooth_scroll_to = False
         self.vertical = vertical
         self.portrait = portrait
         self._paths: list[Path] = []
@@ -1442,6 +1486,11 @@ class ViewerStrip(QListWidget):
         # вместо ступенчатого автоскролла Qt.
         self._edge_scroller = _EdgeAutoScroller(self)
         self.setAutoScroll(False)
+        # Плавный доскролл к выделению при навигации с клавиатуры вместо прыжка.
+        self._nav_anim = QPropertyAnimation(self)
+        self._nav_anim.setPropertyName(b"value")
+        self._nav_anim.setDuration(200)
+        self._nav_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._apply_strip_metrics()
         self.itemClicked.connect(self._activate)
         self._connected_scroll_bar = None
@@ -1544,6 +1593,23 @@ class ViewerStrip(QListWidget):
     def leaveEvent(self, event) -> None:  # noqa: N802
         self._edge_scroller.release()
         super().leaveEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        # Доскролл к новому выделению во время навигации анимируем, а не прыгаем.
+        self._smooth_scroll_to = True
+        try:
+            super().keyPressEvent(event)
+        finally:
+            self._smooth_scroll_to = False
+
+    def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible) -> None:  # noqa: N802
+        """Плавно доводит выделение до экрана при навигации; остальное — как в Qt."""
+        if self._smooth_scroll_to:
+            self._scroller.stop()
+            bar = self.verticalScrollBar() if self.vertical else self.horizontalScrollBar()
+            _animate_scroll_to(self, self._nav_anim, bar, index, hint)
+        else:
+            super().scrollTo(index, hint)
 
     def _make_item(
         self,
