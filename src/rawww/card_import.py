@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from .exif import ExifToolClient, original_datetime
+from .i18n import gettext as _
 from .imaging import IMAGE_EXTENSIONS
 from .transfer_queue import TransferEntry
 
@@ -161,7 +162,7 @@ def _available_target(
             return None
         if not candidate.exists() and candidate not in occupied and not (reserved and reserved(candidate)):
             return candidate
-    raise OSError(f"Не удалось подобрать свободное имя для {target.name}")
+    raise OSError(_("Не удалось подобрать свободное имя для {name}").format(name=target.name))
 
 
 def _same_target_content(source: Path, target: Path, occupied: dict[Path, Path]) -> bool:

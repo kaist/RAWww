@@ -14,6 +14,7 @@ from typing import Callable
 from uuid import uuid4
 from .shotsync_client import ShotSyncClient
 from .theme import _fomantic_icon
+from .i18n import gettext as _
 
 
 class SettingsCheckBox(QCheckBox):
@@ -60,10 +61,10 @@ class CodeReplacementsEditor(QWidget):
         self.set_combo.currentIndexChanged.connect(self._set_changed)
         toolbar.addWidget(self.set_combo, 1)
         for text, handler, tip in (
-            ("+ Набор", self._create_set, "Создать набор"),
-            ("Переименовать", self._rename_set, "Переименовать набор"),
-            ("Удалить", self._delete_set, "Удалить набор"),
-            ("Импорт…", self._import_codes, "Импорт CSV, TSV или XLSX"),
+            (_("+ Набор"), self._create_set, _("Создать набор")),
+            (_("Переименовать"), self._rename_set, _("Переименовать набор")),
+            (_("Удалить"), self._delete_set, _("Удалить набор")),
+            (_("Импорт…"), self._import_codes, _("Импорт CSV, TSV или XLSX")),
         ):
             button = QPushButton(text)
             button.setToolTip(tip)
@@ -71,7 +72,7 @@ class CodeReplacementsEditor(QWidget):
             toolbar.addWidget(button)
         layout.addLayout(toolbar)
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Код", "Значение", ""])
+        self.table.setHorizontalHeaderLabels([_("Код"), _("Значение"), ""])
         self.table.setColumnWidth(0, 150)
         self.table.setColumnWidth(2, 44)
         self.table.horizontalHeader().setStretchLastSection(False)
@@ -83,13 +84,13 @@ class CodeReplacementsEditor(QWidget):
         self.status = QLabel()
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        self.login_hint = QLabel("Для синхронизации кодов замен, авторизуйтесь на shotsync.")
+        self.login_hint = QLabel(_("Для синхронизации кодов замен, авторизуйтесь на shotsync."))
         self.login_hint.setObjectName("shotsyncHint")
         self.login_hint.setWordWrap(True)
-        self.login_button = QPushButton("Войти")
+        self.login_button = QPushButton(_("Войти"))
         self.login_button.setObjectName("settingsPrimaryButton")
         self.login_button.setFixedSize(66, 28)
-        self.login_button.setToolTip("Войти в ShotSync")
+        self.login_button.setToolTip(_("Войти в ShotSync"))
         self.login_button.clicked.connect(self._login)
         login_row = QHBoxLayout()
         login_row.setSpacing(8)
@@ -113,7 +114,7 @@ class CodeReplacementsEditor(QWidget):
             self.login_hint.show()
             self.login_button.show()
             return
-        self.status.setText("Синхронизация с ShotSync…")
+        self.status.setText(_("Синхронизация с ShotSync…"))
         def done(ok: bool, data: dict, error: str) -> None:
             if not ok:
                 self.status.setText(error)
@@ -124,11 +125,11 @@ class CodeReplacementsEditor(QWidget):
                     "/api/users/code-replacements/",
                     lambda ok, data, error: self._load(select_id=data.get("set", {}).get("id")) if ok else self.status.setText(error),
                     method="POST",
-                    payload={"name": "По умолчанию"},
+                    payload={"name": _("По умолчанию")},
                 )
                 return
             self._apply_loaded_sets(select_id=select_id, focus_new=focus_new)
-            self.status.setText("Синхронизировано")
+            self.status.setText(_("Синхронизировано"))
             self.login_hint.hide()
             self.login_button.hide()
         self.client.request_json("/api/users/code-replacements/", done)
@@ -139,7 +140,7 @@ class CodeReplacementsEditor(QWidget):
         self.set_combo.clear()
         chosen = 0
         for index, item in enumerate(self.sets):
-            self.set_combo.addItem(str(item.get("name") or "Без названия"))
+            self.set_combo.addItem(str(item.get("name") or _("Без названия")))
             if item.get("id") == wanted:
                 chosen = index
         self.set_combo.setCurrentIndex(chosen if self.sets else -1)
@@ -160,7 +161,7 @@ class CodeReplacementsEditor(QWidget):
         """Создаёт первый локальный набор, чтобы редактор не встречал пустотой."""
         if self.sets:
             return
-        self.sets = [{"id": -1, "name": "По умолчанию", "codes": []}]
+        self.sets = [{"id": -1, "name": _("По умолчанию"), "codes": []}]
         self._save_local_sets()
 
     def _login(self) -> None:
@@ -189,16 +190,16 @@ class CodeReplacementsEditor(QWidget):
             self.table.setItem(row, 1, QTableWidgetItem(str(entry.get("value") or "")))
             remove = QToolButton()
             remove.setIcon(_fomantic_icon("trash", 12))
-            remove.setToolTip("Удалить код")
+            remove.setToolTip(_("Удалить код"))
             remove.clicked.connect(lambda _checked=False, code_id=entry.get("id"): self._delete_code(code_id))
             self.table.setCellWidget(row, 2, remove)
         if active:
             row = len(codes)
             code = QLineEdit()
-            code.setPlaceholderText("Код")
+            code.setPlaceholderText(_("Код"))
             code.setMaxLength(80)
             value = QLineEdit()
-            value.setPlaceholderText("Значение")
+            value.setPlaceholderText(_("Значение"))
             code.returnPressed.connect(lambda: value.setFocus())
             code.installEventFilter(self)
             value.installEventFilter(self)
@@ -238,13 +239,13 @@ class CodeReplacementsEditor(QWidget):
         if not code_text and not value_text:
             return True
         if not code_text or not value_text:
-            self.status.setText("Заполните код и значение.")
+            self.status.setText(_("Заполните код и значение."))
             return False
         self._add_code(code_text, value_text)
         return True
 
     def _create_set(self) -> None:
-        name, ok = QInputDialog.getText(self, "Новый набор", "Название:")
+        name, ok = QInputDialog.getText(self, _("Новый набор"), _("Название:"))
         if not ok or not name.strip(): return
         if not self.client.has_key():
             local_ids = [int(item.get("id") or 0) for item in self.sets]
@@ -258,7 +259,7 @@ class CodeReplacementsEditor(QWidget):
     def _rename_set(self) -> None:
         active = self._active_set()
         if not active: return
-        name, ok = QInputDialog.getText(self, "Переименовать набор", "Название:", text=str(active.get("name") or ""))
+        name, ok = QInputDialog.getText(self, _("Переименовать набор"), _("Название:"), text=str(active.get("name") or ""))
         if not ok or not name.strip(): return
         if not self.client.has_key():
             active["name"] = name.strip()
@@ -271,16 +272,16 @@ class CodeReplacementsEditor(QWidget):
         active = self._active_set()
         if not active:
             return
-        confirm = QMessageBox(QMessageBox.Icon.Warning, "Удалить набор", "Удалить набор и все его коды?", parent=self)
+        confirm = QMessageBox(QMessageBox.Icon.Warning, _("Удалить набор"), _("Удалить набор и все его коды?"), parent=self)
         confirm.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         confirm.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        confirm.button(QMessageBox.StandardButton.Yes).setText("Удалить")
-        confirm.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+        confirm.button(QMessageBox.StandardButton.Yes).setText(_("Удалить"))
+        confirm.button(QMessageBox.StandardButton.Cancel).setText(_("Отмена"))
         if confirm.exec() != QMessageBox.StandardButton.Yes:
             return
         if not self.client.has_key():
             if len(self.sets) == 1:
-                self.status.setText("Нужен хотя бы один набор кодов.")
+                self.status.setText(_("Нужен хотя бы один набор кодов."))
                 return
             self.sets.remove(active)
             self._save_local_sets()
@@ -335,12 +336,12 @@ class CodeReplacementsEditor(QWidget):
     def _import_codes(self) -> None:
         active = self._active_set()
         if not active: return
-        path, _ = QFileDialog.getOpenFileName(self, "Импорт кодов", "", "Таблицы (*.csv *.tsv *.xlsx)")
+        path, _filter = QFileDialog.getOpenFileName(self, _("Импорт кодов"), "", _("Таблицы (*.csv *.tsv *.xlsx)"))
         if not path: return
-        self.status.setText("Импорт…")
+        self.status.setText(_("Импорт…"))
         def done(ok: bool, data: dict, error: str) -> None:
             if ok:
-                self.status.setText(f"Импортировано: {data.get('imported', 0)}, пропущено: {data.get('skipped', 0)}")
+                self.status.setText(_("Импортировано: {imported}, пропущено: {skipped}").format(imported=data.get('imported', 0), skipped=data.get('skipped', 0)))
                 self._load(select_id=active["id"])
             else: self.status.setText(error)
         self.client.upload_file(f"/api/users/code-replacements/{active['id']}/import/", path, done)

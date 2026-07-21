@@ -1,0 +1,1788 @@
+# English translations for PROJECT.
+# Copyright (C) 2026 ORGANIZATION
+# This file is distributed under the same license as the PROJECT project.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: PROJECT VERSION\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2026-07-21 17:06+0000\n"
+"PO-Revision-Date: 2026-07-21 17:06+0000\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: en\n"
+"Language-Team: en <LL@li.org>\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#, python-brace-format
+msgid "Несколько XMP должны получить имя «{name}»"
+msgstr "Multiple XMP files must be named «{name}»"
+
+#, python-brace-format
+msgid "XMP «{name}» уже существует"
+msgstr "XMP «{name}» already exists"
+
+msgid "быстр. метка"
+msgstr "quick mark"
+
+msgid "Настроить быструю метку; M — применить"
+msgstr "Configure quick mark; M — apply"
+
+msgid "Автоперелистывание после метки"
+msgstr "Auto-advance after marking"
+
+msgid "Сбросить цвет"
+msgstr "Reset color"
+
+#, python-brace-format
+msgid "Рейтинг {n}"
+msgstr "Rating {n}"
+
+msgid "Сбросить рейтинг"
+msgstr "Reset rating"
+
+msgid "Комментарий"
+msgstr "Comment"
+
+msgid "Настроить быструю метку"
+msgstr "Configure quick mark"
+
+msgid "Красная метка"
+msgstr "Red label"
+
+msgid "Жёлтая метка"
+msgstr "Yellow label"
+
+msgid "Зелёная метка"
+msgstr "Green label"
+
+msgid "Синяя метка"
+msgstr "Blue label"
+
+msgid "Фиолетовая метка"
+msgstr "Purple label"
+
+msgid "Сбросить фильтр по лицу"
+msgstr "Reset face filter"
+
+msgid "Ищу похожие лица"
+msgstr "Searching for similar faces"
+
+msgid "Аудиокомментарий"
+msgstr "Audio comment"
+
+msgid "Свернуть ленту превью"
+msgstr "Collapse preview strip"
+
+msgid "Воспроизвести / пауза (Пробел)"
+msgstr "Play / pause (Space)"
+
+msgid "Развернуть ленту превью"
+msgstr "Expand preview strip"
+
+msgid "Показать фото с этим лицом"
+msgstr "Show photos with this face"
+
+msgid "Добавить лицо в набор"
+msgstr "Add face to set"
+
+msgid "Снять все метки"
+msgstr "Clear all marks"
+
+msgid "Применить быструю метку (M)"
+msgstr "Apply quick mark (M)"
+
+msgid "Уменьшить миниатюры"
+msgstr "Smaller thumbnails"
+
+msgid "Увеличить миниатюры"
+msgstr "Larger thumbnails"
+
+msgid "Вертикальная ориентация — нажмите для горизонтальной"
+msgstr "Vertical orientation — click for horizontal"
+
+msgid "Горизонтальная ориентация — нажмите для вертикальной"
+msgstr "Horizontal orientation — click for vertical"
+
+msgid "Нет подключения к интернету."
+msgstr "No internet connection."
+
+msgid "Не удалось подключиться к ShotSync."
+msgstr "Could not connect to ShotSync."
+
+#, python-brace-format
+msgid "≈ {h} ч {m} мин"
+msgstr "≈ {h} h {m} min"
+
+#, python-brace-format
+msgid "≈ {m} мин {s} с"
+msgstr "≈ {m} min {s} s"
+
+#, python-brace-format
+msgid "≈ {s} с"
+msgstr "≈ {s} s"
+
+msgid "Выполняется файловая операция"
+msgstr "File operation in progress"
+
+msgid "Папка открывается"
+msgstr "Opening folder"
+
+msgid "Обновляю список"
+msgstr "Refreshing list"
+
+msgid "Папка с таким именем уже существует."
+msgstr "A folder with this name already exists."
+
+msgid "Ошибка"
+msgstr "Error"
+
+msgid "Импорт с карты памяти"
+msgstr "Import from memory card"
+
+msgid "Съёмки ShotSync (shotsync.ru)"
+msgstr "ShotSync shoots (shotsync.ru)"
+
+msgid "ПАПКИ"
+msgstr "FOLDERS"
+
+msgid "На уровень вверх"
+msgstr "Up one level"
+
+msgid "Создать папку"
+msgstr "Create folder"
+
+msgid "ИЗБРАННОЕ"
+msgstr "FAVORITES"
+
+msgid "Удалить выбранную папку из избранного или перетащить её сюда"
+msgstr "Remove the selected folder from favorites or drag it here"
+
+msgid "Добавить текущую папку в избранное"
+msgstr "Add current folder to favorites"
+
+msgid "Все рейтинги"
+msgstr "All ratings"
+
+msgid "Все цвета"
+msgstr "All colors"
+
+msgid "Без цвета"
+msgstr "No color"
+
+msgid "Красный"
+msgstr "Red"
+
+msgid "Жёлтый"
+msgstr "Yellow"
+
+msgid "Зелёный"
+msgstr "Green"
+
+msgid "Синий"
+msgstr "Blue"
+
+msgid "Фиолетовый"
+msgstr "Purple"
+
+msgid "Фото и видео"
+msgstr "Photos and videos"
+
+msgid "Фото"
+msgstr "Photos"
+
+msgid "Видео"
+msgstr "Videos"
+
+msgid "JPG и RAW"
+msgstr "JPG and RAW"
+
+msgid "Только JPG"
+msgstr "JPG only"
+
+msgid "Только RAW"
+msgstr "RAW only"
+
+msgid "Все камеры"
+msgstr "All cameras"
+
+msgid "Все планы"
+msgstr "All shots"
+
+msgid "Крупный"
+msgstr "Close-up"
+
+msgid "Средний"
+msgstr "Medium"
+
+msgid "Общий"
+msgstr "Wide"
+
+msgid "Без лиц"
+msgstr "No faces"
+
+msgid "Все глаза"
+msgstr "All eyes"
+
+msgid "Закрытые глаза"
+msgstr "Closed eyes"
+
+msgid "По имени ↑"
+msgstr "By name ↑"
+
+msgid "По имени ↓"
+msgstr "By name ↓"
+
+msgid "По времени ↑"
+msgstr "By time ↑"
+
+msgid "По времени ↓"
+msgstr "By time ↓"
+
+msgid "По рейтингу"
+msgstr "By rating"
+
+msgid "Поиск"
+msgstr "Search"
+
+msgid "AI: серии и лица"
+msgstr "AI: series and faces"
+
+msgid "Синхронизация метаданных XMP"
+msgstr "XMP metadata sync"
+
+msgid "Утилиты"
+msgstr "Tools"
+
+msgid "Нажмите на крестик справа, чтобы остановить AI-анализ"
+msgstr "Click the cross on the right to stop the AI analysis"
+
+msgid "СЕРИИ И ЛИЦА"
+msgstr "SERIES AND FACES"
+
+msgid "Серии"
+msgstr "Series"
+
+msgid "Включить или выключить группировку по сериям"
+msgstr "Toggle grouping by series"
+
+msgid "Лица"
+msgstr "Faces"
+
+msgid "Открыть наборы лиц"
+msgstr "Open face sets"
+
+msgid "КРУПНОСТЬ ПЛАНА"
+msgstr "SHOT SIZE"
+
+msgid "Все"
+msgstr "All"
+
+msgid "ГЛАЗА"
+msgstr "EYES"
+
+msgid "Выберите, как работать со съёмкой."
+msgstr "Choose how to work with the shoot."
+
+msgid "Взять на отбор"
+msgstr "Take for selection"
+
+msgid "Получать оригиналы"
+msgstr "Receive originals"
+
+msgid "Загружаем съёмку на сервер…"
+msgstr "Uploading shoot to server…"
+
+msgid "Подготавливаем фотографии…"
+msgstr "Preparing photos…"
+
+msgid "переместить"
+msgstr "move"
+
+msgid "скопировать"
+msgstr "copy"
+
+msgid "Введите корректное имя папки"
+msgstr "Enter a valid folder name"
+
+msgid "Папка с таким именем уже существует"
+msgstr "A folder with this name already exists"
+
+msgid "Кэш папки"
+msgstr "Folder cache"
+
+#, python-brace-format
+msgid ""
+"Папка переименована, но не удалось перенести её кэш:\n"
+"{error}"
+msgstr ""
+"The folder was renamed, but its cache could not be moved:\n"
+"{error}"
+
+#, python-brace-format
+msgid "Новая папка {n}"
+msgstr "New folder {n}"
+
+msgid "Текущая директория еще не готова в модели дерева."
+msgstr "The current directory is not ready yet in the tree model."
+
+msgid "QFileSystemModel не смог создать папку."
+msgstr "QFileSystemModel could not create the folder."
+
+#, python-brace-format
+msgid "Не удалось создать папку: {error}"
+msgstr "Could not create folder: {error}"
+
+msgid "Открыть в новой вкладке"
+msgstr "Open in new tab"
+
+msgid "Переименовать"
+msgstr "Rename"
+
+msgid "Удалить"
+msgstr "Delete"
+
+msgid "Открыть"
+msgstr "Open"
+
+msgid "Показать в папке"
+msgstr "Show in folder"
+
+msgid "Не удалось подобрать свободное имя"
+msgstr "Could not find a free name"
+
+#, python-brace-format
+msgid "Что сделать при перемещении «{name}»?"
+msgstr "What to do when moving «{name}»?"
+
+#, python-brace-format
+msgid "Что сделать при копировании «{name}»?"
+msgstr "What to do when copying «{name}»?"
+
+msgid "Файл уже существует"
+msgstr "File already exists"
+
+#, python-brace-format
+msgid "В папке назначения уже есть «{name}»."
+msgstr "The destination folder already contains «{name}»."
+
+msgid "Пропустить"
+msgstr "Skip"
+
+msgid "Заменить"
+msgstr "Replace"
+
+msgid "Отмена"
+msgstr "Cancel"
+
+msgid "Файловая операция"
+msgstr "File operation"
+
+msgid "Дождитесь завершения текущего приёма, отбора или отправки ShotSync."
+msgstr "Wait until the current ShotSync receive, selection or upload finishes."
+
+msgid "Выполняется перемещение"
+msgstr "Moving in progress"
+
+msgid "Выполняется копирование"
+msgstr "Copying in progress"
+
+#, python-brace-format
+msgid "{name}: уже находится в этой папке"
+msgstr "{name}: already in this folder"
+
+#, python-brace-format
+msgid "{name}: нельзя поместить папку внутрь самой себя"
+msgstr "{name}: cannot place a folder inside itself"
+
+#, python-brace-format
+msgid "{name}: не удалось заменить {error}"
+msgstr "{name}: could not replace {error}"
+
+#, python-brace-format
+msgid "кэш {name}: {error}"
+msgstr "cache {name}: {error}"
+
+msgid "Копирование файлов"
+msgstr "Copying files"
+
+msgid "Не удалось обработать некоторые объекты:\n"
+msgstr "Some items could not be processed:\n"
+
+msgid "Не удалось поставить некоторые объекты в очередь:\n"
+msgstr "Some items could not be queued:\n"
+
+msgid "Удаление"
+msgstr "Deletion"
+
+msgid "Фотографии из съёмки, взятой на отбор из ShotSync, нельзя удалить отдельно."
+msgstr "Photos from a shoot taken for selection from ShotSync cannot be deleted individually."
+
+msgid "Нельзя удалить корневую папку диска."
+msgstr "The root folder of a drive cannot be deleted."
+
+#, python-brace-format
+msgid "Удалить навсегда {count} объект(а)?"
+msgstr "Permanently delete {count} item(s)?"
+
+#, python-brace-format
+msgid "Переместить в корзину {count} объект(а)?"
+msgstr "Move {count} item(s) to the trash?"
+
+#, python-brace-format
+msgid ""
+"\n"
+"• и ещё {n}"
+msgstr ""
+"\n"
+"• and {n} more"
+
+msgid "Выполняется удаление"
+msgstr "Deletion in progress"
+
+msgid "Не удалось удалить:\n"
+msgstr "Could not delete:\n"
+
+#, python-brace-format
+msgid ""
+"Съёмный носитель\n"
+"{label}"
+msgstr ""
+"Removable drive\n"
+"{label}"
+
+#, python-brace-format
+msgid "Съёмка {id}"
+msgstr "Shoot {id}"
+
+msgid " Открыты сохранённые съёмки; изменения синхронизируются при подключении."
+msgstr " Saved shoots are open; changes will sync when reconnected."
+
+msgid "Съёмка ShotSync"
+msgstr "ShotSync shoot"
+
+msgid "Удалить локальную копию"
+msgstr "Delete local copy"
+
+#, python-brace-format
+msgid ""
+"Удалить с компьютера папку «{name}»?\n"
+"\n"
+"Съёмка и метки на ShotSync останутся доступны. Удалятся только локальные файлы."
+msgstr ""
+"Delete the folder «{name}» from the computer?\n"
+"\n"
+"The shoot and its marks on ShotSync will remain available. Only local files will be deleted."
+
+#, python-brace-format
+msgid ""
+"Не удалось удалить локальную папку:\n"
+"{error}"
+msgstr ""
+"Could not delete the local folder:\n"
+"{error}"
+
+msgid "Удалить съёмку с сервера"
+msgstr "Delete shoot from server"
+
+msgid "Удалить съёмку из ShotSync? Исходная папка с фотографиями останется на компьютере."
+msgstr "Delete the shoot from ShotSync? The original photo folder will stay on the computer."
+
+#, python-brace-format
+msgid "Куда сохранять фото «{title}»"
+msgstr "Where to save photos «{title}»"
+
+#, python-brace-format
+msgid ""
+"Не удалось создать папку:\n"
+"{error}"
+msgstr ""
+"Could not create folder:\n"
+"{error}"
+
+msgid "Получаем фотографии с сервера…"
+msgstr "Fetching photos from the server…"
+
+msgid "Подготавливаем загрузку…"
+msgstr "Preparing download…"
+
+#, python-brace-format
+msgid "Получено фотографий: {done} из {total}"
+msgstr "Photos received: {done} of {total}"
+
+msgid "Загружаем фотографии…"
+msgstr "Downloading photos…"
+
+#, python-brace-format
+msgid ""
+"Не удалось загрузить съёмку:\n"
+"{error}"
+msgstr ""
+"Could not download the shoot:\n"
+"{error}"
+
+msgid "Сначала войдите в ShotSync на боковой панели."
+msgstr "First sign in to ShotSync in the sidebar."
+
+msgid "Отправить на ShotSync"
+msgstr "Send to ShotSync"
+
+msgid "Новая съёмка"
+msgstr "New shoot"
+
+msgid "Укажите название и папку с фотографиями для отправки на отбор."
+msgstr "Enter a name and a photo folder to send for selection."
+
+msgid "Название съёмки"
+msgstr "Shoot name"
+
+msgid "Папка не выбрана"
+msgstr "No folder selected"
+
+msgid "Выбрать папку…"
+msgstr "Choose folder…"
+
+msgid "AI: лица и серии"
+msgstr "AI: faces and series"
+
+msgid "Отправить"
+msgstr "Send"
+
+msgid "Папка со съёмкой"
+msgstr "Shoot folder"
+
+msgid "Отправить на отбор"
+msgstr "Send for selection"
+
+msgid "Папка с фотографиями"
+msgstr "Photo folder"
+
+msgid "Выбрать папку на диске…"
+msgstr "Choose a folder on disk…"
+
+msgid "Включить обработку лиц и серий на сервере ShotSync"
+msgstr "Enable face and series processing on the ShotSync server"
+
+msgid "Выберите существующую папку с фотографиями."
+msgstr "Choose an existing photo folder."
+
+#, python-brace-format
+msgid "Загружено фотографий: {done} из {total}"
+msgstr "Photos uploaded: {done} of {total}"
+
+#, python-brace-format
+msgid ""
+"Съёмка отправлена, но {failed} фото не удалось загрузить.\n"
+"Повторите отправку той же папки — недостающие кадры догрузятся."
+msgstr ""
+"The shoot was sent, but {failed} photo(s) could not be uploaded.\n"
+"Send the same folder again — the missing frames will finish uploading."
+
+#, python-brace-format
+msgid ""
+"Не удалось отправить съёмку:\n"
+"{error}"
+msgstr ""
+"Could not send the shoot:\n"
+"{error}"
+
+msgid "Эта папка не связана со съёмкой ShotSync."
+msgstr "This folder is not linked to a ShotSync shoot."
+
+#, python-brace-format
+msgid ""
+"Не удалось получить метки:\n"
+"{error}"
+msgstr ""
+"Could not fetch marks:\n"
+"{error}"
+
+msgid "Пользовательский"
+msgstr "Custom"
+
+msgid "Группировка по сериям включена"
+msgstr "Grouping by series enabled"
+
+msgid "Группировка по сериям выключена"
+msgstr "Grouping by series disabled"
+
+msgid "AI-анализ поставлен в очередь"
+msgstr "AI analysis queued"
+
+msgid "Находит похожие кадры и лица среди фотографий, которые ещё не были обработаны."
+msgstr "Finds similar frames and faces among photos that have not been processed yet."
+
+msgid "Обработать серии и лица"
+msgstr "Process series and faces"
+
+msgid "В текущей папке все фото уже обработаны."
+msgstr "All photos in the current folder are already processed."
+
+msgid "Автоматически синхронизировать XMP"
+msgstr "Automatically sync XMP"
+
+msgid "Записать XMP"
+msgstr "Write XMP"
+
+msgid "Прочитать XMP"
+msgstr "Read XMP"
+
+#, python-brace-format
+msgid "XMP: ошибок {n}"
+msgstr "XMP: {n} error(s)"
+
+#, python-brace-format
+msgid "XMP: локальных изменений {n}"
+msgstr "XMP: {n} local change(s)"
+
+msgid "XMP синхронизирован"
+msgstr "XMP synced"
+
+msgid "Инструменты для пакетной работы с файлами."
+msgstr "Tools for batch file operations."
+
+msgid "Групповое переименование"
+msgstr "Batch rename"
+
+msgid "Групповой резайс"
+msgstr "Batch resize"
+
+msgid "Уменьшить JPG"
+msgstr "Shrink JPG"
+
+msgid "Пока не реализовано"
+msgstr "Not implemented yet"
+
+msgid "Переименование недоступно для папок, связанных со съёмками ShotSync."
+msgstr "Renaming is not available for folders linked to ShotSync shoots."
+
+msgid "Подождите, пока загрузится папка."
+msgstr "Wait until the folder loads."
+
+msgid "В текущем списке нет фотографий."
+msgstr "There are no photos in the current list."
+
+msgid "Выполняется переименование"
+msgstr "Renaming in progress"
+
+#, python-brace-format
+msgid "Не удалось переименовать файлы: {error}"
+msgstr "Could not rename files: {error}"
+
+#, python-brace-format
+msgid ""
+"Файлы переименованы, но кэш не обновлён:\n"
+"{error}"
+msgstr ""
+"Files were renamed, but the cache was not updated:\n"
+"{error}"
+
+#, python-brace-format
+msgid "Не удалось прочитать папку: {error}"
+msgstr "Could not read folder: {error}"
+
+msgid "В текущей папке нет JPG-файлов."
+msgstr "There are no JPG files in the current folder."
+
+#, python-brace-format
+msgid "Готово. Сэкономлено {mb} МБ."
+msgstr "Done. Saved {mb} MB."
+
+#, python-brace-format
+msgid "Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}"
+msgstr "Done with errors ({count}). Saved {mb} MB. {first}"
+
+msgid "Закрыть"
+msgstr "Close"
+
+#, python-brace-format
+msgid "Готово с ошибками ({count}): {first}"
+msgstr "Done with errors ({count}): {first}"
+
+#, python-brace-format
+msgid "В папке экспорта уже есть «{name}»."
+msgstr "The export folder already contains «{name}»."
+
+msgid "Перезаписать"
+msgstr "Overwrite"
+
+msgid "Перезаписать все"
+msgstr "Overwrite all"
+
+msgid "Шаблон создаёт одинаковые имена"
+msgstr "The template produces duplicate names"
+
+#, python-brace-format
+msgid "Файл «{name}» больше не существует"
+msgstr "The file «{name}» no longer exists"
+
+#, python-brace-format
+msgid "Файл «{name}» уже существует"
+msgstr "The file «{name}» already exists"
+
+#, python-brace-format
+msgid " (всего {n})"
+msgstr " (total {n})"
+
+#, python-brace-format
+msgid " (выделено: {n})"
+msgstr " (selected: {n})"
+
+#, python-brace-format
+msgid "Отправка: {done}/{total}"
+msgstr "Uploading: {done}/{total}"
+
+#, python-brace-format
+msgid " · ошибок: {n}, повторяем"
+msgstr " · errors: {n}, retrying"
+
+#, python-brace-format
+msgid "Приём ShotSync: {done}/{total}{suffix}"
+msgstr "ShotSync receive: {done}/{total}{suffix}"
+
+msgid "Отбор ShotSync…"
+msgstr "ShotSync selection…"
+
+#, python-brace-format
+msgid "Отбор ShotSync: {done}/{total}"
+msgstr "ShotSync selection: {done}/{total}"
+
+msgid "Получение меток ShotSync…"
+msgstr "Fetching ShotSync marks…"
+
+#, python-brace-format
+msgid "Синхронизация меток: {n}"
+msgstr "Syncing marks: {n}"
+
+msgid "Сканирую папку…"
+msgstr "Scanning folder…"
+
+msgid "Подготовка AI…"
+msgstr "Preparing AI…"
+
+#, python-brace-format
+msgid "Анализ: {done}/{total}{eta}"
+msgstr "Analysis: {done}/{total}{eta}"
+
+#, python-brace-format
+msgid "Превью: {done}/{total}"
+msgstr "Previews: {done}/{total}"
+
+#, python-brace-format
+msgid "Закрытые глаза  {n}"
+msgstr "Closed eyes  {n}"
+
+msgid "Без названия"
+msgstr "Untitled"
+
+msgid "Это лицо уже есть в наборе."
+msgstr "This face is already in the set."
+
+msgid "Без имени"
+msgstr "Unnamed"
+
+msgid "Лицо добавлено в набор."
+msgstr "Face added to the set."
+
+msgid "Наборы лиц"
+msgstr "Face sets"
+
+msgid "Добавьте лицо, нажав «В набор» на фотографии."
+msgstr "Add a face by clicking «To set» on a photo."
+
+msgid "Имя"
+msgstr "Name"
+
+msgid "Быстрая метка"
+msgstr "Quick mark"
+
+msgid "Удалить из набора"
+msgstr "Remove from set"
+
+msgid "Красная"
+msgstr "Red"
+
+msgid "Жёлтая"
+msgstr "Yellow"
+
+msgid "Зелёная"
+msgstr "Green"
+
+msgid "Синяя"
+msgstr "Blue"
+
+msgid "Фиолетовая"
+msgstr "Purple"
+
+msgid "Убрать рейтинг"
+msgstr "Remove rating"
+
+msgid "Убрать метку"
+msgstr "Remove label"
+
+msgid "Внешний редактор"
+msgstr "External editor"
+
+#, python-brace-format
+msgid ""
+"Не найдено приложение или исполняемый файл редактора:\n"
+"{path}"
+msgstr ""
+"Editor application or executable not found:\n"
+"{path}"
+
+msgid "Adobe Photoshop не найден"
+msgstr "Adobe Photoshop not found"
+
+msgid "Установите Adobe Photoshop или укажите исполняемый файл другого редактора в Настройки → Поведение."
+msgstr "Install Adobe Photoshop or specify another editor's executable in Settings → Behavior."
+
+msgid "Не удалось открыть редактор"
+msgstr "Could not open the editor"
+
+msgid "Новая вкладка"
+msgstr "New tab"
+
+msgid "Настройки"
+msgstr "Settings"
+
+msgid "Помощь"
+msgstr "Help"
+
+msgid "Свернуть"
+msgstr "Minimize"
+
+msgid "Развернуть"
+msgstr "Maximize"
+
+msgid "У вас установлена актуальная версия Контрольки."
+msgstr "You have the latest version of Kontrolka."
+
+msgid "Обновления"
+msgstr "Updates"
+
+msgid "Не удалось проверить обновления. Проверьте подключение к интернету и повторите попытку позже."
+msgstr "Could not check for updates. Check your internet connection and try again later."
+
+#, python-brace-format
+msgid "<h4>Версия {version}</h4>{changelog}"
+msgstr "<h4>Version {version}</h4>{changelog}"
+
+msgid "Доступно обновление"
+msgstr "Update available"
+
+#, python-brace-format
+msgid "Доступна Контролька {version}"
+msgstr "Kontrolka {version} is available"
+
+msgid "Откройте страницу загрузки, чтобы узнать об изменениях."
+msgstr "Open the download page to see what's changed."
+
+msgid "Открыть страницу загрузки"
+msgstr "Open download page"
+
+msgid "Позже"
+msgstr "Later"
+
+msgid "Одна из выбранных карт больше недоступна."
+msgstr "One of the selected cards is no longer available."
+
+msgid "Подготавливаю список файлов с карты…"
+msgstr "Preparing the list of files on the card…"
+
+#, python-brace-format
+msgid ""
+"Не удалось прочитать карту:\n"
+"{error}"
+msgstr ""
+"Could not read the card:\n"
+"{error}"
+
+msgid "Основная папка не может находиться внутри импортируемой карты."
+msgstr "The main folder cannot be located inside the card being imported."
+
+msgid "Папка резервной копии не может находиться внутри импортируемой карты."
+msgstr "The backup folder cannot be located inside the card being imported."
+
+msgid "На выбранных картах нет файлов для импорта."
+msgstr "The selected cards have no files to import."
+
+msgid "Все файлы уже есть в папке назначения."
+msgstr "All files are already in the destination folder."
+
+msgid "Не удалось поставить импорт в очередь."
+msgstr "Could not queue the import."
+
+msgid "Резервная копия"
+msgstr "Backup"
+
+msgid "Основной импорт завершился с ошибкой или был отменён; резервная копия не запускалась."
+msgstr "The main import failed or was cancelled; the backup was not started."
+
+#, python-brace-format
+msgid ""
+"Не удалось подготовить резервную копию:\n"
+"{error}"
+msgstr ""
+"Could not prepare the backup:\n"
+"{error}"
+
+msgid "Онлайн-справка"
+msgstr "Online help"
+
+msgid "Горячие клавиши"
+msgstr "Hotkeys"
+
+msgid "Папка связана с ShotSync"
+msgstr "Folder linked to ShotSync"
+
+msgid "Файловые операции не завершены"
+msgstr "File operations are not finished"
+
+msgid "Копирование или перемещение ещё выполняется. Выйти и отменить все операции?"
+msgstr "Copying or moving is still in progress. Exit and cancel all operations?"
+
+#, python-brace-format
+msgid "Не удалось подобрать свободное имя для {name}"
+msgstr "Could not find a free name for {name}"
+
+msgid "Справка по горячим клавишам"
+msgstr "Hotkeys help"
+
+msgid "Сочетания ниже показывают текущие настройки приложения. Их можно переназначить в разделе «Настройки → Горячие клавиши»."
+msgstr "The shortcuts below show the app's current settings. You can reassign them in «Settings → Hotkeys»."
+
+msgid "Действие"
+msgstr "Action"
+
+msgid "Сочетание"
+msgstr "Shortcut"
+
+msgid "Не назначено"
+msgstr "Not assigned"
+
+msgid "Лог ошибок"
+msgstr "Error log"
+
+msgid "Необработанные ошибки приложения и фоновых потоков. Лог остаётся только на этом компьютере."
+msgstr "Unhandled errors from the app and background threads. The log stays only on this computer."
+
+msgid "Очистить"
+msgstr "Clear"
+
+msgid "Копировать"
+msgstr "Copy"
+
+msgid "Поведение"
+msgstr "Behavior"
+
+msgid "Коды замен"
+msgstr "Replacement codes"
+
+msgid "Интерфейс"
+msgstr "Interface"
+
+msgid "О приложении"
+msgstr "About"
+
+msgid "Готово"
+msgstr "Done"
+
+msgid "Рабочее пространство"
+msgstr "Workspace"
+
+msgid "Выберите, что Контролька будет восстанавливать при следующем запуске."
+msgstr "Choose what Kontrolka will restore on next launch."
+
+msgid "Восстанавливать открытые вкладки"
+msgstr "Restore open tabs"
+
+msgid "Удалять без подтверждения по DEL или Shift+DEL"
+msgstr "Delete without confirmation with DEL or Shift+DEL"
+
+msgid "Удалять сразу по DEL, без корзины (Shift+DEL — в корзину)"
+msgstr "Delete immediately with DEL, without the trash (Shift+DEL — to trash)"
+
+msgid "Выполнять копирование и перемещение последовательно"
+msgstr "Perform copying and moving sequentially"
+
+msgid "Новые файловые операции становятся в общую очередь. Если выключить, до трёх операций смогут выполняться одновременно."
+msgstr "New file operations join a shared queue. If disabled, up to three operations can run at the same time."
+
+msgid "Не спрашивать при совпадении имён, сразу переименовывать"
+msgstr "Don't ask on name conflicts, rename automatically"
+
+msgid "Эти параметры применяются к каждому новому импорту с подключённой карты памяти."
+msgstr "These settings apply to every new import from a connected memory card."
+
+msgid "Все файлы в одну папку"
+msgstr "All files into one folder"
+
+msgid "Удалять исходные файлы с карты"
+msgstr "Delete source files from the card"
+
+msgid "Сделать резервную копию"
+msgstr "Make a backup copy"
+
+msgid "Папка резервной копии"
+msgstr "Backup folder"
+
+msgid "Выбрать папку резервной копии"
+msgstr "Choose backup folder"
+
+msgid "Всегда запускать AI после превью"
+msgstr "Always run AI after previews"
+
+msgid "Как только миниатюры в папке готовы, автоматически запускается анализ серий и лиц. Срабатывает и при добавлении новых фотографий."
+msgstr "As soon as the thumbnails in a folder are ready, series and face analysis starts automatically. It also runs when new photos are added."
+
+msgid "Кэш"
+msgstr "Cache"
+
+msgid "Кэш содержит миниатюры и результаты анализа фотографий. Очистка не удаляет исходные файлы."
+msgstr "The cache contains thumbnails and photo analysis results. Clearing it does not delete the original files."
+
+msgid "Очистить кэш"
+msgstr "Clear cache"
+
+msgid "Выберите приложение, в котором открываются файлы по клавише E."
+msgstr "Choose the application that opens files with the E key."
+
+msgid "Другой редактор"
+msgstr "Another editor"
+
+msgid "Путь к приложению или исполняемому файлу"
+msgstr "Path to the application or executable"
+
+msgid "Выбрать исполняемый файл"
+msgstr "Choose executable"
+
+msgid "Интеграция с Проводником"
+msgstr "File Explorer integration"
+
+msgid "Добавляет «Открыть в Контрольке» для поддерживаемых файлов и папок. Программа просмотра по умолчанию не меняется."
+msgstr "Adds «Open in Kontrolka» for supported files and folders. The default viewer is not changed."
+
+msgid "Выбрать по умолчанию для JPG и RAW…"
+msgstr "Set as default for JPG and RAW…"
+
+msgid "Программы (*.exe);;Все файлы (*)"
+msgstr "Programs (*.exe);;All files (*)"
+
+msgid "Приложения (*.app);;Все файлы (*)"
+msgstr "Applications (*.app);;All files (*)"
+
+msgid "Исполняемые файлы (*);;Все файлы (*)"
+msgstr "Executables (*);;All files (*)"
+
+msgid "Выберите редактор"
+msgstr "Choose editor"
+
+msgid "Доступно в собранном приложении"
+msgstr "Available in the built application"
+
+msgid "Соберите приложение, чтобы Проводник запускал ctrlka.exe."
+msgstr "Build the application so that File Explorer launches ctrlka.exe."
+
+msgid "Доступно в собранном приложении Контрольки."
+msgstr "Available in the built Kontrolka application."
+
+msgid "Удалить из Проводника"
+msgstr "Remove from File Explorer"
+
+msgid "Добавить в Проводник"
+msgstr "Add to File Explorer"
+
+msgid "Не удалось открыть настройки Windows"
+msgstr "Could not open Windows settings"
+
+msgid "Удалить интеграцию?"
+msgstr "Remove integration?"
+
+msgid "Убрать команду «Открыть в Контрольке» из Проводника?"
+msgstr "Remove the «Open in Kontrolka» command from File Explorer?"
+
+msgid "Не удалось изменить Проводник"
+msgstr "Could not modify File Explorer"
+
+msgid "Нажмите новое сочетание в поле. Стрелки, Enter и Esc зарезервированы для навигации."
+msgstr "Press a new shortcut in the field. Arrows, Enter and Esc are reserved for navigation."
+
+msgid "Цветовые метки — цифры без Shift"
+msgstr "Color labels — digits without Shift"
+
+msgid "Вернуть сочетания по умолчанию"
+msgstr "Restore default shortcuts"
+
+msgid "Настройте элементы, которые показываются поверх изображения в полном просмотре."
+msgstr "Configure the elements shown over the image in full view."
+
+msgid "Язык интерфейса"
+msgstr "Interface language"
+
+msgid "Системный"
+msgstr "System"
+
+msgid "Изменение языка применится после перезапуска приложения."
+msgstr "The language change will take effect after restarting the application."
+
+msgid "Показывать счетчик файлов в полном просмотре"
+msgstr "Show file counter in full view"
+
+msgid "Показывать индикатор меток в полном просмотре"
+msgstr "Show mark indicator in full view"
+
+msgid "Акцент на лице при зуме"
+msgstr "Focus on face when zooming"
+
+msgid "Контролька"
+msgstr "Kontrolka"
+
+#, python-brace-format
+msgid "Версия {version}"
+msgstr "Version {version}"
+
+msgid "Бесплатное приложение для быстрого просмотра и отбора RAW и JPG. Оценки, цветовые метки, серии, поиск лиц, горячие клавиши и экспорт в XMP — чтобы быстрее перейти от съёмки к готовой работе."
+msgstr "A free app for quickly viewing and culling RAW and JPG. Ratings, color labels, series, face search, hotkeys and XMP export — to get from shoot to finished work faster."
+
+msgid "<b>Автор:</b> Игорь Заломский &lt;<a href=\"mailto:igor@zalomskij.ru\">igor@zalomskij.ru</a>&gt;<br>© 2026 Игорь Заломский. Лицензия GNU GPL v3 или более поздней версии.<br><a href=\"https://shotsync.ru/ctrlka\">Контролька на ShotSync</a><br><a href=\"https://github.com/kaist/RAWww\">Исходный код на GitHub</a>"
+msgstr "<b>Author:</b> Igor Zalomskij &lt;<a href=\"mailto:igor@zalomskij.ru\">igor@zalomskij.ru</a>&gt;<br>© 2026 Igor Zalomskij. Licensed under the GNU GPL v3 or later.<br><a href=\"https://shotsync.ru/ctrlka\">Kontrolka on ShotSync</a><br><a href=\"https://github.com/kaist/RAWww\">Source code on GitHub</a>"
+
+msgid "<b>Определение закрытых глаз:</b> разметка лица <a href=\"https://github.com/deepinsight/insightface\">InsightFace</a> (модель 2d106det), по контуру век считается eye aspect ratio."
+msgstr "<b>Closed-eye detection:</b> face landmarks by <a href=\"https://github.com/deepinsight/insightface\">InsightFace</a> (model 2d106det); the eye aspect ratio is computed from the eyelid contour."
+
+msgid "Автоматически проверять обновления при запуске"
+msgstr "Automatically check for updates at startup"
+
+msgid "Не отправлять статистику использования"
+msgstr "Don't send usage statistics"
+
+msgid "Проверить обновления"
+msgstr "Check for updates"
+
+#, python-brace-format
+msgid "Размер: {size}"
+msgstr "Size: {size}"
+
+msgid "Удалить все миниатюры и результаты анализа?"
+msgstr "Delete all thumbnails and analysis results?"
+
+msgid "Б"
+msgstr "B"
+
+msgid "КБ"
+msgstr "KB"
+
+msgid "МБ"
+msgstr "MB"
+
+msgid "ГБ"
+msgstr "GB"
+
+msgid "Стрелки, Enter и Esc нельзя назначать на другие действия."
+msgstr "Arrows, Enter and Esc cannot be assigned to other actions."
+
+#, python-brace-format
+msgid "Сочетание {seq} уже назначено действию «{name}»."
+msgstr "The shortcut {seq} is already assigned to «{name}»."
+
+msgid "Новый язык применится после перезапуска приложения."
+msgstr "The new language will take effect after restarting the application."
+
+#, python-brace-format
+msgid "Быстрое {op}"
+msgstr "Quick {op}"
+
+#, python-brace-format
+msgid "Куда {op} выделенные файлы?"
+msgstr "Where to {op} the selected files?"
+
+#, python-brace-format
+msgid "↑/↓ — выбрать · повторите {key} или Enter — выполнить · 1–9 — выполнить сразу"
+msgstr "↑/↓ — select · press {key} again or Enter — apply · 1–9 — apply instantly"
+
+msgid "Добавить путь…"
+msgstr "Add path…"
+
+msgid "Выберите папку назначения"
+msgstr "Choose the destination folder"
+
+msgid "Можно сохранить не более 9 путей."
+msgstr "You can save at most 9 paths."
+
+msgid "Быстрое перемещение"
+msgstr "Quick move"
+
+msgid "Файлы идут в том же порядке, что и текущий список. Расширение каждого файла сохраняется."
+msgstr "Files are processed in the same order as the current list. Each file's extension is preserved."
+
+msgid "Шаблон"
+msgstr "Template"
+
+msgid "Год"
+msgstr "Year"
+
+msgid "Месяц"
+msgstr "Month"
+
+msgid "День"
+msgstr "Day"
+
+msgid "Час"
+msgstr "Hour"
+
+msgid "Минута"
+msgstr "Minute"
+
+msgid "Секунда"
+msgstr "Second"
+
+msgid "Счётчик (0001)"
+msgstr "Counter (0001)"
+
+#, python-brace-format
+msgid "Например: свадьба_{counter:04}"
+msgstr "For example: wedding_{counter:04}"
+
+msgid "Счётчик"
+msgstr "Counter"
+
+msgid "с "
+msgstr "from "
+
+msgid " цифры"
+msgstr " digits"
+
+msgid "Введите { в поле шаблона, чтобы выбрать подстановку. Дата и время берутся из EXIF, а при его отсутствии — из файла."
+msgstr "Type { in the template field to pick a placeholder. Date and time come from EXIF, or from the file if EXIF is missing."
+
+msgid "До переименования"
+msgstr "Before"
+
+msgid "Станет"
+msgstr "After"
+
+msgid "Переименование: 0/%m"
+msgstr "Renaming: 0/%m"
+
+#, python-brace-format
+msgid "Переименование: {done}/{total}"
+msgstr "Renaming: {done}/{total}"
+
+msgid "Обновляю кэш…"
+msgstr "Updating cache…"
+
+#, python-brace-format
+msgid "… ещё {n} файлов"
+msgstr "… {n} more files"
+
+#, python-brace-format
+msgid "… ещё {n} новых имён"
+msgstr "… {n} more new names"
+
+msgid "Шаблон создаёт одинаковые имена файлов."
+msgstr "The template produces duplicate file names."
+
+#, python-brace-format
+msgid "Файл «{name}» уже существует в папке."
+msgstr "The file «{name}» already exists in the folder."
+
+#, python-brace-format
+msgid "Будет переименовано: {done} из {total}"
+msgstr "Will rename: {done} of {total}"
+
+#, python-brace-format
+msgid "У файла «{name}» нет даты и времени съёмки в EXIF."
+msgstr "The file «{name}» has no capture date and time in EXIF."
+
+msgid "Шаблон не создаёт корректное имя файла."
+msgstr "The template does not produce a valid file name."
+
+msgid "Шаблон создаёт зарезервированное имя Windows."
+msgstr "The template produces a reserved Windows name."
+
+msgid "КАРТЫ ДЛЯ ИМПОРТА"
+msgstr "CARDS TO IMPORT"
+
+msgid "Куда импортировать"
+msgstr "Import to"
+
+msgid "Выберите основную папку"
+msgstr "Choose the main folder"
+
+msgid "Выбрать папку"
+msgstr "Choose folder"
+
+msgid "Папка для импорта"
+msgstr "Import folder"
+
+msgid "КАТАЛОГ СЪЁМКИ"
+msgstr "SHOOT FOLDER"
+
+msgid "Создать каталог с датой съёмки"
+msgstr "Create a folder with the shoot date"
+
+msgid "Создать каталог с названием съёмки"
+msgstr "Create a folder with the shoot name"
+
+msgid "Начать"
+msgstr "Start"
+
+msgid "Укажите основную папку для импорта."
+msgstr "Specify the main import folder."
+
+msgid "Введите название съёмки."
+msgstr "Enter the shoot name."
+
+msgid "Название съёмки не должно содержать путь."
+msgstr "The shoot name must not contain a path."
+
+msgid "Укажите папку резервной копии в Настройки → Поведение."
+msgstr "Specify the backup folder in Settings → Behavior."
+
+msgid "Выберите хотя бы одну карту памяти."
+msgstr "Select at least one memory card."
+
+msgid "Основная и резервная папки должны различаться."
+msgstr "The main and backup folders must be different."
+
+msgid "Экспортирует текущий отсортированный список в JPEG. RAW-файлы используют встроенное превью, если оно есть."
+msgstr "Exports the current sorted list to JPEG. RAW files use the embedded preview if available."
+
+msgid "Папка экспорта"
+msgstr "Export folder"
+
+msgid "Большая сторона"
+msgstr "Long side"
+
+msgid "Шарп"
+msgstr "Sharpen"
+
+msgid "Сохранить EXIF"
+msgstr "Keep EXIF"
+
+msgid "Сила"
+msgstr "Amount"
+
+msgid "Радиус"
+msgstr "Radius"
+
+msgid "Порог"
+msgstr "Threshold"
+
+msgid "Старт"
+msgstr "Start"
+
+msgid "Папка для экспорта"
+msgstr "Export folder"
+
+msgid "Укажите папку для экспорта."
+msgstr "Specify the export folder."
+
+#, python-brace-format
+msgid "Экспорт: {done}/{total}"
+msgstr "Export: {done}/{total}"
+
+#, python-brace-format
+msgid "Пересохранит все JPG-файлы в папке «{name}» ({count} шт.) с выбранным качеством, поверх исходников без подтверждения."
+msgstr "Re-saves all JPG files in the folder «{name}» ({count} pcs.) with the chosen quality, over the originals without confirmation."
+
+msgid "Качество"
+msgstr "Quality"
+
+#, python-brace-format
+msgid "Сжатие: {done}/{total}"
+msgstr "Compression: {done}/{total}"
+
+msgid "Полный просмотр"
+msgstr "Full view"
+
+msgid "Открыть в редакторе"
+msgstr "Open in editor"
+
+msgid "Сетка"
+msgstr "Grid"
+
+msgid "Свернуть нижнюю панель (полный просмотр)"
+msgstr "Collapse the bottom panel (full view)"
+
+msgid "Развернуть нижнюю панель (полный просмотр)"
+msgstr "Expand the bottom panel (full view)"
+
+msgid "Обновить"
+msgstr "Refresh"
+
+msgid "Полный экран"
+msgstr "Fullscreen"
+
+msgid "Создать новую папку"
+msgstr "Create new folder"
+
+msgid "Быстрое копирование"
+msgstr "Quick copy"
+
+msgid "Сбросить цветовую метку"
+msgstr "Reset color label"
+
+msgid "Следующая вкладка"
+msgstr "Next tab"
+
+msgid "Предыдущая вкладка"
+msgstr "Previous tab"
+
+msgid "Выйти из полного просмотра"
+msgstr "Exit full view"
+
+msgid "Esc или Enter"
+msgstr "Esc or Enter"
+
+msgid "Следующая фотография (полный просмотр)"
+msgstr "Next photo (full view)"
+
+msgid "Right или Space"
+msgstr "Right or Space"
+
+msgid "Предыдущая фотография (полный просмотр)"
+msgstr "Previous photo (full view)"
+
+msgid "Left или Backspace"
+msgstr "Left or Backspace"
+
+msgid "Включить или выключить масштаб (полный просмотр)"
+msgstr "Toggle zoom (full view)"
+
+msgid "Воспроизведение видео или аудио (полный просмотр)"
+msgstr "Play video or audio (full view)"
+
+msgid "Переключить фокус между папками и сеткой"
+msgstr "Switch focus between folders and grid"
+
+msgid "Открыть выбранную папку"
+msgstr "Open the selected folder"
+
+msgid "Копировать выбранные файлы"
+msgstr "Copy the selected files"
+
+msgid "Вырезать выбранные файлы"
+msgstr "Cut the selected files"
+
+msgid "Вставить файлы"
+msgstr "Paste files"
+
+msgid "Снять выделение"
+msgstr "Clear selection"
+
+msgid "Удалить выбранный файл или папку"
+msgstr "Delete the selected file or folder"
+
+msgid "Не удалось войти. Попробуйте ещё раз."
+msgstr "Sign-in failed. Please try again."
+
+msgid "Неверный логин или пароль."
+msgstr "Incorrect login or password."
+
+msgid "Ошибка сети. Проверьте подключение к интернету."
+msgstr "Network error. Check your internet connection."
+
+msgid "Ошибка безопасного соединения (SSL)."
+msgstr "Secure connection error (SSL)."
+
+msgid "Сервер временно недоступен. Попробуйте позже."
+msgstr "The server is temporarily unavailable. Try again later."
+
+msgid "Вход в ShotSync"
+msgstr "Sign in to ShotSync"
+
+msgid "Логин или email"
+msgstr "Login or email"
+
+msgid "Пароль"
+msgstr "Password"
+
+msgid "Войти"
+msgstr "Sign in"
+
+msgid "Введите логин и пароль."
+msgstr "Enter your login and password."
+
+msgid "Входим…"
+msgstr "Signing in…"
+
+msgid "Проверяем вход в ShotSync…"
+msgstr "Checking ShotSync sign-in…"
+
+msgid "Войдите, чтобы открыть свои съёмки с shotsync.ru"
+msgstr "Sign in to open your shoots from shotsync.ru"
+
+msgid "Войти в ShotSync"
+msgstr "Sign in to ShotSync"
+
+msgid "Выйти из ShotSync"
+msgstr "Sign out of ShotSync"
+
+msgid "СЪЁМКИ НА СЕРВЕРЕ"
+msgstr "SHOOTS ON SERVER"
+
+msgid "Обновить список съёмок"
+msgstr "Refresh shoots list"
+
+msgid "Выход из ShotSync"
+msgstr "Sign out of ShotSync"
+
+msgid "Вы уверены, что хотите выйти?"
+msgstr "Are you sure you want to sign out?"
+
+msgid "Выйти"
+msgstr "Sign out"
+
+msgid "Профиль"
+msgstr "Profile"
+
+msgid "Не удалось загрузить съёмки."
+msgstr "Could not load shoots."
+
+msgid "Пока нет ни одной съёмки."
+msgstr "No shoots yet."
+
+#, python-brace-format
+msgid "{n} фото"
+msgstr "{n} photos"
+
+msgid "офлайн"
+msgstr "offline"
+
+msgid "● приём: слежение включено"
+msgstr "● receiving: tracking on"
+
+msgid "отправлена на отбор"
+msgstr "sent for selection"
+
+msgid "взята на отбор"
+msgstr "taken for selection"
+
+msgid "Открыть папку"
+msgstr "Open folder"
+
+msgid "Открыть во вьювере ShotSync в браузере"
+msgstr "Open in the ShotSync viewer in the browser"
+
+msgid "Слежение: новые фото будут загружаться в выбранную папку."
+msgstr "Tracking: new photos will be downloaded to the chosen folder."
+
+msgid "Ваша папка отправлена на отбор. Метки можно получить с сервера."
+msgstr "Your folder has been sent for selection. Marks can be fetched from the server."
+
+msgid "Локальная копия съёмки, взятая с сервера для отбора."
+msgstr "A local copy of the shoot taken from the server for selection."
+
+msgid "Съёмка хранится на сервере."
+msgstr "The shoot is stored on the server."
+
+msgid "Офлайн · работаем с локальной копией; изменения отправятся при подключении."
+msgstr "Offline · working with a local copy; changes will be sent when reconnected."
+
+#, python-brace-format
+msgid "{n} фото · {state}"
+msgstr "{n} photos · {state}"
+
+msgid "Получить метки"
+msgstr "Fetch marks"
+
+msgid "Удалить с сервера"
+msgstr "Delete from server"
+
+msgid "Удалить локально"
+msgstr "Delete locally"
+
+msgid "Остановить отслеживание"
+msgstr "Stop tracking"
+
+msgid "Пользователь с таким логином не найден."
+msgstr "No user found with this login."
+
+msgid "Активна"
+msgstr "Active"
+
+msgid "Запланирована"
+msgstr "Scheduled"
+
+msgid "Завершена"
+msgstr "Finished"
+
+msgid "В архиве"
+msgstr "Archived"
+
+#, python-brace-format
+msgid "{n} ТБ"
+msgstr "{n} TB"
+
+#, python-brace-format
+msgid "{n} ГБ"
+msgstr "{n} GB"
+
+#, python-brace-format
+msgid "{n} МБ"
+msgstr "{n} MB"
+
+#, python-brace-format
+msgid "{n} КБ"
+msgstr "{n} KB"
+
+#, python-brace-format
+msgid "{n} Б"
+msgstr "{n} B"
+
+msgid "< 1 с"
+msgstr "< 1 s"
+
+#, python-brace-format
+msgid "{s} с"
+msgstr "{s} s"
+
+#, python-brace-format
+msgid "{m} мин {s} с"
+msgstr "{m} min {s} s"
+
+#, python-brace-format
+msgid "{h} ч {m} мин"
+msgstr "{h} h {m} min"
+
+msgid "Перемещение"
+msgstr "Moving"
+
+msgid "Копирование"
+msgstr "Copying"
+
+msgid "Подготовка завершена"
+msgstr "Preparation complete"
+
+msgid "источник больше не существует"
+msgstr "the source no longer exists"
+
+msgid "цель появилась после постановки в очередь"
+msgstr "the target appeared after being queued"
+
+msgid "ФАЙЛОВЫЕ ОПЕРАЦИИ"
+msgstr "FILE OPERATIONS"
+
+msgid "Пауза"
+msgstr "Pause"
+
+msgid "Отменить активную операцию"
+msgstr "Cancel the active operation"
+
+msgid "Ожидание запуска…"
+msgstr "Waiting to start…"
+
+#, python-brace-format
+msgid "{done} из {total} файлов"
+msgstr "{done} of {total} files"
+
+msgid "Подсчёт файлов…"
+msgstr "Counting files…"
+
+msgid "Подсчитываю файлы и объём…"
+msgstr "Counting files and size…"
+
+#, python-brace-format
+msgid "{done} из {total}"
+msgstr "{done} of {total}"
+
+#, python-brace-format
+msgid "{speed}/с"
+msgstr "{speed}/s"
+
+msgid "измеряю скорость"
+msgstr "measuring speed"
+
+msgid "готово"
+msgstr "done"
+
+msgid "считаю…"
+msgstr "calculating…"
+
+msgid "Пауза · "
+msgstr "Paused · "
+
+msgid "Продолжить"
+msgstr "Resume"
+
+#, python-brace-format
+msgid "ещё выполняется: {n}"
+msgstr "still running: {n}"
+
+#, python-brace-format
+msgid "в очереди: {n}"
+msgstr "queued: {n}"
+
+msgid "Убрать из очереди"
+msgstr "Remove from queue"
+
+msgid "+ Набор"
+msgstr "+ Set"
+
+msgid "Создать набор"
+msgstr "Create set"
+
+msgid "Переименовать набор"
+msgstr "Rename set"
+
+msgid "Удалить набор"
+msgstr "Delete set"
+
+msgid "Импорт CSV, TSV или XLSX"
+msgstr "Import CSV, TSV or XLSX"
+
+msgid "Импорт…"
+msgstr "Import…"
+
+msgid "Код"
+msgstr "Code"
+
+msgid "Значение"
+msgstr "Value"
+
+msgid "Для синхронизации кодов замен, авторизуйтесь на shotsync."
+msgstr "To sync replacement codes, sign in to shotsync."
+
+msgid "Синхронизация с ShotSync…"
+msgstr "Syncing with ShotSync…"
+
+msgid "По умолчанию"
+msgstr "Default"
+
+msgid "Синхронизировано"
+msgstr "Synced"
+
+msgid "Удалить код"
+msgstr "Delete code"
+
+msgid "Заполните код и значение."
+msgstr "Fill in the code and value."
+
+msgid "Новый набор"
+msgstr "New set"
+
+msgid "Название:"
+msgstr "Name:"
+
+msgid "Удалить набор и все его коды?"
+msgstr "Delete the set and all its codes?"
+
+msgid "Нужен хотя бы один набор кодов."
+msgstr "At least one code set is required."
+
+msgid "Импорт кодов"
+msgstr "Import codes"
+
+msgid "Таблицы (*.csv *.tsv *.xlsx)"
+msgstr "Spreadsheets (*.csv *.tsv *.xlsx)"
+
+#, python-brace-format
+msgid "Импортировано: {imported}, пропущено: {skipped}"
+msgstr "Imported: {imported}, skipped: {skipped}"
+
