@@ -8975,10 +8975,37 @@ class Workspace(QMainWindow):
                 self._refresh_shotsync_local_folders(self._shotsync_shootings)
         self._fetch_pending_shotsync_marks()
 
+    def _reset_unavailable_ai_filters(self) -> None:
+        """Сбрасывает AI-фильтры, для которых в текущей папке нет данных.
+
+        Панель AI и её группы скрываются, когда в папке нет лиц или анализа
+        фокуса. Скрытый активный фильтр (например, «Не в фокусе / смаз») иначе
+        продолжал бы отбирать кадры и при переходе в такую папку оставил бы
+        пустой список без видимого способа это исправить. Возвращаем такие
+        фильтры в нейтральное состояние. Сигналы гасим: вызов идёт из
+        перестройки вида, которая тут же применит уже актуальные значения.
+        """
+        if not hasattr(self, "focus_filter"):
+            return
+        has_faces = any(detail.get("faces") for detail in self.photo_details.values())
+        has_focus = any(detail.get("focus") for detail in self.photo_details.values())
+        stale = []
+        if not has_focus and self.focus_filter.currentData() is not None:
+            stale.append(self.focus_filter)
+        if not has_faces and self.eyes_filter.currentData() is not None:
+            stale.append(self.eyes_filter)
+        if not has_faces and self.shot_filter.currentData() is not None:
+            stale.append(self.shot_filter)
+        for control in stale:
+            control.blockSignals(True)
+            control.setCurrentIndex(0)
+            control.blockSignals(False)
+
     def _apply_view(self, *_args) -> None:
         """Перестраивает видимый список по фильтрам, поиску и режиму серий."""
         if not hasattr(self, "rating_filter"):
             return
+        self._reset_unavailable_ai_filters()
         self._remember_view_context()
         self._begin_view_context_restore()
         rating = self.rating_filter.currentData()

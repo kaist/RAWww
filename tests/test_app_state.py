@@ -227,6 +227,21 @@ class AppStateTests(unittest.TestCase):
         workspace.close()
         workspace.deleteLater()
 
+    def test_ai_filters_reset_when_folder_lacks_ai_data(self) -> None:
+        # Скрытый активный AI-фильтр не должен оставлять пустой список при
+        # переходе в папку без соответствующих данных.
+        workspace = Workspace(defer_initial_scan=True)
+        workspace.photo_details = {"a.jpg": {"focus": {"blur": 0.5}}}
+        workspace.focus_filter.setCurrentIndex(workspace.focus_filter.findData("defect"))
+        workspace._reset_unavailable_ai_filters()
+        self.assertEqual(workspace.focus_filter.currentData(), "defect")
+
+        workspace.photo_details = {"b.jpg": {}}
+        workspace._reset_unavailable_ai_filters()
+        self.assertIsNone(workspace.focus_filter.currentData())
+        workspace.close()
+        workspace.deleteLater()
+
     def test_full_view_filter_rebuild_uses_open_file_as_single_cursor(self) -> None:
         workspace = Workspace(defer_initial_scan=True)
         old_grid_path = Path("/photos/old-grid.jpg")

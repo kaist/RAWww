@@ -49,6 +49,11 @@ SHARPEST_QUANTILE = 0.06
 MIN_REGION_ENERGY = 2.0
 # Порог браковки по резкости самого чёткого региона (мера размытия 0..1).
 FOCUS_BLUR_THRESHOLD = 0.32
+# Смягчённый порог для кадров с лицом: у портретов с малой ГРИП резким остаётся
+# лишь маленький участок (ресницы, прядь волос), поэтому «самый чёткий регион»
+# оказывается у самой границы обычного порога. Наличие лица снимает ложную
+# браковку таких портретов, не пропуская при этом кадры без единой резкой зоны.
+FOCUS_BLUR_THRESHOLD_FACE = 0.42
 # При каком перекосе направлений размытие считаем смазом, а не расфокусом.
 MOTION_ANISOTROPY = 0.28
 
@@ -258,9 +263,12 @@ def _classify(sharpest_blur: float, anisotropy: float) -> str:
 def focus_is_defect(detail: dict) -> bool:
     """Признак брака по фокусу из сохранённого JSON (для UI и фильтров).
 
-    Повторяет логику :meth:`FocusResult.is_defect`, но работает по словарю из
-    кэша, чтобы потребитель не пересобирал кадр. Отсутствие данных или лиц —
-    не брак.
+    Если у кадра есть лицо, применяем более мягкий порог: портрет с малой ГРИП
+    (резкие ресницы или прядь волос при мягкой коже и размытом фоне) даёт
+    «самый чёткий регион» на грани обычного порога и иначе ложно бракуется.
+    Наличие лица снимает эту ложную браковку, но кадр без единого чёткого
+    региона всё равно отбраковывается. Без лица используем строгий порог, чтобы
+    ловить сплошной расфокус и смаз. Отсутствие данных — не брак.
     """
     focus = detail.get("focus")
     if not isinstance(focus, dict):
@@ -271,7 +279,9 @@ def focus_is_defect(detail: dict) -> bool:
             return float(subject) < (1.0 - FOCUS_BLUR_THRESHOLD)
         except (TypeError, ValueError):
             return False
+    has_face = any(isinstance(face, dict) for face in (detail.get("faces") or []))
+    threshold = FOCUS_BLUR_THRESHOLD_FACE if has_face else FOCUS_BLUR_THRESHOLD
     try:
-        return float(focus.get("blur", 0.0)) >= FOCUS_BLUR_THRESHOLD
+        return float(focus.get("blur", 0.0)) >= threshold
     except (TypeError, ValueError):
         return False
