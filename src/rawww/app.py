@@ -701,6 +701,85 @@ def _kinetic_wheel_scroll(scroller: "_MomentumScroller", bar, event, step: int) 
     return True
 
 
+class _EdgeAutoScroller(QObject):
+    """Плавный автоскролл у края под курсором (перетаскивание файлов, drag-выделение).
+
+    Заменяет ступенчатый автоскролл Qt, который дёргал позицию рывками раз в
+    ~50 мс. Пока курсор в «горячей» полосе у края, задаётся целевая скорость (тем
+    выше, чем ближе к краю), а таймер ~60 Гц плавно разгоняет и ведёт полосу; при
+    уходе курсора из зоны или конце жеста скорость мягко гасится. Работает по
+    любой оси через переданную полосу прокрутки, поэтому годится и для сетки, и
+    для лент.
+    """
+
+    _TICK_MS = 15
+    _MARGIN_FRAC = 0.16      # доля видимой стороны, считающаяся горячей зоной
+    _MAX_FRAC = 0.045        # макс скорость как доля видимой стороны за тик
+    _RAMP = 0.22             # сглаживание разгона/торможения
+    _MIN_VELOCITY = 0.35     # ниже этого на затухании останавливаемся
+
+    def __init__(self, parent: QObject) -> None:
+        super().__init__(parent)
+        self._bar = None
+        self._pos = 0.0
+        self._velocity = 0.0
+        self._desired = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._TICK_MS)
+        self._timer.timeout.connect(self._tick)
+
+    def update_edge(self, bar, coord: int, size: int) -> None:
+        """Пересчитывает целевую скорость по позиции курсора вдоль видимой области."""
+        if size <= 0:
+            return
+        if bar is not self._bar or not self._timer.isActive():
+            self._bar = bar
+            self._pos = float(bar.value())
+        margin = max(8.0, size * self._MARGIN_FRAC)
+        max_v = max(6.0, size * self._MAX_FRAC)
+        if coord < margin:
+            self._desired = -((margin - coord) / margin) * max_v
+        elif coord > size - margin:
+            self._desired = ((coord - (size - margin)) / margin) * max_v
+        else:
+            self._desired = 0.0
+        if self._desired != 0.0 and not self._timer.isActive():
+            self._pos = float(bar.value())
+            self._timer.start()
+
+    def release(self) -> None:
+        """Курсор ушёл или жест закончился: цель — ноль, плавно тормозим."""
+        self._desired = 0.0
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self._velocity = 0.0
+        self._desired = 0.0
+
+    def _tick(self) -> None:
+        bar = self._bar
+        if bar is None:
+            self._timer.stop()
+            return
+        self._velocity += (self._desired - self._velocity) * self._RAMP
+        if self._desired == 0.0 and abs(self._velocity) < self._MIN_VELOCITY:
+            self.stop()
+            return
+        self._pos += self._velocity
+        low, high = bar.minimum(), bar.maximum()
+        value = int(round(self._pos))
+        if value <= low:
+            value, self._pos, self._velocity = low, float(low), 0.0
+        elif value >= high:
+            value, self._pos, self._velocity = high, float(high), 0.0
+        if value != bar.value():
+            bar.setValue(value)
+        else:
+            self._pos = float(bar.value())
+        if self._desired == 0.0 and (value <= low or value >= high):
+            self.stop()
+
+
 class PhotoGrid(QListWidget):
     """Главная сетка фотографий и папок в рабочей вкладке.
 
@@ -738,6 +817,8 @@ class PhotoGrid(QListWidget):
         self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         # Инерционная прокрутка колесом с моделью «скорость + трение».
         self._scroller = _MomentumScroller(self)
+        # Плавный автоскролл у края при перетаскивании файлов вместо рывков Qt.
+        self._edge_scroller = _EdgeAutoScroller(self)
         self.card_size = 1
         self.vertical = False
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -854,15 +935,32 @@ class PhotoGrid(QListWidget):
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
+            # На время переноса берём автоскролл у края на себя — плавно, а не
+            # ступенчатым таймером Qt; вернём штатный режим на drop/уходе курсора.
+            self.setAutoScroll(False)
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802
         if event.mimeData().hasUrls():
+            self._edge_scroller.update_edge(
+                self.verticalScrollBar(),
+                event.position().toPoint().y(),
+                self.viewport().height(),
+            )
             event.acceptProposedAction()
             return
         event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._end_drag_autoscroll()
+        super().dragLeaveEvent(event)
+
+    def _end_drag_autoscroll(self) -> None:
+        """Останавливает наш автоскролл и возвращает штатный режим Qt после переноса."""
+        self._edge_scroller.stop()
+        self.setAutoScroll(True)
 
     def dropEvent(self, event) -> None:  # noqa: N802
         """Определяет цель переноса и передаёт реальную файловую операцию рабочей вкладке.
@@ -871,6 +969,7 @@ class PhotoGrid(QListWidget):
         источник по умолчанию копируется: угадывать желание пользователя по
         настроению курсора — пока не самая надёжная технология.
         """
+        self._end_drag_autoscroll()
         paths = _local_paths_from_mime(event.mimeData())
         if not paths:
             event.ignore()
@@ -1339,6 +1438,10 @@ class ViewerStrip(QListWidget):
         # Инерционная прокрутка колесом; ось (верт./гориз.) выбирается в wheelEvent
         # под текущую ориентацию ленты.
         self._scroller = _MomentumScroller(self)
+        # Плавный автоскролл у края при перетаскивании курсором с зажатой кнопкой
+        # вместо ступенчатого автоскролла Qt.
+        self._edge_scroller = _EdgeAutoScroller(self)
+        self.setAutoScroll(False)
         self._apply_strip_metrics()
         self.itemClicked.connect(self._activate)
         self._connected_scroll_bar = None
@@ -1423,6 +1526,24 @@ class ViewerStrip(QListWidget):
                         event.accept()
                         return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        """При зажатой кнопке у края ленты запускает плавный автоскролл вдоль её оси."""
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            point = event.position().toPoint()
+            if self.vertical:
+                self._edge_scroller.update_edge(self.verticalScrollBar(), point.y(), self.viewport().height())
+            else:
+                self._edge_scroller.update_edge(self.horizontalScrollBar(), point.x(), self.viewport().width())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        self._edge_scroller.release()
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._edge_scroller.release()
+        super().leaveEvent(event)
 
     def _make_item(
         self,
