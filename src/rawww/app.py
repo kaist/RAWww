@@ -780,16 +780,17 @@ class _EdgeAutoScroller(QObject):
             self.stop()
 
 
-def _animate_scroll_to(view: QListWidget, anim: QPropertyAnimation, bar, index, hint) -> None:
+def _animate_scroll_to(base_scroll_to: Callable, anim: QPropertyAnimation, bar, index, hint) -> None:
     """Плавно доскролливает вид к элементу вместо мгновенного прыжка Qt.
 
     Штатный ``scrollTo`` при клавиатурной навигации мгновенно перекидывает полосу,
-    чтобы удержать выделение на экране, — отсюда рывок. Даём базовому классу
-    вычислить конечную позицию, затем возвращаем полосу на старт и анимируем к
-    цели. Если элемент и так виден (позиция не меняется), ничего не делаем.
+    чтобы удержать выделение на экране, — отсюда рывок. Даём базовой реализации
+    (``base_scroll_to``) вычислить конечную позицию, затем возвращаем полосу на
+    старт и анимируем к цели. Если элемент и так виден (позиция не меняется),
+    ничего не делаем.
     """
     start = bar.value()
-    QListWidget.scrollTo(view, index, hint)
+    base_scroll_to(index, hint)
     end = bar.value()
     if end == start:
         return
@@ -799,6 +800,53 @@ def _animate_scroll_to(view: QListWidget, anim: QPropertyAnimation, bar, index, 
     anim.setStartValue(start)
     anim.setEndValue(end)
     anim.start()
+
+
+class _SmoothScrollMixin:
+    """Плавная прокрутка колесом и анимированный доскролл к выделению.
+
+    Подмешивается к вертикальным спискам/деревьям, чтобы дать им ту же плавность,
+    что у сетки и лент: колесо — модель «скорость + трение» (`_MomentumScroller`),
+    а доскролл к выделению при клавиатурной навигации — анимация вместо
+    мгновенного прыжка. Подмешивающий класс должен вызвать `_init_smooth_scroll()`
+    в своём конструкторе.
+    """
+
+    def _init_smooth_scroll(self) -> None:
+        # Флаг до setVerticalScrollMode: Qt дёргает scrollTo уже из него.
+        self._smooth_scroll_to = False
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self._scroller = _MomentumScroller(self)
+        self._nav_anim = QPropertyAnimation(self)
+        self._nav_anim.setPropertyName(b"value")
+        self._nav_anim.setDuration(200)
+        self._nav_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _wheel_step(self) -> int:
+        step = self.sizeHintForRow(0)
+        if step <= 0:
+            step = max(48, self.viewport().height() // 6)
+        return step
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        if _kinetic_wheel_scroll(self._scroller, self.verticalScrollBar(), event, self._wheel_step()):
+            event.accept()
+        else:
+            super().wheelEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        self._smooth_scroll_to = True
+        try:
+            super().keyPressEvent(event)
+        finally:
+            self._smooth_scroll_to = False
+
+    def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible) -> None:  # noqa: N802
+        if self._smooth_scroll_to:
+            self._scroller.stop()
+            _animate_scroll_to(super().scrollTo, self._nav_anim, self.verticalScrollBar(), index, hint)
+        else:
+            super().scrollTo(index, hint)
 
 
 class PhotoGrid(QListWidget):
@@ -958,7 +1006,7 @@ class PhotoGrid(QListWidget):
         """Плавно доводит выделение до экрана при навигации; остальное — как в Qt."""
         if self._smooth_scroll_to:
             self._scroller.stop()
-            _animate_scroll_to(self, self._nav_anim, self.verticalScrollBar(), index, hint)
+            _animate_scroll_to(super().scrollTo, self._nav_anim, self.verticalScrollBar(), index, hint)
         else:
             super().scrollTo(index, hint)
 
@@ -1607,7 +1655,7 @@ class ViewerStrip(QListWidget):
         if self._smooth_scroll_to:
             self._scroller.stop()
             bar = self.verticalScrollBar() if self.vertical else self.horizontalScrollBar()
-            _animate_scroll_to(self, self._nav_anim, bar, index, hint)
+            _animate_scroll_to(super().scrollTo, self._nav_anim, bar, index, hint)
         else:
             super().scrollTo(index, hint)
 
@@ -3473,7 +3521,7 @@ class ChromeTitleBar(QFrame):
         super().mouseDoubleClickEvent(event)
 
 
-class DirectoryTree(QTreeView):
+class DirectoryTree(_SmoothScrollMixin, QTreeView):
     """Дерево папок, которое принимает URL-адреса локальных файлов, не позволяя своей модели перемещать их.
     """
 
@@ -3481,6 +3529,7 @@ class DirectoryTree(QTreeView):
 
     def __init__(self) -> None:
         super().__init__()
+        self._init_smooth_scroll()
         self.setProperty("treeFocused", False)
         self.setDragEnabled(True)
         self.setAcceptDrops(True)
@@ -3543,11 +3592,12 @@ class DirectoryTree(QTreeView):
         event.acceptProposedAction()
 
 
-class FavoritesList(QListWidget):
+class FavoritesList(_SmoothScrollMixin, QListWidget):
     """Переупорядочиваемый список, в котором при перетаскивании отображается путь к папке."""
 
     def __init__(self) -> None:
         super().__init__()
+        self._init_smooth_scroll()
         self.setObjectName("favoritesList")
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setDragEnabled(True)
