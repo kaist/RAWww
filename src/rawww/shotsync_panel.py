@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from .i18n import gettext as _
+from .scrolling import enable_smooth_wheel
 
 IconProvider = Callable[..., QIcon]
 SHOTSYNC_BASE_URL = "https://shotsync.ru"
@@ -234,6 +235,7 @@ class ShotSyncPanel(QWidget):
         layout.addWidget(self.shooting_status)
 
         self.shooting_list = QListWidget()
+        enable_smooth_wheel(self.shooting_list)
         self.shooting_list.setObjectName("shotsyncShootingList")
         self.shooting_list.setUniformItemSizes(False)
         self.shooting_list.itemClicked.connect(self._emit_activated)

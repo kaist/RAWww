@@ -11,6 +11,7 @@ import sys
 from PySide6.QtCore import QEvent, QKeyCombination, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QTextEdit
+from .scrolling import SmoothScrollArea, enable_smooth_wheel
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -51,6 +52,7 @@ class HelpDialog(QDialog):
         layout.addWidget(hint)
 
         table = QTableWidget(len(HOTKEY_DEFAULTS) + len(FIXED_HOTKEYS), 2)
+        enable_smooth_wheel(table)
         table.setObjectName("helpHotkeysTable")
         table.setHorizontalHeaderLabels((_("Действие"), _("Сочетание")))
         table.verticalHeader().hide()
@@ -179,7 +181,7 @@ class SettingsDialog(QDialog):
     @staticmethod
     def _scrollable_settings_tab(content: QWidget) -> QScrollArea:
         """Даёт длинной вкладке прокрутку, не увеличивая окно за пределы экрана."""
-        scroll = QScrollArea()
+        scroll = SmoothScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setWidget(content)
@@ -508,6 +510,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.swap_rating_color)
 
         table = QTableWidget(len(HOTKEY_DEFAULTS), 2)
+        enable_smooth_wheel(table)
         table.setObjectName("hotkeysTable")
         table.setHorizontalHeaderLabels((_("Действие"), _("Сочетание")))
         table.verticalHeader().hide()
@@ -774,6 +777,7 @@ class QuickTransferDialog(QDialog):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         self.destinations = QListWidget()
+        enable_smooth_wheel(self.destinations)
         self.destinations.setObjectName("quickTransferDestinations")
         self.destinations.installEventFilter(self)
         for number, destination in enumerate(destinations[:9], start=1):
@@ -996,6 +1000,8 @@ class BatchRenameDialog(QDialog):
         lists = QSplitter(Qt.Orientation.Horizontal)
         self._before_list = QListWidget()
         self._after_list = QListWidget()
+        enable_smooth_wheel(self._before_list)
+        enable_smooth_wheel(self._after_list)
         self._before_list.verticalScrollBar().valueChanged.connect(
             self._after_list.verticalScrollBar().setValue
         )
@@ -1257,6 +1263,7 @@ class CardImportDialog(QDialog):
         source_label.setObjectName("cardImportSection")
         layout.addWidget(source_label)
         self.sources_list = QListWidget()
+        enable_smooth_wheel(self.sources_list)
         self.sources_list.setObjectName("cardImportSources")
         self.sources_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         for source, label in self.sources:
