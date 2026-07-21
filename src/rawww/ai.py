@@ -24,6 +24,7 @@ from PIL import Image, ImageOps
 
 from .cache import FolderCache
 from .face_analysis import recognize
+from .focus import analyze_focus
 from .imaging import RAW_EXTENSIONS
 from .runtime_paths import data_path
 from .task_lifecycle import retire_executor
@@ -33,6 +34,7 @@ MODEL_ROOT = data_path("models")
 CLIP_MODEL = MODEL_ROOT / "clip" / "patch32_v1.onnx"
 EMBEDDING_BATCH_SIZE = 16
 FACE_BATCH_SIZE = 4
+FOCUS_BATCH_SIZE = 8
 FACE_LONG_SIDE = 640
 ANALYSIS_SOURCE_BATCH_SIZE = 8
 
@@ -187,6 +189,25 @@ def recognize_face_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[str
     return results
 
 
+def analyze_focus_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[str, str]]:
+    """Оценивает резкость кадров и возвращает JSON анализа фокуса для каждого.
+
+    Работает по тому же подготовленному источнику, что и остальные детекторы,
+    поэтому не требует отдельного декодирования файла.
+    """
+    lower_background_priority()
+    results = []
+    for item in paths:
+        path = item[0] if isinstance(item, tuple) else item
+        try:
+            with _load_rgb(item) as image:
+                result = analyze_focus(image)
+            results.append((path, result.to_json()))
+        except Exception:
+            continue
+    return results
+
+
 class AiPipeline:
     """Управляет фоновым AI-анализом всех изображений рабочей папки.
 
@@ -206,6 +227,7 @@ class AiPipeline:
         self.source_workers: ProcessPoolExecutor | None = None
         self.embedding_workers: ProcessPoolExecutor | None = None
         self.face_workers: ProcessPoolExecutor | None = None
+        self.focus_workers: ProcessPoolExecutor | None = None
         self.futures: set[Future] = set()
         self.jobs: dict[Path, _AiJob] = {}
         self._last_progress: dict[Path, tuple[int, int]] = {}
@@ -231,7 +253,7 @@ class AiPipeline:
         return True
 
     @staticmethod
-    def _prepare_job(job: _AiJob) -> tuple[FolderCache, list[Path], list[Path]]:
+    def _prepare_job(job: _AiJob) -> tuple[FolderCache, list[Path], list[Path], list[Path]]:
         cache = FolderCache(
             job.folder,
             {path.name for path in job.paths},
@@ -241,7 +263,8 @@ class AiPipeline:
         try:
             embedding_paths = cache.missing_ai_paths(list(job.paths), "image_embeddings")
             face_paths = cache.missing_ai_paths(list(job.paths), "face_analysis")
-            return cache, embedding_paths, face_paths
+            focus_paths = cache.missing_ai_paths(list(job.paths), "focus_analysis")
+            return cache, embedding_paths, face_paths, focus_paths
         except Exception:
             cache.close(flush=False)
             raise
@@ -249,10 +272,11 @@ class AiPipeline:
     def _job_prepared(self, job: _AiJob, future: Future) -> None:
         """Принимает подготовленный кэш и запускает вычисления актуального задания."""
         try:
-            cache, embedding_paths, face_paths = future.result()
+            cache, embedding_paths, face_paths, focus_paths = future.result()
             embedding_names = {str(path) for path in embedding_paths}
             face_names = {str(path) for path in face_paths}
-            analysis_paths = list(dict.fromkeys([*embedding_paths, *face_paths]))
+            focus_names = {str(path) for path in focus_paths}
+            analysis_paths = list(dict.fromkeys([*embedding_paths, *face_paths, *focus_paths]))
             with self._futures_lock:
                 if self._shutting_down:
                     cache.close(flush=False)
@@ -260,7 +284,11 @@ class AiPipeline:
                 job.cache = cache
                 job.total = len(analysis_paths)
                 job.remaining_kinds = {
-                    str(path): int(str(path) in embedding_names) + int(str(path) in face_names)
+                    str(path): (
+                        int(str(path) in embedding_names)
+                        + int(str(path) in face_names)
+                        + int(str(path) in focus_names)
+                    )
                     for path in analysis_paths
                 }
                 self._last_progress[job.folder] = (0, job.total)
@@ -277,8 +305,8 @@ class AiPipeline:
                     )
                     self._track(job, source_future)
                     source_future.add_done_callback(
-                        lambda done, target=job, embeddings=embedding_names, faces=face_names:
-                        self._analysis_sources_finished(target, done, embeddings, faces)
+                        lambda done, target=job, embeddings=embedding_names, faces=face_names, focus=focus_names:
+                        self._analysis_sources_finished(target, done, embeddings, faces, focus)
                     )
         except Exception:
             with self._futures_lock:
@@ -308,7 +336,7 @@ class AiPipeline:
             self.futures.add(future)
             job.pending += 1
 
-    def _analysis_sources_finished(self, job, future, embedding_names, face_names) -> None:
+    def _analysis_sources_finished(self, job, future, embedding_names, face_names, focus_names) -> None:
         try:
             with self._futures_lock:
                 if self._shutting_down:
@@ -316,20 +344,22 @@ class AiPipeline:
             if future.cancelled():
                 return
             sources = future.result()
-            self._dispatch_analysis_sources(job, sources, embedding_names, face_names)
+            self._dispatch_analysis_sources(job, sources, embedding_names, face_names, focus_names)
         except Exception:
             pass
         finally:
             self._future_finished(job, future)
 
-    def _dispatch_analysis_sources(self, job, sources, embedding_names, face_names) -> None:
+    def _dispatch_analysis_sources(self, job, sources, embedding_names, face_names, focus_names) -> None:
         """Раздаёт подготовленные изображения моделям и связывает результаты с файлами."""
         embedding_sources = [source for source in sources if source[0] in embedding_names]
         face_sources = [source for source in sources if source[0] in face_names]
+        focus_sources = [source for source in sources if source[0] in focus_names]
         if (
             job.cache is None
             or self.embedding_workers is None
             or self.face_workers is None
+            or self.focus_workers is None
         ):
             return
         self._submit_batches(
@@ -347,6 +377,14 @@ class AiPipeline:
             face_sources,
             FACE_BATCH_SIZE,
             job.cache.store_face_analysis,
+        )
+        self._submit_batches(
+            job,
+            self.focus_workers,
+            analyze_focus_batch,
+            focus_sources,
+            FOCUS_BATCH_SIZE,
+            job.cache.store_focus_analysis,
         )
 
     def pending_count(self, folder: Path | None = None) -> int:
@@ -383,18 +421,23 @@ class AiPipeline:
             self.embedding_workers = ProcessPoolExecutor(max_workers=1, mp_context=process_context)
         if self.face_workers is None:
             self.face_workers = ProcessPoolExecutor(max_workers=1, mp_context=process_context)
+        if self.focus_workers is None:
+            self.focus_workers = ProcessPoolExecutor(max_workers=1, mp_context=process_context)
 
     def release_analysis_workers(self) -> None:
         """Освобождает декодеры и модели ONNX после завершения всех запусков."""
         source_workers, self.source_workers = self.source_workers, None
         embedding_workers, self.embedding_workers = self.embedding_workers, None
         face_workers, self.face_workers = self.face_workers, None
+        focus_workers, self.focus_workers = self.focus_workers, None
         if source_workers is not None:
             retire_executor(source_workers)
         if embedding_workers is not None:
             retire_executor(embedding_workers)
         if face_workers is not None:
             retire_executor(face_workers)
+        if focus_workers is not None:
+            retire_executor(focus_workers)
 
     def _results_finished(self, job: _AiJob, future: Future, store) -> None:
         try:

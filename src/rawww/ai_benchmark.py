@@ -13,7 +13,12 @@ from time import perf_counter
 
 from PySide6.QtCore import QSettings
 
-from .ai import extract_embedding_batch, prepare_analysis_batch, recognize_face_batch
+from .ai import (
+    analyze_focus_batch,
+    extract_embedding_batch,
+    prepare_analysis_batch,
+    recognize_face_batch,
+)
 from .cache import FolderCache
 from .exif import extract_metadata_batch
 from .imaging import decode_pixels, is_supported_image
@@ -46,6 +51,8 @@ def main() -> None:
         warm_faces, face_warm_s = timed(recognize_face_batch, sources[1:])
         faces = [*first_faces, *warm_faces]
         _, face_write_s = timed(cache.store_face_analysis, faces)
+        focus, focus_s = timed(analyze_focus_batch, sources)
+        _, focus_write_s = timed(cache.store_focus_analysis, focus)
         _, exif_write_s = timed(cache.store_photo_metadata, exif)
         with closing(sqlite3.connect(cache.path)) as db:
             face_count = sum(len(json.loads(row[0])) for row in db.execute("SELECT faces_json FROM face_analysis"))
@@ -61,7 +68,15 @@ def main() -> None:
     show("InsightFace cold + first image", len(first_faces), face_cold_s)
     show("InsightFace warm images", len(warm_faces), face_warm_s)
     show("Face SQLite write", len(faces), face_write_s)
+    show("Focus analysis", len(focus), focus_s)
+    show("Focus SQLite write", len(focus), focus_write_s)
     show("EXIF SQLite write", len(exif), exif_write_s)
+    baseline_s = source_s + clip_cold_s + clip_warm_s + face_cold_s + face_warm_s
+    show("AI baseline (source+CLIP+faces)", len(paths), baseline_s)
+    show("AI baseline + focus", len(paths), baseline_s + focus_s + focus_write_s)
+    added_ms = (focus_s + focus_write_s) * 1000 / len(paths) if paths else 0.0
+    overhead = (focus_s + focus_write_s) / baseline_s * 100 if baseline_s else 0.0
+    print(f"Focus overhead: +{added_ms:.2f} ms/img  (+{overhead:.1f}% over AI baseline)")
     print(f"Faces found: {face_count}")
     print(f"Temporary cache size: {cache_size / 1048576:.2f} MiB")
 
