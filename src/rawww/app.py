@@ -34,7 +34,7 @@ from typing import Callable
 
 from send2trash import send2trash
 
-from PySide6.QtCore import QAbstractAnimation, QBuffer, QDir, QEasingCurve, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
+from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
 from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPixmapCache, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -621,11 +621,74 @@ def _mime_requests_move(mime: QMimeData) -> bool:
     return bool(effect and int.from_bytes(effect[:4], "little") & 2)
 
 
-def _kinetic_wheel_scroll(anim: QPropertyAnimation, bar, event, step: int) -> bool:
-    """Инерционно докручивает ``bar`` под колесо мыши, возвращает True, если обработал.
+class _MomentumScroller(QObject):
+    """Инерционная прокрутка полосы через модель «скорость + трение».
 
-    Щелчок колеса добавляется к цели текущей анимации, поэтому быстрые прокрутки
-    накапливают ход, а затухание (задаётся вызывающим) даёт кинетический «докат».
+    Колесо не задаёт новую анимацию на каждый щелчок, а добавляет скорость; таймер
+    ~60 Гц плавно интегрирует позицию и гасит её трением. За счёт этого частые
+    щелчки складываются в непрерывный разгон и мягкий «докат», а не в серию
+    отдельных доводок с рывками между ними. Работает с любой полосой (верт./гориз.):
+    при смене цели или после остановки состояние синхронизируется с реальным
+    значением полосы, чтобы прокрутка не «прыгала».
+    """
+
+    _TICK_MS = 15
+    _FRICTION = 0.9          # доля скорости, сохраняемая за тик
+    _MIN_VELOCITY = 0.5      # ниже этого докат считаем законченным
+    _IMPULSE = 0.13          # доля шага (стороны карточки) в скорость на щелчок
+    _MAX_STEPS = 12          # потолок скорости в шагах, чтобы фляк не улетал
+
+    def __init__(self, parent: QObject) -> None:
+        super().__init__(parent)
+        self._bar = None
+        self._pos = 0.0
+        self._velocity = 0.0
+        self._timer = QTimer(self)
+        self._timer.setInterval(self._TICK_MS)
+        self._timer.timeout.connect(self._tick)
+
+    def flick(self, bar, units: float, step: int) -> None:
+        """Добавляет импульс прокрутки: ``units`` — щелчки колеса (вниз > 0)."""
+        step = max(1, step)
+        if bar is not self._bar or not self._timer.isActive():
+            self._bar = bar
+            self._pos = float(bar.value())
+        self._velocity += units * step * self._IMPULSE
+        cap = step * self._MAX_STEPS
+        self._velocity = max(-cap, min(cap, self._velocity))
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self._velocity = 0.0
+
+    def _tick(self) -> None:
+        bar = self._bar
+        if bar is None:
+            self._timer.stop()
+            return
+        self._pos += self._velocity
+        self._velocity *= self._FRICTION
+        low, high = bar.minimum(), bar.maximum()
+        value = int(round(self._pos))
+        if value <= low:
+            value, self._pos, self._velocity = low, float(low), 0.0
+            self._timer.stop()
+        elif value >= high:
+            value, self._pos, self._velocity = high, float(high), 0.0
+            self._timer.stop()
+        elif abs(self._velocity) < self._MIN_VELOCITY:
+            self._timer.stop()
+        if value != bar.value():
+            bar.setValue(value)
+        else:
+            self._pos = float(bar.value())
+
+
+def _kinetic_wheel_scroll(scroller: "_MomentumScroller", bar, event, step: int) -> bool:
+    """Отдаёт колесо инерционному скроллеру, возвращает True, если обработал.
+
     Тачпады шлют ``pixelDelta`` и уже листают плавно попиксельно — их отдаём
     стандартной обработке, иначе точный жест превратился бы в «залипание».
     Модификаторы тоже не трогаем, чтобы не мешать привычным сценариям.
@@ -634,15 +697,7 @@ def _kinetic_wheel_scroll(anim: QPropertyAnimation, bar, event, step: int) -> bo
     touchpad = not event.pixelDelta().isNull()
     if delta == 0 or touchpad or event.modifiers() != Qt.KeyboardModifier.NoModifier or bar.minimum() == bar.maximum():
         return False
-    running = anim.state() == QAbstractAnimation.State.Running and anim.targetObject() is bar
-    base = anim.endValue() if running else bar.value()
-    target = max(bar.minimum(), min(bar.maximum(), int(round(base - (delta / 120.0) * max(1, step)))))
-    anim.stop()
-    if target != bar.value():
-        anim.setTargetObject(bar)
-        anim.setStartValue(bar.value())
-        anim.setEndValue(target)
-        anim.start()
+    scroller.flick(bar, -delta / 120.0, step)
     return True
 
 
@@ -681,11 +736,8 @@ class PhotoGrid(QListWidget):
         # Попиксельная прокрутка вместо прыжков на карточку: без неё анимация
         # колеса и полоса дёргались бы шагами в целую строку.
         self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
-        # Инерционная прокрутка колесом: цель копится в endValue анимации, а
-        # плавное затухание (OutCubic) даёт кинетический «докат» до остановки.
-        self._scroll_anim = QPropertyAnimation(self.verticalScrollBar(), b"value", self)
-        self._scroll_anim.setDuration(260)
-        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Инерционная прокрутка колесом с моделью «скорость + трение».
+        self._scroller = _MomentumScroller(self)
         self.card_size = 1
         self.vertical = False
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -730,7 +782,7 @@ class PhotoGrid(QListWidget):
         row = self.gridSize().height()
         if row <= 0:
             row = max(64, self.viewport().height() // 4)
-        if _kinetic_wheel_scroll(self._scroll_anim, self.verticalScrollBar(), event, row):
+        if _kinetic_wheel_scroll(self._scroller, self.verticalScrollBar(), event, row):
             event.accept()
         else:
             super().wheelEvent(event)
@@ -1284,12 +1336,9 @@ class ViewerStrip(QListWidget):
         self.setWordWrap(False)
         self.setSpacing(3)
         self.setItemDelegate(PhotoCardDelegate(self, compact=True))
-        # Инерционная прокрутка колесом; цель (вертикальная или горизонтальная
-        # полоса) задаётся в wheelEvent под текущую ориентацию ленты.
-        self._scroll_anim = QPropertyAnimation(self)
-        self._scroll_anim.setPropertyName(b"value")
-        self._scroll_anim.setDuration(260)
-        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Инерционная прокрутка колесом; ось (верт./гориз.) выбирается в wheelEvent
+        # под текущую ориентацию ленты.
+        self._scroller = _MomentumScroller(self)
         self._apply_strip_metrics()
         self.itemClicked.connect(self._activate)
         self._connected_scroll_bar = None
@@ -1484,7 +1533,7 @@ class ViewerStrip(QListWidget):
         else:
             bar = self.horizontalScrollBar()
             step = self.gridSize().width() or 118
-        if _kinetic_wheel_scroll(self._scroll_anim, bar, event, step):
+        if _kinetic_wheel_scroll(self._scroller, bar, event, step):
             event.accept()
         else:
             super().wheelEvent(event)
