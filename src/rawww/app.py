@@ -34,7 +34,7 @@ from typing import Callable
 
 from send2trash import send2trash
 
-from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
+from PySide6.QtCore import QAbstractAnimation, QBuffer, QDir, QEasingCurve, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
 from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPixmapCache, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -621,6 +621,31 @@ def _mime_requests_move(mime: QMimeData) -> bool:
     return bool(effect and int.from_bytes(effect[:4], "little") & 2)
 
 
+def _kinetic_wheel_scroll(anim: QPropertyAnimation, bar, event, step: int) -> bool:
+    """Инерционно докручивает ``bar`` под колесо мыши, возвращает True, если обработал.
+
+    Щелчок колеса добавляется к цели текущей анимации, поэтому быстрые прокрутки
+    накапливают ход, а затухание (задаётся вызывающим) даёт кинетический «докат».
+    Тачпады шлют ``pixelDelta`` и уже листают плавно попиксельно — их отдаём
+    стандартной обработке, иначе точный жест превратился бы в «залипание».
+    Модификаторы тоже не трогаем, чтобы не мешать привычным сценариям.
+    """
+    delta = event.angleDelta().y() or event.angleDelta().x()
+    touchpad = not event.pixelDelta().isNull()
+    if delta == 0 or touchpad or event.modifiers() != Qt.KeyboardModifier.NoModifier or bar.minimum() == bar.maximum():
+        return False
+    running = anim.state() == QAbstractAnimation.State.Running and anim.targetObject() is bar
+    base = anim.endValue() if running else bar.value()
+    target = max(bar.minimum(), min(bar.maximum(), int(round(base - (delta / 120.0) * max(1, step)))))
+    anim.stop()
+    if target != bar.value():
+        anim.setTargetObject(bar)
+        anim.setStartValue(bar.value())
+        anim.setEndValue(target)
+        anim.start()
+    return True
+
+
 class PhotoGrid(QListWidget):
     """Главная сетка фотографий и папок в рабочей вкладке.
 
@@ -653,6 +678,14 @@ class PhotoGrid(QListWidget):
         self.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.setMovement(QListWidget.Movement.Static)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        # Попиксельная прокрутка вместо прыжков на карточку: без неё анимация
+        # колеса и полоса дёргались бы шагами в целую строку.
+        self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        # Инерционная прокрутка колесом: цель копится в endValue анимации, а
+        # плавное затухание (OutCubic) даёт кинетический «докат» до остановки.
+        self._scroll_anim = QPropertyAnimation(self.verticalScrollBar(), b"value", self)
+        self._scroll_anim.setDuration(260)
+        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.card_size = 1
         self.vertical = False
         self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
@@ -685,6 +718,22 @@ class PhotoGrid(QListWidget):
         super().resizeEvent(event)
         self._update_card_size()
         self.viewportChanged.emit()
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        """Плавно докручивает сетку колесом с инерцией вместо мгновенного прыжка.
+
+        Каждый щелчок колеса добавляется к цели текущей анимации, поэтому быстрые
+        прокрутки накапливают ход, а затухание даёт кинетический «докат». Модификаторы
+        и горизонтальные жесты отдаём стандартной обработке, чтобы не сломать
+        привычные сценарии тачпада.
+        """
+        row = self.gridSize().height()
+        if row <= 0:
+            row = max(64, self.viewport().height() // 4)
+        if _kinetic_wheel_scroll(self._scroll_anim, self.verticalScrollBar(), event, row):
+            event.accept()
+        else:
+            super().wheelEvent(event)
 
     def _emit_open(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.ItemDataRole.UserRole)
@@ -1235,6 +1284,12 @@ class ViewerStrip(QListWidget):
         self.setWordWrap(False)
         self.setSpacing(3)
         self.setItemDelegate(PhotoCardDelegate(self, compact=True))
+        # Инерционная прокрутка колесом; цель (вертикальная или горизонтальная
+        # полоса) задаётся в wheelEvent под текущую ориентацию ленты.
+        self._scroll_anim = QPropertyAnimation(self)
+        self._scroll_anim.setPropertyName(b"value")
+        self._scroll_anim.setDuration(260)
+        self._scroll_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._apply_strip_metrics()
         self.itemClicked.connect(self._activate)
         self._connected_scroll_bar = None
@@ -1422,15 +1477,17 @@ class ViewerStrip(QListWidget):
             self.update(self.visualItemRect(item))
 
     def wheelEvent(self, event) -> None:  # noqa: N802
-        """Преобразует колесо мыши в горизонтальную прокрутку нижней ленты."""
-        if not self.vertical:
-            delta = event.angleDelta().y() or event.pixelDelta().y()
-            if delta:
-                bar = self.horizontalScrollBar()
-                bar.setValue(bar.value() - delta)
-                event.accept()
-                return
-        super().wheelEvent(event)
+        """Инерционно листает ленту колесом вдоль её оси (вертикаль сбоку, горизонталь внизу)."""
+        if self.vertical:
+            bar = self.verticalScrollBar()
+            step = self.gridSize().height() or 104
+        else:
+            bar = self.horizontalScrollBar()
+            step = self.gridSize().width() or 118
+        if _kinetic_wheel_scroll(self._scroll_anim, bar, event, step):
+            event.accept()
+        else:
+            super().wheelEvent(event)
 
     def update_preview(self, path: Path, preview: QImage) -> None:
         item = self._items_by_path.get(path)
