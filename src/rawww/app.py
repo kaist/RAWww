@@ -942,11 +942,8 @@ class MarkIndicatorButton(QToolButton):
         gradient.setColorAt(0.48, fill)
         gradient.setColorAt(1, fill.darker(118))
         painter.setBrush(gradient)
-        painter.setPen(QPen(QColor(255, 255, 255, 82), 1.0))
+        painter.setPen(QPen(QColor(255, 255, 255, 240), 2.0))
         painter.drawEllipse(rect)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(0, 0, 0, 65), 1.0))
-        painter.drawEllipse(rect.adjusted(2.0, 2.0, -2.0, -2.0))
         if self.text():
             font = QFont(self.font())
             font.setPointSize(13)

@@ -1936,19 +1936,20 @@ def _orientation_icon(vertical: bool, size: int = 18, color: str = "#aeb5bf") ->
     Значок отражает текущее состояние переключателя, поэтому одна кнопка и
     показывает режим, и намекает на то, что его можно сменить.
     """
-    pixmap = QPixmap(size * 2, size * 2)
+    side = size * 2
+    pixmap = QPixmap(side, side)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor(color), max(2, size // 8))
+    pen = QPen(QColor(color), max(2, size // 9))
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    full = pixmap.rect()
     if vertical:
-        rect = QRect(full.width() // 2 - size * 6 // 10, size * 3 // 10, size * 12 // 10, size * 18 // 10)
+        width, height = round(side * 0.44), round(side * 0.72)
     else:
-        rect = QRect(size * 3 // 10, full.height() // 2 - size * 6 // 10, size * 18 // 10, size * 12 // 10)
+        width, height = round(side * 0.72), round(side * 0.44)
+    rect = QRect((side - width) // 2, (side - height) // 2, width, height)
     painter.drawRoundedRect(rect, size // 6, size // 6)
     painter.end()
     return QIcon(pixmap)
