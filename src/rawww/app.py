@@ -3804,7 +3804,7 @@ class Workspace(QMainWindow):
         self.current_dir = initial_directory or self._initial_directory()
         thumbnail_size = max(0, min(3, self.settings.value("thumbnail_size", 1, int)))
         self.workspace_state = WorkspaceState(self.current_dir, thumbnail_size=thumbnail_size)
-        self.vertical_orientation = self.settings.value("interface/vertical_orientation", False, bool)
+        self.vertical_orientation = self._folder_orientation(self.current_dir)
         self.folder_watcher = QFileSystemWatcher(self)
         self.folder_watcher.directoryChanged.connect(self._folder_changed)
         self.folder_change_timer = QTimer(self)
@@ -7097,6 +7097,7 @@ class Workspace(QMainWindow):
         self._refresh_shotsync_tab_indicator()
         self._refresh_shotsync_current_shooting()
         self._restore_series_mode(directory)
+        self._restore_orientation(directory)
         self._pending_folder_grid_context = self._load_folder_grid_context(directory)
         self._pending_folder_grid_restore = True
         self.settings.setValue("last_directory", str(directory))
@@ -7333,6 +7334,23 @@ class Workspace(QMainWindow):
             enabled = self.settings.value(legacy_key, True, bool)
             self.settings.setValue(setting_key, enabled)
         self.set_series_mode(enabled, apply_view=False)
+
+    def _folder_orientation(self, directory: Path) -> bool:
+        """Возвращает ориентацию сетки для папки.
+
+        У каждой папки может быть собственная запомненная ориентация; если её
+        нет, берётся общий последний выбор пользователя.
+        """
+        key = f"{self._folder_settings_prefix(directory)}/vertical_orientation"
+        if self.settings.contains(key):
+            return self.settings.value(key, False, bool)
+        return self.settings.value("interface/vertical_orientation", False, bool)
+
+    def _restore_orientation(self, directory: Path) -> None:
+        """Применяет ориентацию, запомненную для открываемой папки."""
+        vertical = self._folder_orientation(directory)
+        if vertical != self.vertical_orientation:
+            self._apply_orientation(vertical)
 
     def set_series_mode(self, enabled: bool, *, apply_view: bool = True) -> None:
         self.series_toggle.blockSignals(True)
@@ -10150,11 +10168,21 @@ class Workspace(QMainWindow):
 
     def _toggle_orientation(self) -> None:
         """Переключает всю раскладку между альбомной и портретной ориентацией."""
-        self.vertical_orientation = not self.vertical_orientation
-        self.settings.setValue("interface/vertical_orientation", self.vertical_orientation)
-        self.grid.set_vertical(self.vertical_orientation)
-        self.grid_zoom_controls.set_vertical(self.vertical_orientation)
-        self.full_view.set_vertical(self.vertical_orientation)
+        vertical = not self.vertical_orientation
+        # Общий ключ хранит последний выбор для новых папок, а ключ папки —
+        # её собственную ориентацию, которая восстановится при повторном заходе.
+        self.settings.setValue("interface/vertical_orientation", vertical)
+        self.settings.setValue(
+            f"{self._folder_settings_prefix(self.current_dir)}/vertical_orientation", vertical
+        )
+        self._apply_orientation(vertical)
+
+    def _apply_orientation(self, vertical: bool) -> None:
+        """Применяет ориентацию ко всем представлениям без записи настроек."""
+        self.vertical_orientation = vertical
+        self.grid.set_vertical(vertical)
+        self.grid_zoom_controls.set_vertical(vertical)
+        self.full_view.set_vertical(vertical)
         self._position_grid_zoom_controls()
         QTimer.singleShot(0, self._keep_current_grid_item_visible)
 
@@ -10284,6 +10312,10 @@ class Workspace(QMainWindow):
             show_series_strip=not (len(series) > 1 and series[0] in self.expanded_series),
         )
         self._prioritize_full_strip_thumbs(strip_current, strip_paths, series)
+        # Видимая часть ленты может быть шире окна вокруг текущего кадра
+        # (особенно у высокой вертикальной ленты), поэтому после раскладки
+        # дополнительно продвигаем именно то, что реально попало на экран.
+        QTimer.singleShot(0, self._prioritize_visible_full_strip_thumbs)
 
     def _prioritize_full_strip_thumbs(self, current: Path, strip_paths: list[Path], series: list[Path]) -> None:
         """Продвигает миниатюры актуальных лент в общей очереди сетки."""
