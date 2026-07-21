@@ -1,0 +1,1788 @@
+# Chinese translations for PROJECT.
+# Copyright (C) 2026 ORGANIZATION
+# This file is distributed under the same license as the PROJECT project.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: PROJECT VERSION\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2026-07-21 17:06+0000\n"
+"PO-Revision-Date: 2026-07-21 17:06+0000\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh\n"
+"Language-Team: zh <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#, python-brace-format
+msgid "Несколько XMP должны получить имя «{name}»"
+msgstr "多个 XMP 需命名为 «{name}»"
+
+#, python-brace-format
+msgid "XMP «{name}» уже существует"
+msgstr "XMP «{name}» 已存在"
+
+msgid "быстр. метка"
+msgstr "快速标记"
+
+msgid "Настроить быструю метку; M — применить"
+msgstr "设置快速标记；M — 应用"
+
+msgid "Автоперелистывание после метки"
+msgstr "标记后自动翻页"
+
+msgid "Сбросить цвет"
+msgstr "重置颜色"
+
+#, python-brace-format
+msgid "Рейтинг {n}"
+msgstr "评分 {n}"
+
+msgid "Сбросить рейтинг"
+msgstr "重置评分"
+
+msgid "Комментарий"
+msgstr "评论"
+
+msgid "Настроить быструю метку"
+msgstr "设置快速标记"
+
+msgid "Красная метка"
+msgstr "红色标记"
+
+msgid "Жёлтая метка"
+msgstr "黄色标记"
+
+msgid "Зелёная метка"
+msgstr "绿色标记"
+
+msgid "Синяя метка"
+msgstr "蓝色标记"
+
+msgid "Фиолетовая метка"
+msgstr "紫色标记"
+
+msgid "Сбросить фильтр по лицу"
+msgstr "重置人脸筛选"
+
+msgid "Ищу похожие лица"
+msgstr "正在查找相似人脸"
+
+msgid "Аудиокомментарий"
+msgstr "语音评论"
+
+msgid "Свернуть ленту превью"
+msgstr "收起预览条"
+
+msgid "Воспроизвести / пауза (Пробел)"
+msgstr "播放 / 暂停（空格）"
+
+msgid "Развернуть ленту превью"
+msgstr "展开预览条"
+
+msgid "Показать фото с этим лицом"
+msgstr "显示含此人脸的照片"
+
+msgid "Добавить лицо в набор"
+msgstr "将人脸加入集合"
+
+msgid "Снять все метки"
+msgstr "清除所有标记"
+
+msgid "Применить быструю метку (M)"
+msgstr "应用快速标记（M）"
+
+msgid "Уменьшить миниатюры"
+msgstr "缩小缩略图"
+
+msgid "Увеличить миниатюры"
+msgstr "放大缩略图"
+
+msgid "Вертикальная ориентация — нажмите для горизонтальной"
+msgstr "竖向排列 — 点击切换为横向"
+
+msgid "Горизонтальная ориентация — нажмите для вертикальной"
+msgstr "横向排列 — 点击切换为竖向"
+
+msgid "Нет подключения к интернету."
+msgstr "无网络连接。"
+
+msgid "Не удалось подключиться к ShotSync."
+msgstr "无法连接到 ShotSync。"
+
+#, python-brace-format
+msgid "≈ {h} ч {m} мин"
+msgstr "≈ {h} 小时 {m} 分"
+
+#, python-brace-format
+msgid "≈ {m} мин {s} с"
+msgstr "≈ {m} 分 {s} 秒"
+
+#, python-brace-format
+msgid "≈ {s} с"
+msgstr "≈ {s} 秒"
+
+msgid "Выполняется файловая операция"
+msgstr "正在执行文件操作"
+
+msgid "Папка открывается"
+msgstr "正在打开文件夹"
+
+msgid "Обновляю список"
+msgstr "正在刷新列表"
+
+msgid "Папка с таким именем уже существует."
+msgstr "同名文件夹已存在。"
+
+msgid "Ошибка"
+msgstr "错误"
+
+msgid "Импорт с карты памяти"
+msgstr "从存储卡导入"
+
+msgid "Съёмки ShotSync (shotsync.ru)"
+msgstr "ShotSync 拍摄 (shotsync.ru)"
+
+msgid "ПАПКИ"
+msgstr "文件夹"
+
+msgid "На уровень вверх"
+msgstr "上一级"
+
+msgid "Создать папку"
+msgstr "新建文件夹"
+
+msgid "ИЗБРАННОЕ"
+msgstr "收藏"
+
+msgid "Удалить выбранную папку из избранного или перетащить её сюда"
+msgstr "从收藏中移除所选文件夹，或将其拖到此处"
+
+msgid "Добавить текущую папку в избранное"
+msgstr "将当前文件夹加入收藏"
+
+msgid "Все рейтинги"
+msgstr "全部评分"
+
+msgid "Все цвета"
+msgstr "全部颜色"
+
+msgid "Без цвета"
+msgstr "无颜色"
+
+msgid "Красный"
+msgstr "红色"
+
+msgid "Жёлтый"
+msgstr "黄色"
+
+msgid "Зелёный"
+msgstr "绿色"
+
+msgid "Синий"
+msgstr "蓝色"
+
+msgid "Фиолетовый"
+msgstr "紫色"
+
+msgid "Фото и видео"
+msgstr "照片和视频"
+
+msgid "Фото"
+msgstr "照片"
+
+msgid "Видео"
+msgstr "视频"
+
+msgid "JPG и RAW"
+msgstr "JPG 和 RAW"
+
+msgid "Только JPG"
+msgstr "仅 JPG"
+
+msgid "Только RAW"
+msgstr "仅 RAW"
+
+msgid "Все камеры"
+msgstr "全部相机"
+
+msgid "Все планы"
+msgstr "全部景别"
+
+msgid "Крупный"
+msgstr "特写"
+
+msgid "Средний"
+msgstr "中景"
+
+msgid "Общий"
+msgstr "全景"
+
+msgid "Без лиц"
+msgstr "无人脸"
+
+msgid "Все глаза"
+msgstr "全部"
+
+msgid "Закрытые глаза"
+msgstr "闭眼"
+
+msgid "По имени ↑"
+msgstr "按名称 ↑"
+
+msgid "По имени ↓"
+msgstr "按名称 ↓"
+
+msgid "По времени ↑"
+msgstr "按时间 ↑"
+
+msgid "По времени ↓"
+msgstr "按时间 ↓"
+
+msgid "По рейтингу"
+msgstr "按评分"
+
+msgid "Поиск"
+msgstr "搜索"
+
+msgid "AI: серии и лица"
+msgstr "AI：连拍与人脸"
+
+msgid "Синхронизация метаданных XMP"
+msgstr "XMP 元数据同步"
+
+msgid "Утилиты"
+msgstr "工具"
+
+msgid "Нажмите на крестик справа, чтобы остановить AI-анализ"
+msgstr "点击右侧的叉号以停止 AI 分析"
+
+msgid "СЕРИИ И ЛИЦА"
+msgstr "连拍与人脸"
+
+msgid "Серии"
+msgstr "连拍"
+
+msgid "Включить или выключить группировку по сериям"
+msgstr "开启或关闭按连拍分组"
+
+msgid "Лица"
+msgstr "人脸"
+
+msgid "Открыть наборы лиц"
+msgstr "打开人脸集合"
+
+msgid "КРУПНОСТЬ ПЛАНА"
+msgstr "景别"
+
+msgid "Все"
+msgstr "全部"
+
+msgid "ГЛАЗА"
+msgstr "眼睛"
+
+msgid "Выберите, как работать со съёмкой."
+msgstr "选择如何处理该拍摄。"
+
+msgid "Взять на отбор"
+msgstr "取来筛选"
+
+msgid "Получать оригиналы"
+msgstr "接收原图"
+
+msgid "Загружаем съёмку на сервер…"
+msgstr "正在上传拍摄到服务器…"
+
+msgid "Подготавливаем фотографии…"
+msgstr "正在准备照片…"
+
+msgid "переместить"
+msgstr "移动"
+
+msgid "скопировать"
+msgstr "复制"
+
+msgid "Введите корректное имя папки"
+msgstr "请输入有效的文件夹名称"
+
+msgid "Папка с таким именем уже существует"
+msgstr "同名文件夹已存在"
+
+msgid "Кэш папки"
+msgstr "文件夹缓存"
+
+#, python-brace-format
+msgid ""
+"Папка переименована, но не удалось перенести её кэш:\n"
+"{error}"
+msgstr ""
+"文件夹已重命名，但无法迁移其缓存：\n"
+"{error}"
+
+#, python-brace-format
+msgid "Новая папка {n}"
+msgstr "新建文件夹 {n}"
+
+msgid "Текущая директория еще не готова в модели дерева."
+msgstr "当前目录在树模型中尚未就绪。"
+
+msgid "QFileSystemModel не смог создать папку."
+msgstr "QFileSystemModel 无法创建文件夹。"
+
+#, python-brace-format
+msgid "Не удалось создать папку: {error}"
+msgstr "无法创建文件夹：{error}"
+
+msgid "Открыть в новой вкладке"
+msgstr "在新标签页中打开"
+
+msgid "Переименовать"
+msgstr "重命名"
+
+msgid "Удалить"
+msgstr "删除"
+
+msgid "Открыть"
+msgstr "打开"
+
+msgid "Показать в папке"
+msgstr "在文件夹中显示"
+
+msgid "Не удалось подобрать свободное имя"
+msgstr "无法找到可用的名称"
+
+#, python-brace-format
+msgid "Что сделать при перемещении «{name}»?"
+msgstr "移动 «{name}» 时如何处理？"
+
+#, python-brace-format
+msgid "Что сделать при копировании «{name}»?"
+msgstr "复制 «{name}» 时如何处理？"
+
+msgid "Файл уже существует"
+msgstr "文件已存在"
+
+#, python-brace-format
+msgid "В папке назначения уже есть «{name}»."
+msgstr "目标文件夹中已存在 «{name}»。"
+
+msgid "Пропустить"
+msgstr "跳过"
+
+msgid "Заменить"
+msgstr "替换"
+
+msgid "Отмена"
+msgstr "取消"
+
+msgid "Файловая операция"
+msgstr "文件操作"
+
+msgid "Дождитесь завершения текущего приёма, отбора или отправки ShotSync."
+msgstr "请等待当前 ShotSync 的接收、筛选或上传完成。"
+
+msgid "Выполняется перемещение"
+msgstr "正在移动"
+
+msgid "Выполняется копирование"
+msgstr "正在复制"
+
+#, python-brace-format
+msgid "{name}: уже находится в этой папке"
+msgstr "{name}：已在此文件夹中"
+
+#, python-brace-format
+msgid "{name}: нельзя поместить папку внутрь самой себя"
+msgstr "{name}：无法将文件夹放入其自身内"
+
+#, python-brace-format
+msgid "{name}: не удалось заменить {error}"
+msgstr "{name}：无法替换 {error}"
+
+#, python-brace-format
+msgid "кэш {name}: {error}"
+msgstr "缓存 {name}：{error}"
+
+msgid "Копирование файлов"
+msgstr "复制文件"
+
+msgid "Не удалось обработать некоторые объекты:\n"
+msgstr "部分项目无法处理：\n"
+
+msgid "Не удалось поставить некоторые объекты в очередь:\n"
+msgstr "部分项目无法加入队列：\n"
+
+msgid "Удаление"
+msgstr "删除"
+
+msgid "Фотографии из съёмки, взятой на отбор из ShotSync, нельзя удалить отдельно."
+msgstr "从 ShotSync 取来筛选的拍摄中的照片无法单独删除。"
+
+msgid "Нельзя удалить корневую папку диска."
+msgstr "无法删除磁盘的根文件夹。"
+
+#, python-brace-format
+msgid "Удалить навсегда {count} объект(а)?"
+msgstr "永久删除 {count} 个项目？"
+
+#, python-brace-format
+msgid "Переместить в корзину {count} объект(а)?"
+msgstr "将 {count} 个项目移到回收站？"
+
+#, python-brace-format
+msgid ""
+"\n"
+"• и ещё {n}"
+msgstr ""
+"\n"
+"• 还有 {n} 个"
+
+msgid "Выполняется удаление"
+msgstr "正在删除"
+
+msgid "Не удалось удалить:\n"
+msgstr "无法删除：\n"
+
+#, python-brace-format
+msgid ""
+"Съёмный носитель\n"
+"{label}"
+msgstr ""
+"可移动设备\n"
+"{label}"
+
+#, python-brace-format
+msgid "Съёмка {id}"
+msgstr "拍摄 {id}"
+
+msgid " Открыты сохранённые съёмки; изменения синхронизируются при подключении."
+msgstr " 已打开保存的拍摄；重新连接后将同步更改。"
+
+msgid "Съёмка ShotSync"
+msgstr "ShotSync 拍摄"
+
+msgid "Удалить локальную копию"
+msgstr "删除本地副本"
+
+#, python-brace-format
+msgid ""
+"Удалить с компьютера папку «{name}»?\n"
+"\n"
+"Съёмка и метки на ShotSync останутся доступны. Удалятся только локальные файлы."
+msgstr ""
+"从计算机删除文件夹 «{name}»？\n"
+"\n"
+"ShotSync 上的拍摄和标记仍然可用。仅删除本地文件。"
+
+#, python-brace-format
+msgid ""
+"Не удалось удалить локальную папку:\n"
+"{error}"
+msgstr ""
+"无法删除本地文件夹：\n"
+"{error}"
+
+msgid "Удалить съёмку с сервера"
+msgstr "从服务器删除拍摄"
+
+msgid "Удалить съёмку из ShotSync? Исходная папка с фотографиями останется на компьютере."
+msgstr "从 ShotSync 删除该拍摄？原始照片文件夹将保留在计算机上。"
+
+#, python-brace-format
+msgid "Куда сохранять фото «{title}»"
+msgstr "将照片 «{title}» 保存到何处"
+
+#, python-brace-format
+msgid ""
+"Не удалось создать папку:\n"
+"{error}"
+msgstr ""
+"无法创建文件夹：\n"
+"{error}"
+
+msgid "Получаем фотографии с сервера…"
+msgstr "正在从服务器获取照片…"
+
+msgid "Подготавливаем загрузку…"
+msgstr "正在准备下载…"
+
+#, python-brace-format
+msgid "Получено фотографий: {done} из {total}"
+msgstr "已接收照片：{done} / {total}"
+
+msgid "Загружаем фотографии…"
+msgstr "正在下载照片…"
+
+#, python-brace-format
+msgid ""
+"Не удалось загрузить съёмку:\n"
+"{error}"
+msgstr ""
+"无法下载拍摄：\n"
+"{error}"
+
+msgid "Сначала войдите в ShotSync на боковой панели."
+msgstr "请先在侧栏登录 ShotSync。"
+
+msgid "Отправить на ShotSync"
+msgstr "发送到 ShotSync"
+
+msgid "Новая съёмка"
+msgstr "新拍摄"
+
+msgid "Укажите название и папку с фотографиями для отправки на отбор."
+msgstr "请输入名称并选择照片文件夹以发送进行筛选。"
+
+msgid "Название съёмки"
+msgstr "拍摄名称"
+
+msgid "Папка не выбрана"
+msgstr "未选择文件夹"
+
+msgid "Выбрать папку…"
+msgstr "选择文件夹…"
+
+msgid "AI: лица и серии"
+msgstr "AI：人脸与连拍"
+
+msgid "Отправить"
+msgstr "发送"
+
+msgid "Папка со съёмкой"
+msgstr "拍摄文件夹"
+
+msgid "Отправить на отбор"
+msgstr "发送进行筛选"
+
+msgid "Папка с фотографиями"
+msgstr "照片文件夹"
+
+msgid "Выбрать папку на диске…"
+msgstr "在磁盘上选择文件夹…"
+
+msgid "Включить обработку лиц и серий на сервере ShotSync"
+msgstr "在 ShotSync 服务器上启用人脸和连拍处理"
+
+msgid "Выберите существующую папку с фотографиями."
+msgstr "请选择一个已存在的照片文件夹。"
+
+#, python-brace-format
+msgid "Загружено фотографий: {done} из {total}"
+msgstr "已上传照片：{done} / {total}"
+
+#, python-brace-format
+msgid ""
+"Съёмка отправлена, но {failed} фото не удалось загрузить.\n"
+"Повторите отправку той же папки — недостающие кадры догрузятся."
+msgstr ""
+"拍摄已发送，但有 {failed} 张照片未能上传。\n"
+"重新发送同一文件夹 — 缺失的照片会补传。"
+
+#, python-brace-format
+msgid ""
+"Не удалось отправить съёмку:\n"
+"{error}"
+msgstr ""
+"无法发送拍摄：\n"
+"{error}"
+
+msgid "Эта папка не связана со съёмкой ShotSync."
+msgstr "此文件夹未关联任何 ShotSync 拍摄。"
+
+#, python-brace-format
+msgid ""
+"Не удалось получить метки:\n"
+"{error}"
+msgstr ""
+"无法获取标记：\n"
+"{error}"
+
+msgid "Пользовательский"
+msgstr "自定义"
+
+msgid "Группировка по сериям включена"
+msgstr "已启用按连拍分组"
+
+msgid "Группировка по сериям выключена"
+msgstr "已关闭按连拍分组"
+
+msgid "AI-анализ поставлен в очередь"
+msgstr "AI 分析已加入队列"
+
+msgid "Находит похожие кадры и лица среди фотографий, которые ещё не были обработаны."
+msgstr "在尚未处理的照片中查找相似画面和人脸。"
+
+msgid "Обработать серии и лица"
+msgstr "处理连拍与人脸"
+
+msgid "В текущей папке все фото уже обработаны."
+msgstr "当前文件夹中的所有照片均已处理。"
+
+msgid "Автоматически синхронизировать XMP"
+msgstr "自动同步 XMP"
+
+msgid "Записать XMP"
+msgstr "写入 XMP"
+
+msgid "Прочитать XMP"
+msgstr "读取 XMP"
+
+#, python-brace-format
+msgid "XMP: ошибок {n}"
+msgstr "XMP：{n} 个错误"
+
+#, python-brace-format
+msgid "XMP: локальных изменений {n}"
+msgstr "XMP：{n} 处本地更改"
+
+msgid "XMP синхронизирован"
+msgstr "XMP 已同步"
+
+msgid "Инструменты для пакетной работы с файлами."
+msgstr "用于批量处理文件的工具。"
+
+msgid "Групповое переименование"
+msgstr "批量重命名"
+
+msgid "Групповой резайс"
+msgstr "批量调整尺寸"
+
+msgid "Уменьшить JPG"
+msgstr "压缩 JPG"
+
+msgid "Пока не реализовано"
+msgstr "尚未实现"
+
+msgid "Переименование недоступно для папок, связанных со съёмками ShotSync."
+msgstr "与 ShotSync 拍摄关联的文件夹无法重命名。"
+
+msgid "Подождите, пока загрузится папка."
+msgstr "请等待文件夹加载完成。"
+
+msgid "В текущем списке нет фотографий."
+msgstr "当前列表中没有照片。"
+
+msgid "Выполняется переименование"
+msgstr "正在重命名"
+
+#, python-brace-format
+msgid "Не удалось переименовать файлы: {error}"
+msgstr "无法重命名文件：{error}"
+
+#, python-brace-format
+msgid ""
+"Файлы переименованы, но кэш не обновлён:\n"
+"{error}"
+msgstr ""
+"文件已重命名，但缓存未更新：\n"
+"{error}"
+
+#, python-brace-format
+msgid "Не удалось прочитать папку: {error}"
+msgstr "无法读取文件夹：{error}"
+
+msgid "В текущей папке нет JPG-файлов."
+msgstr "当前文件夹中没有 JPG 文件。"
+
+#, python-brace-format
+msgid "Готово. Сэкономлено {mb} МБ."
+msgstr "完成。已节省 {mb} MB。"
+
+#, python-brace-format
+msgid "Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}"
+msgstr "完成但有错误（{count}）。已节省 {mb} MB。{first}"
+
+msgid "Закрыть"
+msgstr "关闭"
+
+#, python-brace-format
+msgid "Готово с ошибками ({count}): {first}"
+msgstr "完成但有错误（{count}）：{first}"
+
+#, python-brace-format
+msgid "В папке экспорта уже есть «{name}»."
+msgstr "导出文件夹中已存在 «{name}»。"
+
+msgid "Перезаписать"
+msgstr "覆盖"
+
+msgid "Перезаписать все"
+msgstr "全部覆盖"
+
+msgid "Шаблон создаёт одинаковые имена"
+msgstr "模板生成了相同的名称"
+
+#, python-brace-format
+msgid "Файл «{name}» больше не существует"
+msgstr "文件 «{name}» 已不存在"
+
+#, python-brace-format
+msgid "Файл «{name}» уже существует"
+msgstr "文件 «{name}» 已存在"
+
+#, python-brace-format
+msgid " (всего {n})"
+msgstr "（共 {n}）"
+
+#, python-brace-format
+msgid " (выделено: {n})"
+msgstr "（已选：{n}）"
+
+#, python-brace-format
+msgid "Отправка: {done}/{total}"
+msgstr "上传：{done}/{total}"
+
+#, python-brace-format
+msgid " · ошибок: {n}, повторяем"
+msgstr " · 错误：{n}，正在重试"
+
+#, python-brace-format
+msgid "Приём ShotSync: {done}/{total}{suffix}"
+msgstr "ShotSync 接收：{done}/{total}{suffix}"
+
+msgid "Отбор ShotSync…"
+msgstr "ShotSync 筛选…"
+
+#, python-brace-format
+msgid "Отбор ShotSync: {done}/{total}"
+msgstr "ShotSync 筛选：{done}/{total}"
+
+msgid "Получение меток ShotSync…"
+msgstr "正在获取 ShotSync 标记…"
+
+#, python-brace-format
+msgid "Синхронизация меток: {n}"
+msgstr "同步标记：{n}"
+
+msgid "Сканирую папку…"
+msgstr "正在扫描文件夹…"
+
+msgid "Подготовка AI…"
+msgstr "正在准备 AI…"
+
+#, python-brace-format
+msgid "Анализ: {done}/{total}{eta}"
+msgstr "分析：{done}/{total}{eta}"
+
+#, python-brace-format
+msgid "Превью: {done}/{total}"
+msgstr "预览：{done}/{total}"
+
+#, python-brace-format
+msgid "Закрытые глаза  {n}"
+msgstr "闭眼  {n}"
+
+msgid "Без названия"
+msgstr "未命名"
+
+msgid "Это лицо уже есть в наборе."
+msgstr "该人脸已在集合中。"
+
+msgid "Без имени"
+msgstr "未命名"
+
+msgid "Лицо добавлено в набор."
+msgstr "已将人脸加入集合。"
+
+msgid "Наборы лиц"
+msgstr "人脸集合"
+
+msgid "Добавьте лицо, нажав «В набор» на фотографии."
+msgstr "在照片上点击「加入集合」以添加人脸。"
+
+msgid "Имя"
+msgstr "名称"
+
+msgid "Быстрая метка"
+msgstr "快速标记"
+
+msgid "Удалить из набора"
+msgstr "从集合中移除"
+
+msgid "Красная"
+msgstr "红色"
+
+msgid "Жёлтая"
+msgstr "黄色"
+
+msgid "Зелёная"
+msgstr "绿色"
+
+msgid "Синяя"
+msgstr "蓝色"
+
+msgid "Фиолетовая"
+msgstr "紫色"
+
+msgid "Убрать рейтинг"
+msgstr "移除评分"
+
+msgid "Убрать метку"
+msgstr "移除标记"
+
+msgid "Внешний редактор"
+msgstr "外部编辑器"
+
+#, python-brace-format
+msgid ""
+"Не найдено приложение или исполняемый файл редактора:\n"
+"{path}"
+msgstr ""
+"未找到编辑器应用或可执行文件：\n"
+"{path}"
+
+msgid "Adobe Photoshop не найден"
+msgstr "未找到 Adobe Photoshop"
+
+msgid "Установите Adobe Photoshop или укажите исполняемый файл другого редактора в Настройки → Поведение."
+msgstr "请安装 Adobe Photoshop，或在「设置 → 行为」中指定其他编辑器的可执行文件。"
+
+msgid "Не удалось открыть редактор"
+msgstr "无法打开编辑器"
+
+msgid "Новая вкладка"
+msgstr "新标签页"
+
+msgid "Настройки"
+msgstr "设置"
+
+msgid "Помощь"
+msgstr "帮助"
+
+msgid "Свернуть"
+msgstr "最小化"
+
+msgid "Развернуть"
+msgstr "最大化"
+
+msgid "У вас установлена актуальная версия Контрольки."
+msgstr "您已安装最新版本的 Kontrolka。"
+
+msgid "Обновления"
+msgstr "更新"
+
+msgid "Не удалось проверить обновления. Проверьте подключение к интернету и повторите попытку позже."
+msgstr "无法检查更新。请检查网络连接，稍后重试。"
+
+#, python-brace-format
+msgid "<h4>Версия {version}</h4>{changelog}"
+msgstr "<h4>版本 {version}</h4>{changelog}"
+
+msgid "Доступно обновление"
+msgstr "有可用更新"
+
+#, python-brace-format
+msgid "Доступна Контролька {version}"
+msgstr "Kontrolka {version} 现已可用"
+
+msgid "Откройте страницу загрузки, чтобы узнать об изменениях."
+msgstr "打开下载页面以查看更新内容。"
+
+msgid "Открыть страницу загрузки"
+msgstr "打开下载页面"
+
+msgid "Позже"
+msgstr "以后"
+
+msgid "Одна из выбранных карт больше недоступна."
+msgstr "所选存储卡之一已不可用。"
+
+msgid "Подготавливаю список файлов с карты…"
+msgstr "正在准备存储卡上的文件列表…"
+
+#, python-brace-format
+msgid ""
+"Не удалось прочитать карту:\n"
+"{error}"
+msgstr ""
+"无法读取存储卡：\n"
+"{error}"
+
+msgid "Основная папка не может находиться внутри импортируемой карты."
+msgstr "主文件夹不能位于正在导入的存储卡内。"
+
+msgid "Папка резервной копии не может находиться внутри импортируемой карты."
+msgstr "备份文件夹不能位于正在导入的存储卡内。"
+
+msgid "На выбранных картах нет файлов для импорта."
+msgstr "所选存储卡上没有可导入的文件。"
+
+msgid "Все файлы уже есть в папке назначения."
+msgstr "所有文件都已在目标文件夹中。"
+
+msgid "Не удалось поставить импорт в очередь."
+msgstr "无法将导入加入队列。"
+
+msgid "Резервная копия"
+msgstr "备份"
+
+msgid "Основной импорт завершился с ошибкой или был отменён; резервная копия не запускалась."
+msgstr "主导入失败或已取消；未启动备份。"
+
+#, python-brace-format
+msgid ""
+"Не удалось подготовить резервную копию:\n"
+"{error}"
+msgstr ""
+"无法准备备份：\n"
+"{error}"
+
+msgid "Онлайн-справка"
+msgstr "在线帮助"
+
+msgid "Горячие клавиши"
+msgstr "快捷键"
+
+msgid "Папка связана с ShotSync"
+msgstr "文件夹已关联 ShotSync"
+
+msgid "Файловые операции не завершены"
+msgstr "文件操作尚未完成"
+
+msgid "Копирование или перемещение ещё выполняется. Выйти и отменить все операции?"
+msgstr "复制或移动仍在进行中。退出并取消所有操作？"
+
+#, python-brace-format
+msgid "Не удалось подобрать свободное имя для {name}"
+msgstr "无法为 {name} 找到可用的名称"
+
+msgid "Справка по горячим клавишам"
+msgstr "快捷键帮助"
+
+msgid "Сочетания ниже показывают текущие настройки приложения. Их можно переназначить в разделе «Настройки → Горячие клавиши»."
+msgstr "以下快捷键显示应用的当前设置。可在「设置 → 快捷键」中重新分配。"
+
+msgid "Действие"
+msgstr "操作"
+
+msgid "Сочетание"
+msgstr "快捷键"
+
+msgid "Не назначено"
+msgstr "未分配"
+
+msgid "Лог ошибок"
+msgstr "错误日志"
+
+msgid "Необработанные ошибки приложения и фоновых потоков. Лог остаётся только на этом компьютере."
+msgstr "应用和后台线程的未处理错误。日志仅保留在本机。"
+
+msgid "Очистить"
+msgstr "清除"
+
+msgid "Копировать"
+msgstr "复制"
+
+msgid "Поведение"
+msgstr "行为"
+
+msgid "Коды замен"
+msgstr "替换代码"
+
+msgid "Интерфейс"
+msgstr "界面"
+
+msgid "О приложении"
+msgstr "关于"
+
+msgid "Готово"
+msgstr "完成"
+
+msgid "Рабочее пространство"
+msgstr "工作区"
+
+msgid "Выберите, что Контролька будет восстанавливать при следующем запуске."
+msgstr "选择 Kontrolka 下次启动时恢复的内容。"
+
+msgid "Восстанавливать открытые вкладки"
+msgstr "恢复已打开的标签页"
+
+msgid "Удалять без подтверждения по DEL или Shift+DEL"
+msgstr "使用 DEL 或 Shift+DEL 时无需确认即删除"
+
+msgid "Удалять сразу по DEL, без корзины (Shift+DEL — в корзину)"
+msgstr "按 DEL 立即删除，不进回收站（Shift+DEL — 移到回收站）"
+
+msgid "Выполнять копирование и перемещение последовательно"
+msgstr "按顺序执行复制和移动"
+
+msgid "Новые файловые операции становятся в общую очередь. Если выключить, до трёх операций смогут выполняться одновременно."
+msgstr "新的文件操作进入共享队列。若关闭，最多可同时执行三个操作。"
+
+msgid "Не спрашивать при совпадении имён, сразу переименовывать"
+msgstr "名称冲突时不询问，直接重命名"
+
+msgid "Эти параметры применяются к каждому новому импорту с подключённой карты памяти."
+msgstr "这些设置适用于每次从已连接存储卡进行的新导入。"
+
+msgid "Все файлы в одну папку"
+msgstr "所有文件放入一个文件夹"
+
+msgid "Удалять исходные файлы с карты"
+msgstr "从存储卡删除源文件"
+
+msgid "Сделать резервную копию"
+msgstr "创建备份副本"
+
+msgid "Папка резервной копии"
+msgstr "备份文件夹"
+
+msgid "Выбрать папку резервной копии"
+msgstr "选择备份文件夹"
+
+msgid "Всегда запускать AI после превью"
+msgstr "预览后始终运行 AI"
+
+msgid "Как только миниатюры в папке готовы, автоматически запускается анализ серий и лиц. Срабатывает и при добавлении новых фотографий."
+msgstr "文件夹中的缩略图就绪后，会自动开始连拍和人脸分析。添加新照片时也会触发。"
+
+msgid "Кэш"
+msgstr "缓存"
+
+msgid "Кэш содержит миниатюры и результаты анализа фотографий. Очистка не удаляет исходные файлы."
+msgstr "缓存包含缩略图和照片分析结果。清除缓存不会删除原始文件。"
+
+msgid "Очистить кэш"
+msgstr "清除缓存"
+
+msgid "Выберите приложение, в котором открываются файлы по клавише E."
+msgstr "选择按 E 键打开文件所用的应用。"
+
+msgid "Другой редактор"
+msgstr "其他编辑器"
+
+msgid "Путь к приложению или исполняемому файлу"
+msgstr "应用或可执行文件的路径"
+
+msgid "Выбрать исполняемый файл"
+msgstr "选择可执行文件"
+
+msgid "Интеграция с Проводником"
+msgstr "资源管理器集成"
+
+msgid "Добавляет «Открыть в Контрольке» для поддерживаемых файлов и папок. Программа просмотра по умолчанию не меняется."
+msgstr "为受支持的文件和文件夹添加「在 Kontrolka 中打开」。不会更改默认查看器。"
+
+msgid "Выбрать по умолчанию для JPG и RAW…"
+msgstr "设为 JPG 和 RAW 的默认程序…"
+
+msgid "Программы (*.exe);;Все файлы (*)"
+msgstr "程序 (*.exe);;所有文件 (*)"
+
+msgid "Приложения (*.app);;Все файлы (*)"
+msgstr "应用程序 (*.app);;所有文件 (*)"
+
+msgid "Исполняемые файлы (*);;Все файлы (*)"
+msgstr "可执行文件 (*);;所有文件 (*)"
+
+msgid "Выберите редактор"
+msgstr "选择编辑器"
+
+msgid "Доступно в собранном приложении"
+msgstr "在打包后的应用中可用"
+
+msgid "Соберите приложение, чтобы Проводник запускал ctrlka.exe."
+msgstr "请打包应用，以便资源管理器启动 ctrlka.exe。"
+
+msgid "Доступно в собранном приложении Контрольки."
+msgstr "在打包后的 Kontrolka 应用中可用。"
+
+msgid "Удалить из Проводника"
+msgstr "从资源管理器中移除"
+
+msgid "Добавить в Проводник"
+msgstr "添加到资源管理器"
+
+msgid "Не удалось открыть настройки Windows"
+msgstr "无法打开 Windows 设置"
+
+msgid "Удалить интеграцию?"
+msgstr "移除集成？"
+
+msgid "Убрать команду «Открыть в Контрольке» из Проводника?"
+msgstr "从资源管理器中移除「在 Kontrolka 中打开」命令？"
+
+msgid "Не удалось изменить Проводник"
+msgstr "无法修改资源管理器"
+
+msgid "Нажмите новое сочетание в поле. Стрелки, Enter и Esc зарезервированы для навигации."
+msgstr "在字段中按下新的快捷键。方向键、Enter 和 Esc 保留用于导航。"
+
+msgid "Цветовые метки — цифры без Shift"
+msgstr "颜色标记 — 不按 Shift 的数字键"
+
+msgid "Вернуть сочетания по умолчанию"
+msgstr "恢复默认快捷键"
+
+msgid "Настройте элементы, которые показываются поверх изображения в полном просмотре."
+msgstr "设置全屏查看时显示在图像上方的元素。"
+
+msgid "Язык интерфейса"
+msgstr "界面语言"
+
+msgid "Системный"
+msgstr "系统"
+
+msgid "Изменение языка применится после перезапуска приложения."
+msgstr "语言更改将在重启应用后生效。"
+
+msgid "Показывать счетчик файлов в полном просмотре"
+msgstr "在全屏查看时显示文件计数"
+
+msgid "Показывать индикатор меток в полном просмотре"
+msgstr "在全屏查看时显示标记指示器"
+
+msgid "Акцент на лице при зуме"
+msgstr "缩放时聚焦人脸"
+
+msgid "Контролька"
+msgstr "Kontrolka"
+
+#, python-brace-format
+msgid "Версия {version}"
+msgstr "版本 {version}"
+
+msgid "Бесплатное приложение для быстрого просмотра и отбора RAW и JPG. Оценки, цветовые метки, серии, поиск лиц, горячие клавиши и экспорт в XMP — чтобы быстрее перейти от съёмки к готовой работе."
+msgstr "用于快速查看和挑选 RAW 与 JPG 的免费应用。评分、颜色标记、连拍、人脸查找、快捷键和 XMP 导出 — 让您更快从拍摄走向成片。"
+
+msgid "<b>Автор:</b> Игорь Заломский &lt;<a href=\"mailto:igor@zalomskij.ru\">igor@zalomskij.ru</a>&gt;<br>© 2026 Игорь Заломский. Лицензия GNU GPL v3 или более поздней версии.<br><a href=\"https://shotsync.ru/ctrlka\">Контролька на ShotSync</a><br><a href=\"https://github.com/kaist/RAWww\">Исходный код на GitHub</a>"
+msgstr "<b>作者：</b> Igor Zalomskij &lt;<a href=\"mailto:igor@zalomskij.ru\">igor@zalomskij.ru</a>&gt;<br>© 2026 Igor Zalomskij。基于 GNU GPL v3 或更高版本许可。<br><a href=\"https://shotsync.ru/ctrlka\">ShotSync 上的 Kontrolka</a><br><a href=\"https://github.com/kaist/RAWww\">GitHub 上的源代码</a>"
+
+msgid "<b>Определение закрытых глаз:</b> разметка лица <a href=\"https://github.com/deepinsight/insightface\">InsightFace</a> (модель 2d106det), по контуру век считается eye aspect ratio."
+msgstr "<b>闭眼检测：</b>由 <a href=\"https://github.com/deepinsight/insightface\">InsightFace</a> 提供人脸标注（模型 2d106det），根据眼睑轮廓计算眼睛纵横比（EAR）。"
+
+msgid "Автоматически проверять обновления при запуске"
+msgstr "启动时自动检查更新"
+
+msgid "Не отправлять статистику использования"
+msgstr "不发送使用统计"
+
+msgid "Проверить обновления"
+msgstr "检查更新"
+
+#, python-brace-format
+msgid "Размер: {size}"
+msgstr "大小：{size}"
+
+msgid "Удалить все миниатюры и результаты анализа?"
+msgstr "删除所有缩略图和分析结果？"
+
+msgid "Б"
+msgstr "B"
+
+msgid "КБ"
+msgstr "KB"
+
+msgid "МБ"
+msgstr "MB"
+
+msgid "ГБ"
+msgstr "GB"
+
+msgid "Стрелки, Enter и Esc нельзя назначать на другие действия."
+msgstr "方向键、Enter 和 Esc 不能分配给其他操作。"
+
+#, python-brace-format
+msgid "Сочетание {seq} уже назначено действию «{name}»."
+msgstr "快捷键 {seq} 已分配给「{name}」。"
+
+msgid "Новый язык применится после перезапуска приложения."
+msgstr "新语言将在重启应用后生效。"
+
+#, python-brace-format
+msgid "Быстрое {op}"
+msgstr "快速{op}"
+
+#, python-brace-format
+msgid "Куда {op} выделенные файлы?"
+msgstr "将所选文件{op}到何处？"
+
+#, python-brace-format
+msgid "↑/↓ — выбрать · повторите {key} или Enter — выполнить · 1–9 — выполнить сразу"
+msgstr "↑/↓ — 选择 · 再次按 {key} 或 Enter — 执行 · 1–9 — 立即执行"
+
+msgid "Добавить путь…"
+msgstr "添加路径…"
+
+msgid "Выберите папку назначения"
+msgstr "选择目标文件夹"
+
+msgid "Можно сохранить не более 9 путей."
+msgstr "最多可保存 9 个路径。"
+
+msgid "Быстрое перемещение"
+msgstr "快速移动"
+
+msgid "Файлы идут в том же порядке, что и текущий список. Расширение каждого файла сохраняется."
+msgstr "文件按当前列表的顺序处理。每个文件的扩展名保持不变。"
+
+msgid "Шаблон"
+msgstr "模板"
+
+msgid "Год"
+msgstr "年"
+
+msgid "Месяц"
+msgstr "月"
+
+msgid "День"
+msgstr "日"
+
+msgid "Час"
+msgstr "时"
+
+msgid "Минута"
+msgstr "分"
+
+msgid "Секунда"
+msgstr "秒"
+
+msgid "Счётчик (0001)"
+msgstr "计数器 (0001)"
+
+#, python-brace-format
+msgid "Например: свадьба_{counter:04}"
+msgstr "例如：wedding_{counter:04}"
+
+msgid "Счётчик"
+msgstr "计数器"
+
+msgid "с "
+msgstr "从 "
+
+msgid " цифры"
+msgstr " 位"
+
+msgid "Введите { в поле шаблона, чтобы выбрать подстановку. Дата и время берутся из EXIF, а при его отсутствии — из файла."
+msgstr "在模板字段中输入 { 以选择占位符。日期和时间取自 EXIF，若无则取自文件。"
+
+msgid "До переименования"
+msgstr "重命名前"
+
+msgid "Станет"
+msgstr "重命名后"
+
+msgid "Переименование: 0/%m"
+msgstr "重命名：0/%m"
+
+#, python-brace-format
+msgid "Переименование: {done}/{total}"
+msgstr "重命名：{done}/{total}"
+
+msgid "Обновляю кэш…"
+msgstr "正在更新缓存…"
+
+#, python-brace-format
+msgid "… ещё {n} файлов"
+msgstr "… 还有 {n} 个文件"
+
+#, python-brace-format
+msgid "… ещё {n} новых имён"
+msgstr "… 还有 {n} 个新名称"
+
+msgid "Шаблон создаёт одинаковые имена файлов."
+msgstr "模板生成了重复的文件名。"
+
+#, python-brace-format
+msgid "Файл «{name}» уже существует в папке."
+msgstr "文件夹中已存在文件 «{name}»。"
+
+#, python-brace-format
+msgid "Будет переименовано: {done} из {total}"
+msgstr "将重命名：{done} / {total}"
+
+#, python-brace-format
+msgid "У файла «{name}» нет даты и времени съёмки в EXIF."
+msgstr "文件 «{name}» 的 EXIF 中没有拍摄日期和时间。"
+
+msgid "Шаблон не создаёт корректное имя файла."
+msgstr "模板未生成有效的文件名。"
+
+msgid "Шаблон создаёт зарезервированное имя Windows."
+msgstr "模板生成了 Windows 保留名称。"
+
+msgid "КАРТЫ ДЛЯ ИМПОРТА"
+msgstr "待导入的存储卡"
+
+msgid "Куда импортировать"
+msgstr "导入到"
+
+msgid "Выберите основную папку"
+msgstr "选择主文件夹"
+
+msgid "Выбрать папку"
+msgstr "选择文件夹"
+
+msgid "Папка для импорта"
+msgstr "导入文件夹"
+
+msgid "КАТАЛОГ СЪЁМКИ"
+msgstr "拍摄目录"
+
+msgid "Создать каталог с датой съёмки"
+msgstr "创建以拍摄日期命名的目录"
+
+msgid "Создать каталог с названием съёмки"
+msgstr "创建以拍摄名称命名的目录"
+
+msgid "Начать"
+msgstr "开始"
+
+msgid "Укажите основную папку для импорта."
+msgstr "请指定主导入文件夹。"
+
+msgid "Введите название съёмки."
+msgstr "请输入拍摄名称。"
+
+msgid "Название съёмки не должно содержать путь."
+msgstr "拍摄名称不能包含路径。"
+
+msgid "Укажите папку резервной копии в Настройки → Поведение."
+msgstr "请在「设置 → 行为」中指定备份文件夹。"
+
+msgid "Выберите хотя бы одну карту памяти."
+msgstr "请至少选择一张存储卡。"
+
+msgid "Основная и резервная папки должны различаться."
+msgstr "主文件夹和备份文件夹必须不同。"
+
+msgid "Экспортирует текущий отсортированный список в JPEG. RAW-файлы используют встроенное превью, если оно есть."
+msgstr "将当前排序列表导出为 JPEG。RAW 文件在有内嵌预览时使用该预览。"
+
+msgid "Папка экспорта"
+msgstr "导出文件夹"
+
+msgid "Большая сторона"
+msgstr "长边"
+
+msgid "Шарп"
+msgstr "锐化"
+
+msgid "Сохранить EXIF"
+msgstr "保留 EXIF"
+
+msgid "Сила"
+msgstr "强度"
+
+msgid "Радиус"
+msgstr "半径"
+
+msgid "Порог"
+msgstr "阈值"
+
+msgid "Старт"
+msgstr "开始"
+
+msgid "Папка для экспорта"
+msgstr "导出文件夹"
+
+msgid "Укажите папку для экспорта."
+msgstr "请指定导出文件夹。"
+
+#, python-brace-format
+msgid "Экспорт: {done}/{total}"
+msgstr "导出：{done}/{total}"
+
+#, python-brace-format
+msgid "Пересохранит все JPG-файлы в папке «{name}» ({count} шт.) с выбранным качеством, поверх исходников без подтверждения."
+msgstr "以所选质量重新保存文件夹 «{name}» 中的所有 JPG 文件（共 {count} 个），直接覆盖原文件且不再确认。"
+
+msgid "Качество"
+msgstr "质量"
+
+#, python-brace-format
+msgid "Сжатие: {done}/{total}"
+msgstr "压缩：{done}/{total}"
+
+msgid "Полный просмотр"
+msgstr "全屏查看"
+
+msgid "Открыть в редакторе"
+msgstr "在编辑器中打开"
+
+msgid "Сетка"
+msgstr "网格"
+
+msgid "Свернуть нижнюю панель (полный просмотр)"
+msgstr "收起底部面板（全屏查看）"
+
+msgid "Развернуть нижнюю панель (полный просмотр)"
+msgstr "展开底部面板（全屏查看）"
+
+msgid "Обновить"
+msgstr "刷新"
+
+msgid "Полный экран"
+msgstr "全屏"
+
+msgid "Создать новую папку"
+msgstr "新建文件夹"
+
+msgid "Быстрое копирование"
+msgstr "快速复制"
+
+msgid "Сбросить цветовую метку"
+msgstr "重置颜色标记"
+
+msgid "Следующая вкладка"
+msgstr "下一个标签页"
+
+msgid "Предыдущая вкладка"
+msgstr "上一个标签页"
+
+msgid "Выйти из полного просмотра"
+msgstr "退出全屏查看"
+
+msgid "Esc или Enter"
+msgstr "Esc 或 Enter"
+
+msgid "Следующая фотография (полный просмотр)"
+msgstr "下一张照片（全屏查看）"
+
+msgid "Right или Space"
+msgstr "Right 或 Space"
+
+msgid "Предыдущая фотография (полный просмотр)"
+msgstr "上一张照片（全屏查看）"
+
+msgid "Left или Backspace"
+msgstr "Left 或 Backspace"
+
+msgid "Включить или выключить масштаб (полный просмотр)"
+msgstr "切换缩放（全屏查看）"
+
+msgid "Воспроизведение видео или аудио (полный просмотр)"
+msgstr "播放视频或音频（全屏查看）"
+
+msgid "Переключить фокус между папками и сеткой"
+msgstr "在文件夹和网格间切换焦点"
+
+msgid "Открыть выбранную папку"
+msgstr "打开所选文件夹"
+
+msgid "Копировать выбранные файлы"
+msgstr "复制所选文件"
+
+msgid "Вырезать выбранные файлы"
+msgstr "剪切所选文件"
+
+msgid "Вставить файлы"
+msgstr "粘贴文件"
+
+msgid "Снять выделение"
+msgstr "取消选择"
+
+msgid "Удалить выбранный файл или папку"
+msgstr "删除所选文件或文件夹"
+
+msgid "Не удалось войти. Попробуйте ещё раз."
+msgstr "登录失败。请重试。"
+
+msgid "Неверный логин или пароль."
+msgstr "登录名或密码错误。"
+
+msgid "Ошибка сети. Проверьте подключение к интернету."
+msgstr "网络错误。请检查网络连接。"
+
+msgid "Ошибка безопасного соединения (SSL)."
+msgstr "安全连接错误（SSL）。"
+
+msgid "Сервер временно недоступен. Попробуйте позже."
+msgstr "服务器暂时不可用。请稍后重试。"
+
+msgid "Вход в ShotSync"
+msgstr "登录 ShotSync"
+
+msgid "Логин или email"
+msgstr "登录名或邮箱"
+
+msgid "Пароль"
+msgstr "密码"
+
+msgid "Войти"
+msgstr "登录"
+
+msgid "Введите логин и пароль."
+msgstr "请输入登录名和密码。"
+
+msgid "Входим…"
+msgstr "正在登录…"
+
+msgid "Проверяем вход в ShotSync…"
+msgstr "正在验证 ShotSync 登录…"
+
+msgid "Войдите, чтобы открыть свои съёмки с shotsync.ru"
+msgstr "登录以打开您在 shotsync.ru 上的拍摄"
+
+msgid "Войти в ShotSync"
+msgstr "登录 ShotSync"
+
+msgid "Выйти из ShotSync"
+msgstr "退出 ShotSync"
+
+msgid "СЪЁМКИ НА СЕРВЕРЕ"
+msgstr "服务器上的拍摄"
+
+msgid "Обновить список съёмок"
+msgstr "刷新拍摄列表"
+
+msgid "Выход из ShotSync"
+msgstr "退出 ShotSync"
+
+msgid "Вы уверены, что хотите выйти?"
+msgstr "确定要退出登录吗？"
+
+msgid "Выйти"
+msgstr "退出"
+
+msgid "Профиль"
+msgstr "个人资料"
+
+msgid "Не удалось загрузить съёмки."
+msgstr "无法加载拍摄。"
+
+msgid "Пока нет ни одной съёмки."
+msgstr "还没有任何拍摄。"
+
+#, python-brace-format
+msgid "{n} фото"
+msgstr "{n} 张照片"
+
+msgid "офлайн"
+msgstr "离线"
+
+msgid "● приём: слежение включено"
+msgstr "● 接收：跟踪已开启"
+
+msgid "отправлена на отбор"
+msgstr "已发送进行筛选"
+
+msgid "взята на отбор"
+msgstr "已取来筛选"
+
+msgid "Открыть папку"
+msgstr "打开文件夹"
+
+msgid "Открыть во вьювере ShotSync в браузере"
+msgstr "在浏览器的 ShotSync 查看器中打开"
+
+msgid "Слежение: новые фото будут загружаться в выбранную папку."
+msgstr "跟踪：新照片将下载到所选文件夹。"
+
+msgid "Ваша папка отправлена на отбор. Метки можно получить с сервера."
+msgstr "您的文件夹已发送进行筛选。可从服务器获取标记。"
+
+msgid "Локальная копия съёмки, взятая с сервера для отбора."
+msgstr "从服务器取来用于筛选的拍摄本地副本。"
+
+msgid "Съёмка хранится на сервере."
+msgstr "该拍摄存储在服务器上。"
+
+msgid "Офлайн · работаем с локальной копией; изменения отправятся при подключении."
+msgstr "离线 · 正在使用本地副本；重新连接后将发送更改。"
+
+#, python-brace-format
+msgid "{n} фото · {state}"
+msgstr "{n} 张照片 · {state}"
+
+msgid "Получить метки"
+msgstr "获取标记"
+
+msgid "Удалить с сервера"
+msgstr "从服务器删除"
+
+msgid "Удалить локально"
+msgstr "本地删除"
+
+msgid "Остановить отслеживание"
+msgstr "停止跟踪"
+
+msgid "Пользователь с таким логином не найден."
+msgstr "未找到使用该登录名的用户。"
+
+msgid "Активна"
+msgstr "进行中"
+
+msgid "Запланирована"
+msgstr "已计划"
+
+msgid "Завершена"
+msgstr "已完成"
+
+msgid "В архиве"
+msgstr "已归档"
+
+#, python-brace-format
+msgid "{n} ТБ"
+msgstr "{n} TB"
+
+#, python-brace-format
+msgid "{n} ГБ"
+msgstr "{n} GB"
+
+#, python-brace-format
+msgid "{n} МБ"
+msgstr "{n} MB"
+
+#, python-brace-format
+msgid "{n} КБ"
+msgstr "{n} KB"
+
+#, python-brace-format
+msgid "{n} Б"
+msgstr "{n} B"
+
+msgid "< 1 с"
+msgstr "< 1 秒"
+
+#, python-brace-format
+msgid "{s} с"
+msgstr "{s} 秒"
+
+#, python-brace-format
+msgid "{m} мин {s} с"
+msgstr "{m} 分 {s} 秒"
+
+#, python-brace-format
+msgid "{h} ч {m} мин"
+msgstr "{h} 小时 {m} 分"
+
+msgid "Перемещение"
+msgstr "移动"
+
+msgid "Копирование"
+msgstr "复制"
+
+msgid "Подготовка завершена"
+msgstr "准备完成"
+
+msgid "источник больше не существует"
+msgstr "源已不存在"
+
+msgid "цель появилась после постановки в очередь"
+msgstr "目标在加入队列后出现"
+
+msgid "ФАЙЛОВЫЕ ОПЕРАЦИИ"
+msgstr "文件操作"
+
+msgid "Пауза"
+msgstr "暂停"
+
+msgid "Отменить активную операцию"
+msgstr "取消当前操作"
+
+msgid "Ожидание запуска…"
+msgstr "等待开始…"
+
+#, python-brace-format
+msgid "{done} из {total} файлов"
+msgstr "{done} / {total} 个文件"
+
+msgid "Подсчёт файлов…"
+msgstr "正在统计文件…"
+
+msgid "Подсчитываю файлы и объём…"
+msgstr "正在统计文件和大小…"
+
+#, python-brace-format
+msgid "{done} из {total}"
+msgstr "{done} / {total}"
+
+#, python-brace-format
+msgid "{speed}/с"
+msgstr "{speed}/秒"
+
+msgid "измеряю скорость"
+msgstr "正在测速"
+
+msgid "готово"
+msgstr "完成"
+
+msgid "считаю…"
+msgstr "正在计算…"
+
+msgid "Пауза · "
+msgstr "已暂停 · "
+
+msgid "Продолжить"
+msgstr "继续"
+
+#, python-brace-format
+msgid "ещё выполняется: {n}"
+msgstr "仍在进行：{n}"
+
+#, python-brace-format
+msgid "в очереди: {n}"
+msgstr "队列中：{n}"
+
+msgid "Убрать из очереди"
+msgstr "从队列中移除"
+
+msgid "+ Набор"
+msgstr "+ 集合"
+
+msgid "Создать набор"
+msgstr "创建集合"
+
+msgid "Переименовать набор"
+msgstr "重命名集合"
+
+msgid "Удалить набор"
+msgstr "删除集合"
+
+msgid "Импорт CSV, TSV или XLSX"
+msgstr "导入 CSV、TSV 或 XLSX"
+
+msgid "Импорт…"
+msgstr "导入…"
+
+msgid "Код"
+msgstr "代码"
+
+msgid "Значение"
+msgstr "值"
+
+msgid "Для синхронизации кодов замен, авторизуйтесь на shotsync."
+msgstr "要同步替换代码，请登录 shotsync。"
+
+msgid "Синхронизация с ShotSync…"
+msgstr "正在与 ShotSync 同步…"
+
+msgid "По умолчанию"
+msgstr "默认"
+
+msgid "Синхронизировано"
+msgstr "已同步"
+
+msgid "Удалить код"
+msgstr "删除代码"
+
+msgid "Заполните код и значение."
+msgstr "请填写代码和值。"
+
+msgid "Новый набор"
+msgstr "新集合"
+
+msgid "Название:"
+msgstr "名称："
+
+msgid "Удалить набор и все его коды?"
+msgstr "删除该集合及其所有代码？"
+
+msgid "Нужен хотя бы один набор кодов."
+msgstr "至少需要一个代码集合。"
+
+msgid "Импорт кодов"
+msgstr "导入代码"
+
+msgid "Таблицы (*.csv *.tsv *.xlsx)"
+msgstr "表格 (*.csv *.tsv *.xlsx)"
+
+#, python-brace-format
+msgid "Импортировано: {imported}, пропущено: {skipped}"
+msgstr "已导入：{imported}，已跳过：{skipped}"
+

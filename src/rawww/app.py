@@ -135,6 +135,8 @@ from .xmp import (
 )
 from .updater import fetch_release_info, is_newer
 from .version import __version__
+from . import i18n
+from .i18n import gettext as _
 
 
 THUMB_SIZE = 256
@@ -419,9 +421,9 @@ def _plan_xmp_sidecar_relocation(directory: Path, names: dict[str, str]) -> dict
         for destination in destinations:
             owner = owners.setdefault(destination, source)
             if owner != source:
-                raise OSError(f"Несколько XMP должны получить имя «{destination.name}»")
+                raise OSError(_("Несколько XMP должны получить имя «{name}»").format(name=destination.name))
             if destination.exists() and destination != source and destination not in plan:
-                raise OSError(f"XMP «{destination.name}» уже существует")
+                raise OSError(_("XMP «{name}» уже существует").format(name=destination.name))
     return plan
 
 
@@ -1739,9 +1741,9 @@ class ViewerMetaBar(QWidget):
         self.quick_mark_button = QToolButton()
         self.quick_mark_button.setObjectName("fullQuickMark")
         self.quick_mark_button.setIcon(_fomantic_icon("bookmark", 13))
-        self.quick_mark_button.setText("быстр. метка")
+        self.quick_mark_button.setText(_("быстр. метка"))
         self.quick_mark_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.quick_mark_button.setToolTip("Настроить быструю метку; M — применить")
+        self.quick_mark_button.setToolTip(_("Настроить быструю метку; M — применить"))
         self.quick_mark_button.setFixedSize(96, 24)
         self.quick_mark_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.quick_mark_button.clicked.connect(self._show_quick_mark_menu)
@@ -1751,7 +1753,7 @@ class ViewerMetaBar(QWidget):
         self.auto_advance_button.setObjectName("fullAutoAdvance")
         self.auto_advance_button.setIcon(_fomantic_icon("step-forward", 13))
         self.auto_advance_button.setCheckable(True)
-        self.auto_advance_button.setToolTip("Автоперелистывание после метки")
+        self.auto_advance_button.setToolTip(_("Автоперелистывание после метки"))
         self.auto_advance_button.setFixedSize(28, 24)
         self.auto_advance_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.auto_advance_button.toggled.connect(self.autoAdvanceChanged)
@@ -1770,7 +1772,7 @@ class ViewerMetaBar(QWidget):
             button.setCheckable(True)
             if not color:
                 button.setIcon(_fomantic_icon("ban", 11, "#959595"))
-            button.setToolTip("Сбросить цвет" if not color else color)
+            button.setToolTip(_("Сбросить цвет") if not color else color)
             button.setFixedSize(24, 24)
             button.clicked.connect(lambda _checked=False, value=color: self.colorRequested.emit(value))
             color_layout.addWidget(button)
@@ -1792,7 +1794,7 @@ class ViewerMetaBar(QWidget):
             button.setFixedSize(24, 24)
             button.setIconSize(QSize(18, 18))
             button.setIcon(_fomantic_icon("ban" if rating == 0 else "star", 17, "#777777"))
-            button.setToolTip("Сбросить рейтинг" if rating == 0 else f"Рейтинг {rating}")
+            button.setToolTip(_("Сбросить рейтинг") if rating == 0 else _("Рейтинг {n}").format(n=rating))
             button.clicked.connect(lambda _checked=False, value=rating: self.ratingRequested.emit(value or None))
             button.setParent(self.rating_group)
             button.move(rating * 25, 0)
@@ -1801,7 +1803,7 @@ class ViewerMetaBar(QWidget):
 
         self.comment_edit = RichCodeCommentEdit()
         self.comment_edit.setObjectName("fullComment")
-        self.comment_edit.setPlaceholderText("Комментарий")
+        self.comment_edit.setPlaceholderText(_("Комментарий"))
         self.comment_edit.setFixedHeight(24)
         self.comment_edit.setMinimumWidth(72)
         self.comment_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -1819,7 +1821,7 @@ class ViewerMetaBar(QWidget):
         """Строит меню выбора действия, которое будет висеть на клавише M."""
         menu = QMenu(self.window())
         menu.setToolTipsVisible(True)
-        title = menu.addAction("Настроить быструю метку")
+        title = menu.addAction(_("Настроить быструю метку"))
         title.setEnabled(False)
         menu.addSeparator()
 
@@ -1857,16 +1859,16 @@ class ViewerMetaBar(QWidget):
             add_visual_action(
                 selected=selected,
                 visual="★" * rating,
-                tooltip=f"Рейтинг {rating}",
+                tooltip=_("Рейтинг {n}").format(n=rating),
                 callback=lambda _checked=False, value=rating: self._configure_quick_mark("rating", value),
             )
         menu.addSeparator()
         color_options = (
-            ("red", "Красная метка", "#c45b5b"),
-            ("yellow", "Жёлтая метка", "#c39b2f"),
-            ("green", "Зелёная метка", "#459d63"),
-            ("blue", "Синяя метка", "#4a7fbc"),
-            ("purple", "Фиолетовая метка", "#9261af"),
+            ("red", _("Красная метка"), "#c45b5b"),
+            ("yellow", _("Жёлтая метка"), "#c39b2f"),
+            ("green", _("Зелёная метка"), "#459d63"),
+            ("blue", _("Синяя метка"), "#4a7fbc"),
+            ("purple", _("Фиолетовая метка"), "#9261af"),
         )
         for color, tooltip, swatch in color_options:
             selected = self._quick_mark == ("color_label", color)
@@ -2077,7 +2079,7 @@ class FullView(QFrame):
         self.face_filter_clear.setIconSize(QSize(16, 16))
         self.face_filter_clear.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.face_filter_clear.setAutoRaise(True)
-        self.face_filter_clear.setToolTip("Сбросить фильтр по лицу")
+        self.face_filter_clear.setToolTip(_("Сбросить фильтр по лицу"))
         self.face_filter_clear.clicked.connect(self.faceFilterClearRequested)
         face_chip_layout.addWidget(self.face_filter_clear)
         self.face_filter_chip.hide()
@@ -2087,7 +2089,7 @@ class FullView(QFrame):
         face_loader_layout = QVBoxLayout(self.face_search_loader)
         face_loader_layout.setContentsMargins(20, 12, 20, 12)
         face_loader_layout.setSpacing(7)
-        self.face_search_loader_label = QLabel("Ищу похожие лица")
+        self.face_search_loader_label = QLabel(_("Ищу похожие лица"))
         self.face_search_loader_label.setObjectName("faceSearchLoaderText")
         self.face_search_loader_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         face_loader_layout.addWidget(self.face_search_loader_label)
@@ -2111,7 +2113,7 @@ class FullView(QFrame):
         self.audio_toggle.setObjectName("audioToggle")
         self.audio_toggle.setFixedSize(48, 48)
         self.audio_toggle.setIcon(_fomantic_icon("microphone", 22))
-        self.audio_toggle.setToolTip("Аудиокомментарий")
+        self.audio_toggle.setToolTip(_("Аудиокомментарий"))
         self.audio_toggle.clicked.connect(self._toggle_audio)
         self.audio_toggle.hide()
         strip_header = QWidget()
@@ -2122,14 +2124,14 @@ class FullView(QFrame):
         self.strip_toggle = QToolButton()
         self.strip_toggle.setObjectName("stripToggle")
         self.strip_toggle.setIcon(_fomantic_icon("chevron-down", 12))
-        self.strip_toggle.setToolTip("Свернуть ленту превью")
+        self.strip_toggle.setToolTip(_("Свернуть ленту превью"))
         self.strip_toggle.clicked.connect(self.toggle_strip)
         strip_header_layout.addWidget(self.strip_toggle)
         self.video_play_button = QToolButton()
         self.video_play_button.setObjectName("videoPlay")
         self.video_play_button.setIcon(_fomantic_icon("play", 12))
         self.video_play_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.video_play_button.setToolTip("Воспроизвести / пауза (Пробел)")
+        self.video_play_button.setToolTip(_("Воспроизвести / пауза (Пробел)"))
         self.video_play_button.clicked.connect(self._toggle_video_playback)
         self.video_seek = VideoSeekSlider(Qt.Orientation.Horizontal)
         self.video_seek.setObjectName("videoSeek")
@@ -2219,7 +2221,7 @@ class FullView(QFrame):
         self.right_strip_panel.setVisible(self._vertical and strip_full)
         collapsed = not strip_full
         self.strip_toggle.setIcon(_fomantic_icon("chevron-up" if collapsed else "chevron-down", 12))
-        self.strip_toggle.setToolTip("Развернуть ленту превью" if collapsed else "Свернуть ленту превью")
+        self.strip_toggle.setToolTip(_("Развернуть ленту превью") if collapsed else _("Свернуть ленту превью"))
 
     def set_vertical(self, vertical: bool) -> None:
         """Переносит ленту превью вниз или вправо и переводит карточки в портрет."""
@@ -2355,12 +2357,12 @@ class FullView(QFrame):
         show_button = QToolButton(row)
         show_button.setObjectName("faceActionButton")
         show_button.setIcon(_fomantic_icon("images", 14))
-        show_button.setText("Показать фото с этим лицом")
+        show_button.setText(_("Показать фото с этим лицом"))
         show_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         add_button = QToolButton(row)
         add_button.setObjectName("faceActionButton")
         add_button.setIcon(_fomantic_icon("plus", 14))
-        add_button.setText("Добавить лицо в набор")
+        add_button.setText(_("Добавить лицо в набор"))
         add_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         for button in (show_button, add_button):
             button.setFixedWidth(250)
@@ -2582,7 +2584,7 @@ class FullView(QFrame):
         }
         self.mark_indicator.setText(f"★ {rating}" if rating > 0 else "")
         self.mark_indicator.setToolTip(
-            "Снять все метки" if has_mark else "Применить быструю метку (M)"
+            _("Снять все метки") if has_mark else _("Применить быструю метку (M)")
         )
         self.mark_indicator.set_mark_color(colors.get(color_label, "#4d535b"))
         self.mark_indicator.show()
@@ -2669,7 +2671,7 @@ class FullView(QFrame):
 
     def set_face_search_loading(self, loading: bool) -> None:
         """Показывает состояние поиска, пока Workspace фильтрует большую папку."""
-        self.set_busy_loading("Ищу похожие лица" if loading else None)
+        self.set_busy_loading(_("Ищу похожие лица") if loading else None)
 
     def set_busy_loading(self, text: str | None) -> None:
         """Показывает общий индикатор долгой операции поверх FullView."""
@@ -3292,8 +3294,8 @@ class GridZoomControls(QFrame):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(1)
         for icon, delta, tooltip in (
-            ("zoom-out", -1, "Уменьшить миниатюры"),
-            ("zoom", 1, "Увеличить миниатюры"),
+            ("zoom-out", -1, _("Уменьшить миниатюры")),
+            ("zoom", 1, _("Увеличить миниатюры")),
         ):
             button = QToolButton(self)
             button.setObjectName("gridZoomButton")
@@ -3321,9 +3323,9 @@ class GridZoomControls(QFrame):
     def _refresh_orientation_button(self) -> None:
         self.orientation_button.setIcon(_orientation_icon(self._vertical, 18, "#aeb5bf"))
         self.orientation_button.setToolTip(
-            "Вертикальная ориентация — нажмите для горизонтальной"
+            _("Вертикальная ориентация — нажмите для горизонтальной")
             if self._vertical
-            else "Горизонтальная ориентация — нажмите для вертикальной"
+            else _("Горизонтальная ориентация — нажмите для вертикальной")
         )
 
 
@@ -3614,8 +3616,8 @@ def _humanize_shotsync_network_error(error: str) -> str:
     """Переводит техническую сетевую ошибку Qt на человеческий язык."""
     low = (error or "").lower()
     if any(part in low for part in ("host", "network", "unreachable", "timeout", "connection", "refused")):
-        return "Нет подключения к интернету."
-    return "Не удалось подключиться к ShotSync."
+        return _("Нет подключения к интернету.")
+    return _("Не удалось подключиться к ShotSync.")
 
 
 def _format_remaining_time(seconds: float) -> str:
@@ -3624,10 +3626,10 @@ def _format_remaining_time(seconds: float) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     if hours:
-        return f"≈ {hours} ч {minutes} мин"
+        return _("≈ {h} ч {m} мин").format(h=hours, m=minutes)
     if minutes:
-        return f"≈ {minutes} мин {seconds} с"
-    return f"≈ {seconds} с"
+        return _("≈ {m} мин {s} с").format(m=minutes, s=seconds)
+    return _("≈ {s} с").format(s=seconds)
 
 
 class Workspace(QMainWindow):
@@ -4078,7 +4080,7 @@ class Workspace(QMainWindow):
         operation: Callable[[], None],
         *,
         restart_consumers: bool = True,
-        loading_text: str = "Выполняется файловая операция",
+        loading_text: str = _("Выполняется файловая операция"),
     ) -> None:
         """Откладывает файловую операцию до освобождения исходников воркерами.
 
@@ -4164,10 +4166,10 @@ class Workspace(QMainWindow):
             finally:
                 self.full_view.set_busy_loading(None)
                 if self._restoring_folder_grid_context:
-                    self.grid_restore_loader_label.setText("Папка открывается")
+                    self.grid_restore_loader_label.setText(_("Папка открывается"))
                     self._schedule_grid_restore_loader()
                 elif self._restoring_view_context:
-                    self.grid_restore_loader_label.setText("Обновляю список")
+                    self.grid_restore_loader_label.setText(_("Обновляю список"))
                     self._schedule_grid_restore_loader()
                 else:
                     self._hide_grid_restore_loader()
@@ -4289,7 +4291,7 @@ class Workspace(QMainWindow):
 
                     new_path = old_path.parent / new_name
                     if new_path.exists():
-                        QMessageBox.warning(None, "Ошибка", "Папка с таким именем уже существует.")
+                        QMessageBox.warning(None, _("Ошибка"), _("Папка с таким именем уже существует."))
                         self._new_folder_path = None
                         return False
 
@@ -4355,7 +4357,7 @@ class Workspace(QMainWindow):
         self.volume_icon_provider = QFileIconProvider()
         self.removable_volume_icon = _removable_volume_icon()
         self.volume_removability: dict[str, bool] = {}
-        self.card_import_button = QPushButton("Импорт с карты памяти")
+        self.card_import_button = QPushButton(_("Импорт с карты памяти"))
         self.card_import_button.setObjectName("cardImportButton")
         self.card_import_button.setIcon(self.removable_volume_icon)
         self.card_import_button.setIconSize(QSize(22, 22))
@@ -4375,7 +4377,7 @@ class Workspace(QMainWindow):
         self.shotsync_button.setIconSize(QSize(16, 16))
         self.shotsync_button.setProperty("volumeKey", SHOTSYNC_VOLUME_KEY)
         self.shotsync_button.setText("ShotSync")
-        self.shotsync_button.setToolTip("Съёмки ShotSync (shotsync.ru)")
+        self.shotsync_button.setToolTip(_("Съёмки ShotSync (shotsync.ru)"))
         self.shotsync_button.setIcon(self._shotsync_button_icon())
         self.shotsync_button.clicked.connect(lambda: self._activate_shotsync())
         self.drive_buttons.addButton(self.shotsync_button)
@@ -4392,7 +4394,7 @@ class Workspace(QMainWindow):
         directory_header = QHBoxLayout()
         directory_header.setContentsMargins(2, 0, 2, 0)
         directory_header.setSpacing(0)
-        directory_title = QLabel("ПАПКИ")
+        directory_title = QLabel(_("ПАПКИ"))
         directory_title.setObjectName("directoryTitle")
         directory_header.addWidget(directory_title)
         directory_header.addStretch()
@@ -4401,7 +4403,7 @@ class Workspace(QMainWindow):
         self.up_button.setObjectName("directoryAction")
         self.up_button.setIcon(_fomantic_icon("arrow-up", 20, "#e6e6e6"))
         self.up_button.setIconSize(QSize(20, 20))
-        self.up_button.setToolTip("На уровень вверх")
+        self.up_button.setToolTip(_("На уровень вверх"))
         self.up_button.clicked.connect(self._go_up_directory)
         directory_header.addWidget(self.up_button)
 
@@ -4409,7 +4411,7 @@ class Workspace(QMainWindow):
         self.new_folder_button.setObjectName("directoryAction")
         self.new_folder_button.setIcon(_fomantic_icon("folder-plus", 20, "#e6e6e6"))
         self.new_folder_button.setIconSize(QSize(20, 20))
-        self.new_folder_button.setToolTip("Создать папку")
+        self.new_folder_button.setToolTip(_("Создать папку"))
         self.new_folder_button.clicked.connect(self._create_new_folder)
         directory_header.addWidget(self.new_folder_button)
         directory_layout.addLayout(directory_header)
@@ -4429,14 +4431,14 @@ class Workspace(QMainWindow):
         favorites_layout.setSpacing(4)
         favorites_header = QHBoxLayout()
         favorites_header.setContentsMargins(2, 0, 2, 0)
-        favorites_title = QLabel("ИЗБРАННОЕ")
+        favorites_title = QLabel(_("ИЗБРАННОЕ"))
         favorites_title.setObjectName("favoritesTitle")
         favorites_header.addWidget(favorites_title)
         favorites_header.addStretch()
         self.favorites_trash = FavoritesTrashButton()
         self.favorites_trash.setIcon(_fomantic_icon("trash", 13, "#a8a8a8"))
         self.favorites_trash.setIconSize(QSize(13, 13))
-        self.favorites_trash.setToolTip("Удалить выбранную папку из избранного или перетащить её сюда")
+        self.favorites_trash.setToolTip(_("Удалить выбранную папку из избранного или перетащить её сюда"))
         self.favorites_trash.clicked.connect(self._remove_selected_favorite)
         self.favorites_trash.favoriteDropped.connect(self._remove_favorite)
         favorites_header.addWidget(self.favorites_trash)
@@ -4444,7 +4446,7 @@ class Workspace(QMainWindow):
         self.add_favorite_button.setObjectName("favoritesAdd")
         self.add_favorite_button.setIcon(_fomantic_icon("plus", 13))
         self.add_favorite_button.setIconSize(QSize(13, 13))
-        self.add_favorite_button.setToolTip("Добавить текущую папку в избранное")
+        self.add_favorite_button.setToolTip(_("Добавить текущую папку в избранное"))
         self.add_favorite_button.clicked.connect(self._add_current_directory_to_favorites)
         favorites_header.addWidget(self.add_favorite_button)
         favorites_layout.addLayout(favorites_header)
@@ -4516,47 +4518,47 @@ class Workspace(QMainWindow):
 
         
         self.rating_filter = FilterComboBox()
-        self.rating_filter.addItem("Все рейтинги", None)
+        self.rating_filter.addItem(_("Все рейтинги"), None)
         self.rating_filter.setItemIcon(0, _fomantic_icon("star", 10, "#a8b0bd"))
         for rating in range(5, 0, -1):
             self.rating_filter.addItem("★" * rating, rating)
             self.rating_filter.setItemIcon(self.rating_filter.count() - 1, _fomantic_icon("star", 10, "#a8b0bd"))
         self.rating_filter.setFixedWidth(118)
         self.color_filter = FilterComboBox()
-        for label, value in (("Все цвета", None), ("Без цвета", ""), ("Красный", "red"), ("Жёлтый", "yellow"), ("Зелёный", "green"), ("Синий", "blue"), ("Фиолетовый", "purple")):
+        for label, value in ((_("Все цвета"), None), (_("Без цвета"), ""), (_("Красный"), "red"), (_("Жёлтый"), "yellow"), (_("Зелёный"), "green"), (_("Синий"), "blue"), (_("Фиолетовый"), "purple")):
             self.color_filter.addItem(label, value)
             if value is not None:
                 self.color_filter.setItemIcon(self.color_filter.count() - 1, _color_swatch_icon(value or None))
         self.color_filter.setItemIcon(0, _fomantic_icon("brush", 10, "#a8b0bd"))
         self.color_filter.setFixedWidth(118)
         self.media_filter = FilterComboBox()
-        for label, value in (("Фото и видео", None), ("Фото", "image"), ("Видео", "video")):
+        for label, value in ((_("Фото и видео"), None), (_("Фото"), "image"), (_("Видео"), "video")):
             self.media_filter.addItem(label, value)
         self.media_filter.setItemIcon(0, _fomantic_icon("media", 10, "#a8b0bd"))
         self.media_filter.setItemIcon(1, _fomantic_icon("images", 10, "#a8b0bd"))
         self.media_filter.setItemIcon(2, _fomantic_icon("film", 10, "#a8b0bd"))
         self.media_filter.setFixedWidth(118)
         self.file_type_filter = FilterComboBox()
-        for label, value in (("JPG и RAW", None), ("Только JPG", "jpg"), ("Только RAW", "raw")):
+        for label, value in ((_("JPG и RAW"), None), (_("Только JPG"), "jpg"), (_("Только RAW"), "raw")):
             self.file_type_filter.addItem(label, value)
         self.file_type_filter.setItemIcon(0, _fomantic_icon("images", 10, "#a8b0bd"))
         self.file_type_filter.setItemIcon(1, _fomantic_icon("file", 10, "#a8b0bd"))
         self.file_type_filter.setItemIcon(2, _fomantic_icon("camera", 10, "#a8b0bd"))
         self.file_type_filter.setFixedWidth(106)
         self.camera_filter = FilterComboBox()
-        self.camera_filter.addItem("Все камеры", None)
+        self.camera_filter.addItem(_("Все камеры"), None)
         self.camera_filter.setItemIcon(0, _fomantic_icon("images", 10, "#a8b0bd"))
         self.camera_filter.setFixedWidth(132)
         self.shot_filter = FilterComboBox()
-        for label, value in (("Все планы", None), ("Крупный", "closeup"), ("Средний", "medium"), ("Общий", "wide"), ("Без лиц", "no_face")):
+        for label, value in ((_("Все планы"), None), (_("Крупный"), "closeup"), (_("Средний"), "medium"), (_("Общий"), "wide"), (_("Без лиц"), "no_face")):
             self.shot_filter.addItem(label, value)
         self.shot_filter.hide()
         self.eyes_filter = FilterComboBox()
-        for label, value in (("Все глаза", None), ("Закрытые глаза", "closed")):
+        for label, value in ((_("Все глаза"), None), (_("Закрытые глаза"), "closed")):
             self.eyes_filter.addItem(label, value)
         self.eyes_filter.hide()
         self.sort_combo = FilterComboBox()
-        for label, value in (("По имени ↑", "name"), ("По имени ↓", "name_desc"), ("По времени ↑", "time"), ("По времени ↓", "time_desc"), ("По рейтингу", "rating")):
+        for label, value in ((_("По имени ↑"), "name"), (_("По имени ↓"), "name_desc"), (_("По времени ↑"), "time"), (_("По времени ↓"), "time_desc"), (_("По рейтингу"), "rating")):
             self.sort_combo.addItem(label, value)
         self.sort_combo.setItemIcon(0, _fomantic_icon("sort", 10, "#a8b0bd"))
         for index in range(1, self.sort_combo.count()):
@@ -4569,7 +4571,7 @@ class Workspace(QMainWindow):
             _fomantic_icon("search", 12, "#a8b0bd"),
             QLineEdit.ActionPosition.LeadingPosition,
         )
-        self.search_edit.setPlaceholderText("Поиск")
+        self.search_edit.setPlaceholderText(_("Поиск"))
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setFixedWidth(112)
         self.search_edit.setFixedHeight(self.media_filter.sizeHint().height())
@@ -4595,7 +4597,7 @@ class Workspace(QMainWindow):
         self.face_clear_button.setIconSize(QSize(14, 14))
         self.face_clear_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.face_clear_button.setAutoRaise(True)
-        self.face_clear_button.setToolTip("Сбросить фильтр по лицу")
+        self.face_clear_button.setToolTip(_("Сбросить фильтр по лицу"))
         self.face_clear_button.clicked.connect(self._clear_face_search)
         chip_layout.addWidget(self.face_clear_button)
         self.face_filter_chip.hide()
@@ -4607,7 +4609,7 @@ class Workspace(QMainWindow):
         self.ai_button.setIcon(_fomantic_icon("magic", 20, "#c9ddff"))
         self.ai_button.setIconSize(QSize(20, 20))
         self.ai_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        self.ai_button.setToolTip("AI: серии и лица")
+        self.ai_button.setToolTip(_("AI: серии и лица"))
         self.ai_button.clicked.connect(self._show_ai_menu)
         self.ai_analysis_available = False
         self.ai_button.setFixedSize(52, 44)
@@ -4618,17 +4620,17 @@ class Workspace(QMainWindow):
         self.xmp_button.setIcon(_fomantic_icon("file", 20, "#d6d6d6"))
         self.xmp_button.setIconSize(QSize(20, 20))
         self.xmp_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        self.xmp_button.setToolTip("Синхронизация метаданных XMP")
+        self.xmp_button.setToolTip(_("Синхронизация метаданных XMP"))
         self.xmp_button.clicked.connect(self._handle_xmp_button)
         self.xmp_button.setFixedSize(52, 44)
 
         self.utilities_button = QToolButton()
         self.utilities_button.setObjectName("toolbarAction")
-        self.utilities_button.setText("Утилиты")
+        self.utilities_button.setText(_("Утилиты"))
         self.utilities_button.setIcon(_fomantic_icon("wrench", 20, "#d6d6d6"))
         self.utilities_button.setIconSize(QSize(20, 20))
         self.utilities_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        self.utilities_button.setToolTip("Утилиты")
+        self.utilities_button.setToolTip(_("Утилиты"))
         self.utilities_button.clicked.connect(self._show_utilities_menu)
         self.utilities_button.setFixedSize(52, 44)
         toolbar_actions = QWidget()
@@ -4656,7 +4658,7 @@ class Workspace(QMainWindow):
         progress_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         progress_policy.setRetainSizeWhenHidden(True)
         self.status_progress.setSizePolicy(progress_policy)
-        self.status_progress.setToolTip("Нажмите на крестик справа, чтобы остановить AI-анализ")
+        self.status_progress.setToolTip(_("Нажмите на крестик справа, чтобы остановить AI-анализ"))
         self.status_progress.cancelRequested.connect(self._cancel_ai_analysis)
         self.status_progress.hide()
         status_layout.addWidget(self.status_progress)
@@ -4679,15 +4681,15 @@ class Workspace(QMainWindow):
         series_faces_layout = QHBoxLayout(self.series_faces_group)
         series_faces_layout.setContentsMargins(0, 0, 0, 0)
         series_faces_layout.setSpacing(3)
-        series_faces_title = QLabel("СЕРИИ И ЛИЦА")
+        series_faces_title = QLabel(_("СЕРИИ И ЛИЦА"))
         series_faces_title.setObjectName("aiPanelTitle")
         series_faces_layout.addWidget(series_faces_title)
         self.series_toggle = QToolButton()
         self.series_toggle.setObjectName("aiFilter")
         self.series_toggle.setIcon(_fomantic_icon("images", 11))
-        self.series_toggle.setText("Серии")
+        self.series_toggle.setText(_("Серии"))
         self.series_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.series_toggle.setToolTip("Включить или выключить группировку по сериям")
+        self.series_toggle.setToolTip(_("Включить или выключить группировку по сериям"))
         self.series_toggle.setCheckable(True)
         self.series_toggle.setChecked(True)
         self.series_toggle.toggled.connect(self._series_toggle_changed)
@@ -4695,9 +4697,9 @@ class Workspace(QMainWindow):
         self.faces_panel_button = QToolButton()
         self.faces_panel_button.setObjectName("aiFilter")
         self.faces_panel_button.setIcon(_fomantic_icon("user", 11))
-        self.faces_panel_button.setText("Лица")
+        self.faces_panel_button.setText(_("Лица"))
         self.faces_panel_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.faces_panel_button.setToolTip("Открыть наборы лиц")
+        self.faces_panel_button.setToolTip(_("Открыть наборы лиц"))
         self.faces_panel_button.clicked.connect(self._show_face_sets)
         series_faces_layout.addWidget(self.faces_panel_button)
         ai_layout.addWidget(self.series_faces_group)
@@ -4707,11 +4709,11 @@ class Workspace(QMainWindow):
         shot_layout = QHBoxLayout(self.shot_group)
         shot_layout.setContentsMargins(0, 0, 0, 0)
         shot_layout.setSpacing(3)
-        self.ai_panel_title = QLabel("КРУПНОСТЬ ПЛАНА")
+        self.ai_panel_title = QLabel(_("КРУПНОСТЬ ПЛАНА"))
         self.ai_panel_title.setObjectName("aiPanelTitle")
         shot_layout.addWidget(self.ai_panel_title)
         self.shot_buttons: dict[object, QToolButton] = {}
-        for label, value in (("Все", None), ("Крупный", "closeup"), ("Средний", "medium"), ("Общий", "wide"), ("Без лиц", "no_face")):
+        for label, value in ((_("Все"), None), (_("Крупный"), "closeup"), (_("Средний"), "medium"), (_("Общий"), "wide"), (_("Без лиц"), "no_face")):
             button = QToolButton()
             button.setObjectName("shotFilter")
             button.setText(label)
@@ -4725,13 +4727,13 @@ class Workspace(QMainWindow):
         eyes_layout = QHBoxLayout(self.eyes_group)
         eyes_layout.setContentsMargins(0, 0, 0, 0)
         eyes_layout.setSpacing(3)
-        self.eyes_panel_title = QLabel("ГЛАЗА")
+        self.eyes_panel_title = QLabel(_("ГЛАЗА"))
         self.eyes_panel_title.setObjectName("aiPanelTitle")
         eyes_layout.addWidget(self.eyes_panel_title)
         # Один переключатель: нажатие включает фильтр брака, повторное — снимает.
         self.eyes_toggle = QToolButton()
         self.eyes_toggle.setObjectName("shotFilter")
-        self.eyes_toggle.setText("Закрытые глаза")
+        self.eyes_toggle.setText(_("Закрытые глаза"))
         self.eyes_toggle.setCheckable(True)
         self.eyes_toggle.clicked.connect(self._toggle_eyes_filter)
         eyes_layout.addWidget(self.eyes_toggle)
@@ -4760,7 +4762,7 @@ class Workspace(QMainWindow):
         loader_layout = QVBoxLayout(self.grid_restore_loader)
         loader_layout.setContentsMargins(22, 16, 22, 16)
         loader_layout.setSpacing(8)
-        self.grid_restore_loader_label = QLabel("Папка открывается")
+        self.grid_restore_loader_label = QLabel(_("Папка открывается"))
         self.grid_restore_loader_label.setObjectName("gridRestoreLoaderText")
         self.grid_restore_loader_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         loader_layout.addWidget(self.grid_restore_loader_label)
@@ -4810,14 +4812,14 @@ class Workspace(QMainWindow):
         self.shotsync_action_title.setObjectName("shotsyncTitle")
         self.shotsync_action_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         box_layout.addWidget(self.shotsync_action_title)
-        self.shotsync_action_hint = QLabel("Выберите, как работать со съёмкой.")
+        self.shotsync_action_hint = QLabel(_("Выберите, как работать со съёмкой."))
         self.shotsync_action_hint.setObjectName("shotsyncHint")
         self.shotsync_action_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         box_layout.addWidget(self.shotsync_action_hint)
-        self.shotsync_take_button = QPushButton("Взять на отбор")
+        self.shotsync_take_button = QPushButton(_("Взять на отбор"))
         self.shotsync_take_button.clicked.connect(self._take_displayed_shotsync_shooting)
         box_layout.addWidget(self.shotsync_take_button)
-        self.shotsync_watch_button = QPushButton("Получать оригиналы")
+        self.shotsync_watch_button = QPushButton(_("Получать оригиналы"))
         self.shotsync_watch_button.clicked.connect(self._watch_displayed_shotsync_shooting)
         box_layout.addWidget(self.shotsync_watch_button)
         layout.addWidget(box, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -4829,11 +4831,11 @@ class Workspace(QMainWindow):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addStretch(1)
-        self.shotsync_upload_title = QLabel("Загружаем съёмку на сервер…")
+        self.shotsync_upload_title = QLabel(_("Загружаем съёмку на сервер…"))
         self.shotsync_upload_title.setObjectName("shotsyncUploadStateTitle")
         self.shotsync_upload_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.shotsync_upload_title)
-        self.shotsync_upload_status = QLabel("Подготавливаем фотографии…")
+        self.shotsync_upload_status = QLabel(_("Подготавливаем фотографии…"))
         self.shotsync_upload_status.setObjectName("shotsyncUploadStateHint")
         self.shotsync_upload_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.shotsync_upload_status)
@@ -4909,7 +4911,7 @@ class Workspace(QMainWindow):
         if not sources:
             return
         identifier = "quick_move" if move else "quick_copy"
-        operation = "переместить" if move else "скопировать"
+        operation = _("переместить") if move else _("скопировать")
         dialog = QuickTransferDialog(
             operation,
             self._quick_transfer_destinations(),
@@ -5009,10 +5011,10 @@ class Workspace(QMainWindow):
     def _show_grid_restore_loader_if_needed(self) -> None:
         """Показывает оверлей лишь для ещё не завершённого восстановления позиции."""
         if self._restoring_folder_grid_context:
-            self.grid_restore_loader_label.setText("Папка открывается")
+            self.grid_restore_loader_label.setText(_("Папка открывается"))
             self._set_grid_restore_loader_visible(True)
         elif self._restoring_view_context:
-            self.grid_restore_loader_label.setText("Обновляю список")
+            self.grid_restore_loader_label.setText(_("Обновляю список"))
             self._set_grid_restore_loader_visible(True)
 
     def _hide_grid_restore_loader(self) -> None:
@@ -5031,10 +5033,10 @@ class Workspace(QMainWindow):
         # Оба оверлея должны разделять состояние, иначе один останется поверх результата.
         self.full_view.set_face_search_loading(loading)
         if loading:
-            self.grid_restore_loader_label.setText("Ищу похожие лица")
+            self.grid_restore_loader_label.setText(_("Ищу похожие лица"))
             self._set_grid_restore_loader_visible(True)
             return
-        self.grid_restore_loader_label.setText("Папка открывается")
+        self.grid_restore_loader_label.setText(_("Папка открывается"))
         self._set_grid_restore_loader_visible(self._restoring_folder_grid_context)
 
     def eventFilter(self, watched, event) -> bool:
@@ -5168,7 +5170,7 @@ class Workspace(QMainWindow):
         new_name = editor.text().strip()
         if not new_name or new_name in {".", ".."} or "/" in new_name or "\\" in new_name:
             editor.setStyleSheet("border: 1px solid #c43d2f;")
-            editor.setToolTip("Введите корректное имя папки")
+            editor.setToolTip(_("Введите корректное имя папки"))
             QTimer.singleShot(0, editor.setFocus)
             return
 
@@ -5176,7 +5178,7 @@ class Workspace(QMainWindow):
         if new_path != old_path:
             if new_path.exists():
                 editor.setStyleSheet("border: 1px solid #c43d2f;")
-                editor.setToolTip("Папка с таким именем уже существует")
+                editor.setToolTip(_("Папка с таким именем уже существует"))
                 QTimer.singleShot(0, editor.setFocus)
                 return
             try:
@@ -5201,8 +5203,8 @@ class Workspace(QMainWindow):
             except OSError as error:
                 QMessageBox.warning(
                     self,
-                    "Кэш папки",
-                    f"Папка переименована, но не удалось перенести её кэш:\n{error}",
+                    _("Кэш папки"),
+                    _("Папка переименована, но не удалось перенести её кэш:\n{error}").format(error=error),
                 )
             if current_relative is not None:
                 self.load_directory(new_path / current_relative)
@@ -5227,7 +5229,7 @@ class Workspace(QMainWindow):
 
         i = 1
         while True:
-            temp_name = f"Новая папка {i}"
+            temp_name = _("Новая папка {n}").format(n=i)
             temp_path = parent_dir / temp_name
             if not temp_path.exists():
                 break
@@ -5238,11 +5240,11 @@ class Workspace(QMainWindow):
 
             parent_index = self.dir_model.index(str(parent_dir))
             if not parent_index.isValid():
-                raise OSError("Текущая директория еще не готова в модели дерева.")
+                raise OSError(_("Текущая директория еще не готова в модели дерева."))
 
             new_index = self.dir_model.mkdir(parent_index, temp_name)
             if not new_index.isValid():
-                raise OSError("QFileSystemModel не смог создать папку.")
+                raise OSError(_("QFileSystemModel не смог создать папку."))
 
             QTimer.singleShot(
                 0,
@@ -5250,7 +5252,7 @@ class Workspace(QMainWindow):
             )
 
         except OSError as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось создать папку: {e}")
+            QMessageBox.critical(self, _("Ошибка"), _("Не удалось создать папку: {error}").format(error=e))
             self.dir_model._new_folder_path = None  # повторный редактор уже не появится
 
     def _directory_editor_closed(self, _editor, _hint) -> None:
@@ -5406,27 +5408,27 @@ class Workspace(QMainWindow):
 
     def _populate_folder_context_menu(self, menu: QMenu, path: Path) -> None:
         """Добавляет одинаковый набор действий папки для дерева и сетки."""
-        open_tab = menu.addAction("Открыть в новой вкладке")
+        open_tab = menu.addAction(_("Открыть в новой вкладке"))
         open_tab.setIcon(_fomantic_icon("folder", 13))
         open_tab.triggered.connect(
             lambda _checked=False, target=path: self.openFolderRequested.emit(target)
         )
         menu.addSeparator()
-        create = menu.addAction("Создать папку")
+        create = menu.addAction(_("Создать папку"))
         create.setIcon(_fomantic_icon("folder-plus", 14))
         create.triggered.connect(
             lambda _checked=False, target=path: QTimer.singleShot(
                 0, lambda: self._create_new_folder(target)
             )
         )
-        rename = menu.addAction("Переименовать")
+        rename = menu.addAction(_("Переименовать"))
         rename.setIcon(_fomantic_icon("edit", 13))
         rename.triggered.connect(
             lambda _checked=False, target=path: QTimer.singleShot(
                 0, lambda: self._begin_directory_inline_rename(target)
             )
         )
-        delete = menu.addAction("Удалить")
+        delete = menu.addAction(_("Удалить"))
         delete.setIcon(_fomantic_icon("trash", 13))
         delete.triggered.connect(lambda _checked=False, target=path: self._delete_paths([target], permanent=False))
 
@@ -5455,13 +5457,13 @@ class Workspace(QMainWindow):
                 pass
 
         menu = QMenu(self.grid)
-        open_file = menu.addAction("Открыть")
+        open_file = menu.addAction(_("Открыть"))
         open_file.triggered.connect(
             lambda _checked=False, target=path: QDesktopServices.openUrl(
                 QUrl.fromLocalFile(str(target))
             )
         )
-        reveal = menu.addAction("Показать в папке")
+        reveal = menu.addAction(_("Показать в папке"))
         reveal.triggered.connect(
             lambda _checked=False, target=path: self._reveal_file_in_system(target)
         )
@@ -5544,20 +5546,20 @@ class Workspace(QMainWindow):
             candidate = target.with_name(f"{target.stem} ({number}){target.suffix}")
             if not candidate.exists():
                 return candidate
-        raise OSError("Не удалось подобрать свободное имя")
+        raise OSError(_("Не удалось подобрать свободное имя"))
 
     def _resolve_transfer_conflict(self, source: Path, target: Path, move: bool) -> str:
-        verb = "перемещении" if move else "копировании"
+        question = _("Что сделать при перемещении «{name}»?") if move else _("Что сделать при копировании «{name}»?")
         dialog = QMessageBox(self)
         dialog.setObjectName("transferConflictDialog")
         dialog.setIcon(QMessageBox.Icon.Warning)
-        dialog.setWindowTitle("Файл уже существует")
-        dialog.setText(f"В папке назначения уже есть «{target.name}».")
-        dialog.setInformativeText(f"Что сделать при {verb} «{source.name}»?")
-        skip = dialog.addButton("Пропустить", QMessageBox.ButtonRole.ActionRole)
-        rename = dialog.addButton("Переименовать", QMessageBox.ButtonRole.ActionRole)
-        replace = dialog.addButton("Заменить", QMessageBox.ButtonRole.DestructiveRole)
-        cancel = dialog.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        dialog.setWindowTitle(_("Файл уже существует"))
+        dialog.setText(_("В папке назначения уже есть «{name}».").format(name=target.name))
+        dialog.setInformativeText(question.format(name=source.name))
+        skip = dialog.addButton(_("Пропустить"), QMessageBox.ButtonRole.ActionRole)
+        rename = dialog.addButton(_("Переименовать"), QMessageBox.ButtonRole.ActionRole)
+        replace = dialog.addButton(_("Заменить"), QMessageBox.ButtonRole.DestructiveRole)
+        cancel = dialog.addButton(_("Отмена"), QMessageBox.ButtonRole.RejectRole)
         dialog.setDefaultButton(rename)
         dialog.exec()
         chosen = dialog.clickedButton()
@@ -5606,8 +5608,8 @@ class Workspace(QMainWindow):
         ):
             QMessageBox.information(
                 self,
-                "Файловая операция",
-                "Дождитесь завершения текущего приёма, отбора или отправки ShotSync.",
+                _("Файловая операция"),
+                _("Дождитесь завершения текущего приёма, отбора или отправки ShotSync."),
             )
             return
         if not _consumers_released and self._paths_touch_current_workspace([*sources, destination]):
@@ -5622,9 +5624,9 @@ class Workspace(QMainWindow):
                     _consumers_released=True,
                 ),
                 loading_text=(
-                    "Выполняется перемещение"
+                    _("Выполняется перемещение")
                     if move
-                    else "Выполняется копирование"
+                    else _("Выполняется копирование")
                 ),
             )
             return
@@ -5649,10 +5651,10 @@ class Workspace(QMainWindow):
             if source.parent == destination:
                 if move:
                     continue
-                errors.append(f"{source.name}: уже находится в этой папке")
+                errors.append(_("{name}: уже находится в этой папке").format(name=source.name))
                 continue
             if source.is_dir() and destination_resolved.is_relative_to(source_resolved):
-                errors.append(f"{source.name}: нельзя поместить папку внутрь самой себя")
+                errors.append(_("{name}: нельзя поместить папку внутрь самой себя").format(name=source.name))
                 continue
             target = destination / source.name
             if target.exists():
@@ -5676,7 +5678,7 @@ class Workspace(QMainWindow):
                             target.unlink()
                         self.cache_flush_executor.submit(prune_folder_cache, destination)
                     except OSError as exc:
-                        errors.append(f"{source.name}: не удалось заменить {exc}")
+                        errors.append(_("{name}: не удалось заменить {error}").format(name=source.name, error=exc))
                         continue
             is_folder = source.is_dir()
             try:
@@ -5701,7 +5703,7 @@ class Workspace(QMainWindow):
             try:
                 relocate_folder_caches(source, target)
             except OSError as exc:
-                errors.append(f"кэш {source.name}: {exc}")
+                errors.append(_("кэш {name}: {error}").format(name=source.name, error=exc))
         if changed:
             moved_from_current = [
                 source for source in [*moved_files, *(source for source, _target in moved_folders)]
@@ -5714,7 +5716,7 @@ class Workspace(QMainWindow):
                 self.folder_change_timer.stop()
                 self.load_directory(self.current_dir)
         if errors:
-            QMessageBox.warning(self, "Копирование файлов", "Не удалось обработать некоторые объекты:\n" + "\n".join(errors))
+            QMessageBox.warning(self, _("Копирование файлов"), _("Не удалось обработать некоторые объекты:\n") + "\n".join(errors))
 
     def _enqueue_transfer(self, sources: list[Path], destination: Path, action) -> None:
         """Согласует корневые конфликты и передаёт операцию глобальному менеджеру."""
@@ -5732,10 +5734,10 @@ class Workspace(QMainWindow):
                 source_resolved, destination_resolved = source, destination
             if source.parent == destination:
                 if not move:
-                    errors.append(f"{source.name}: уже находится в этой папке")
+                    errors.append(_("{name}: уже находится в этой папке").format(name=source.name))
                 continue
             if source.is_dir() and destination_resolved.is_relative_to(source_resolved):
-                errors.append(f"{source.name}: нельзя поместить папку внутрь самой себя")
+                errors.append(_("{name}: нельзя поместить папку внутрь самой себя").format(name=source.name))
                 continue
             target = destination / source.name
             replace = False
@@ -5759,8 +5761,8 @@ class Workspace(QMainWindow):
         if errors:
             QMessageBox.warning(
                 self,
-                "Файловая операция",
-                "Не удалось поставить некоторые объекты в очередь:\n" + "\n".join(errors),
+                _("Файловая операция"),
+                _("Не удалось поставить некоторые объекты в очередь:\n") + "\n".join(errors),
             )
 
     def _queued_renamed_transfer_target(self, target: Path) -> Path:
@@ -5772,7 +5774,7 @@ class Workspace(QMainWindow):
                 and self.transfer_manager.target_reserved(candidate)
             ):
                 return candidate
-        raise OSError("Не удалось подобрать свободное имя")
+        raise OSError(_("Не удалось подобрать свободное имя"))
 
     def _delete_paths(self, paths: list[Path], *, permanent: bool) -> None:
         """Удаляет выбранные файлы или папки, учитывая локальные копии ShotSync."""
@@ -5786,8 +5788,8 @@ class Workspace(QMainWindow):
         ):
             QMessageBox.information(
                 self,
-                "Удаление",
-                "Дождитесь завершения текущего приёма, отбора или отправки ShotSync.",
+                _("Удаление"),
+                _("Дождитесь завершения текущего приёма, отбора или отправки ShotSync."),
             )
             return
         files = [path for path in targets if path.is_file()]
@@ -5799,7 +5801,7 @@ class Workspace(QMainWindow):
             QMessageBox.information(
                 self,
                 "ShotSync",
-                "Фотографии из съёмки, взятой на отбор из ShotSync, нельзя удалить отдельно.",
+                _("Фотографии из съёмки, взятой на отбор из ShotSync, нельзя удалить отдельно."),
             )
             targets = [path for path in targets if path.is_dir()]
             if not targets:
@@ -5810,22 +5812,22 @@ class Workspace(QMainWindow):
             except OSError:
                 resolved = folder
             if resolved.parent == resolved:
-                QMessageBox.warning(self, "Удаление", "Нельзя удалить корневую папку диска.")
+                QMessageBox.warning(self, _("Удаление"), _("Нельзя удалить корневую папку диска."))
                 return
 
-        action = "удалить навсегда" if permanent else "переместить в корзину"
+        question = _("Удалить навсегда {count} объект(а)?") if permanent else _("Переместить в корзину {count} объект(а)?")
         if not self.settings.value("behavior/delete_without_confirmation", False, bool):
             names = "\n".join(f"• {path.name}" for path in targets[:8])
             if len(targets) > 8:
-                names += f"\n• и ещё {len(targets) - 8}"
+                names += _("\n• и ещё {n}").format(n=len(targets) - 8)
             dialog = QMessageBox(self)
             dialog.setIcon(QMessageBox.Icon.Warning)
-            dialog.setWindowTitle("Удаление")
-            dialog.setText(f"{action.capitalize()} {len(targets)} объект(а)?\n\n{names}")
+            dialog.setWindowTitle(_("Удаление"))
+            dialog.setText(f"{question.format(count=len(targets))}\n\n{names}")
             dialog.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
             dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
-            dialog.button(QMessageBox.StandardButton.Yes).setText("Удалить")
-            dialog.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+            dialog.button(QMessageBox.StandardButton.Yes).setText(_("Удалить"))
+            dialog.button(QMessageBox.StandardButton.Cancel).setText(_("Отмена"))
             if dialog.exec() != QMessageBox.StandardButton.Yes:
                 return
 
@@ -5833,7 +5835,7 @@ class Workspace(QMainWindow):
             targets,
             lambda selected=list(targets), remove_permanently=permanent:
             self._delete_paths_now(selected, permanent=remove_permanently),
-            loading_text="Выполняется удаление",
+            loading_text=_("Выполняется удаление"),
         )
 
     def _delete_paths_now(self, targets: list[Path], *, permanent: bool) -> None:
@@ -5874,7 +5876,7 @@ class Workspace(QMainWindow):
             try:
                 remove_folder_cache(folder)
             except OSError as exc:
-                errors.append(f"кэш {folder.name}: {exc}")
+                errors.append(_("кэш {name}: {error}").format(name=folder.name, error=exc))
 
         if deleted_files:
             self.cache_flush_executor.submit(prune_folder_cache, self.current_dir)
@@ -5883,7 +5885,7 @@ class Workspace(QMainWindow):
         if deleted and not deleting_current_folder:
             self._remove_paths_from_grid(deleted)
         if errors:
-            QMessageBox.warning(self, "Удаление", "Не удалось удалить:\n" + "\n".join(errors))
+            QMessageBox.warning(self, _("Удаление"), _("Не удалось удалить:\n") + "\n".join(errors))
 
     def _remove_paths_from_grid(self, deleted: list[Path]) -> None:
         """Убирает удалённые пути из сетки без её полной пересборки."""
@@ -6000,7 +6002,7 @@ class Workspace(QMainWindow):
                 else self.volume_icon_provider.icon(QFileInfo(str(path)))
             )
             tooltip = _volume_label(path)
-            button.setToolTip(f"Съёмный носитель\n{tooltip}" if removable else tooltip)
+            button.setToolTip(_("Съёмный носитель\n{label}").format(label=tooltip) if removable else tooltip)
 
         current_root = _volume_root_for_path(self.current_dir, volumes)
         for button in self.drive_buttons.buttons():
@@ -6365,7 +6367,7 @@ class Workspace(QMainWindow):
             folder = self._local_shotsync_folder(shooting_id)
             if folder is None:
                 continue
-            title = f"Съёмка {shooting_id}"
+            title = _("Съёмка {id}").format(id=shooting_id)
             photo_count = 0
             try:
                 names = {path.name for path in folder.iterdir() if path.is_file()}
@@ -6396,7 +6398,7 @@ class Workspace(QMainWindow):
         self.shotsync_panel.set_offline_ids({int(shooting["id"]) for shooting in shootings})
         self.shotsync_panel.set_shootings(shootings)
         self._refresh_shotsync_local_folders(shootings)
-        suffix = " Открыты сохранённые съёмки; изменения синхронизируются при подключении."
+        suffix = _(" Открыты сохранённые съёмки; изменения синхронизируются при подключении.")
         self.shotsync_panel.set_shootings_error(_humanize_shotsync_network_error(error) + suffix)
 
     def _local_shotsync_folder(self, shooting_id: int, title: str = "") -> Path | None:
@@ -6446,7 +6448,7 @@ class Workspace(QMainWindow):
         shooting_id = int(shooting.get("id") or 0)
         if not shooting_id:
             return
-        title = str(shooting.get("title") or "Съёмка ShotSync")
+        title = str(shooting.get("title") or _("Съёмка ShotSync"))
         folder = self._local_shotsync_folder(shooting_id, title)
         if folder is not None:
             self.load_directory(folder)
@@ -6490,19 +6492,19 @@ class Workspace(QMainWindow):
     def _shotsync_remove_local_requested(self, shooting: dict) -> None:
         """Удаляет локальную копию отбора, не затрагивая съёмку на сервере."""
         shooting_id = int(shooting.get("id") or 0)
-        title = str(shooting.get("title") or "Съёмка ShotSync")
+        title = str(shooting.get("title") or _("Съёмка ShotSync"))
         folder = self._local_shotsync_folder(shooting_id, title)
         if not shooting_id or folder is None:
             return
         resolved = folder.resolve()
         if resolved.parent == resolved:
-            QMessageBox.warning(self, "ShotSync", "Нельзя удалить корневую папку диска.")
+            QMessageBox.warning(self, "ShotSync", _("Нельзя удалить корневую папку диска."))
             return
         if not self._confirm_shotsync_action(
-            "Удалить локальную копию",
-            f"Удалить с компьютера папку «{folder.name}»?\n\n"
-            "Съёмка и метки на ShotSync останутся доступны. Удалятся только локальные файлы.",
-            "Удалить",
+            _("Удалить локальную копию"),
+            _("Удалить с компьютера папку «{name}»?\n\nСъёмка и метки на ShotSync останутся доступны. Удалятся только локальные файлы.").format(name=folder.name),
+
+            _("Удалить"),
         ):
             return
         if folder == self.current_dir:
@@ -6511,7 +6513,7 @@ class Workspace(QMainWindow):
         try:
             shutil.rmtree(folder)
         except OSError as exc:
-            QMessageBox.warning(self, "ShotSync", f"Не удалось удалить локальную папку:\n{exc}")
+            QMessageBox.warning(self, "ShotSync", _("Не удалось удалить локальную папку:\n{error}").format(error=exc))
             return
         self._forget_shotsync_folder(shooting_id)
         self._forget_shotsync_selection(shooting_id)
@@ -6544,9 +6546,9 @@ class Workspace(QMainWindow):
         if not shooting_id or folder is None:
             return
         if not self._confirm_shotsync_action(
-            "Удалить съёмку с сервера",
-            "Удалить съёмку из ShotSync? Исходная папка с фотографиями останется на компьютере.",
-            "Удалить",
+            _("Удалить съёмку с сервера"),
+            _("Удалить съёмку из ShotSync? Исходная папка с фотографиями останется на компьютере."),
+            _("Удалить"),
         ):
             return
         self._deleting_shotsync_folders[shooting_id] = folder
@@ -6561,7 +6563,7 @@ class Workspace(QMainWindow):
         )
         dialog.setDefaultButton(QMessageBox.StandardButton.Cancel)
         dialog.button(QMessageBox.StandardButton.Yes).setText(accept_label)
-        dialog.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+        dialog.button(QMessageBox.StandardButton.Cancel).setText(_("Отмена"))
         return dialog.exec() == QMessageBox.StandardButton.Yes
 
     def _on_shotsync_server_deleted(self, shooting_id: int) -> None:
@@ -6603,9 +6605,9 @@ class Workspace(QMainWindow):
             self._refresh_shotsync_local_folders(self._shotsync_shootings)
             self._refresh_shotsync_tab_indicator()
             return
-        title = shooting.get("title") or "Съёмка ShotSync"
+        title = shooting.get("title") or _("Съёмка ShotSync")
         base = QFileDialog.getExistingDirectory(
-            self, f"Куда сохранять фото «{title}»", str(self.current_dir)
+            self, _("Куда сохранять фото «{title}»").format(title=title), str(self.current_dir)
         )
         if not base:
             return
@@ -6613,7 +6615,7 @@ class Workspace(QMainWindow):
         try:
             folder.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            QMessageBox.warning(self, "ShotSync", f"Не удалось создать папку:\n{exc}")
+            QMessageBox.warning(self, "ShotSync", _("Не удалось создать папку:\n{error}").format(error=exc))
             return
         self.shotsync.start_receiving(shooting_id, folder, title)
         self._remember_shotsync_folder(shooting_id, folder)
@@ -6723,13 +6725,13 @@ class Workspace(QMainWindow):
             return
         if self.shotsync.downloader.is_running(shooting_id):
             return
-        title = shooting.get("title") or "Съёмка ShotSync"
+        title = shooting.get("title") or _("Съёмка ShotSync")
         self._requested_shotsync_selections.add(shooting_id)
         self._requested_shotsync_folders[shooting_id] = selection_folder(shooting_id, str(title))
         self.stack.setCurrentWidget(self.grid_page)
         self.grid_content_stack.setCurrentWidget(self.shotsync_upload_page)
-        self.shotsync_upload_title.setText("Получаем фотографии с сервера…")
-        self.shotsync_upload_status.setText("Подготавливаем загрузку…")
+        self.shotsync_upload_title.setText(_("Получаем фотографии с сервера…"))
+        self.shotsync_upload_status.setText(_("Подготавливаем загрузку…"))
         self._selection_progress = (0, 0)
         self._refresh_status_panel()
         self.shotsync.downloader.start(shooting_id, title)
@@ -6741,7 +6743,7 @@ class Workspace(QMainWindow):
             return
         self._selection_progress = (done, total) if total else None
         self.shotsync_upload_status.setText(
-            f"Получено фотографий: {done} из {total}" if total else "Загружаем фотографии…"
+            _("Получено фотографий: {done} из {total}").format(done=done, total=total) if total else _("Загружаем фотографии…")
         )
         self._refresh_status_panel()
 
@@ -6806,7 +6808,7 @@ class Workspace(QMainWindow):
         self._selection_progress = None
         self._refresh_status_panel()
         self.grid_content_stack.setCurrentWidget(self.grid)
-        QMessageBox.warning(self, "ShotSync", f"Не удалось загрузить съёмку:\n{message}")
+        QMessageBox.warning(self, "ShotSync", _("Не удалось загрузить съёмку:\n{error}").format(error=message))
 
     def _attach_shotsync_syncer(self) -> None:
         """Подключает синхронизацию меток, если открыта папка отбора ShotSync."""
@@ -6841,7 +6843,7 @@ class Workspace(QMainWindow):
             return
         if not self.shotsync_client.has_key():
             QMessageBox.information(
-                self, "ShotSync", "Сначала войдите в ShotSync на боковой панели."
+                self, "ShotSync", _("Сначала войдите в ShotSync на боковой панели.")
             )
             return
         if self.shotsync.uploader.busy:
@@ -6853,46 +6855,46 @@ class Workspace(QMainWindow):
         dialog = QDialog(self)
         self._shotsync_upload_popup = dialog
         dialog.setObjectName("shotsyncUploadPopup")
-        dialog.setWindowTitle("Отправить на ShotSync")
+        dialog.setWindowTitle(_("Отправить на ShotSync"))
         dialog.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
         dialog.setMinimumWidth(440)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(24, 22, 24, 22)
         layout.setSpacing(12)
 
-        title_label = QLabel("Новая съёмка")
+        title_label = QLabel(_("Новая съёмка"))
         title_label.setObjectName("shotsyncUploadPopupTitle")
         layout.addWidget(title_label)
-        hint = QLabel("Укажите название и папку с фотографиями для отправки на отбор.")
+        hint = QLabel(_("Укажите название и папку с фотографиями для отправки на отбор."))
         hint.setObjectName("shotsyncUploadPopupHint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         name = QLineEdit()
         name.setObjectName("shotsyncUploadPopupField")
-        name.setPlaceholderText("Название съёмки")
+        name.setPlaceholderText(_("Название съёмки"))
         layout.addWidget(name)
 
         path_row = QHBoxLayout()
         path_edit = QLineEdit()
         path_edit.setObjectName("shotsyncUploadPopupField")
-        path_edit.setPlaceholderText("Папка не выбрана")
+        path_edit.setPlaceholderText(_("Папка не выбрана"))
         path_edit.setReadOnly(True)
-        browse = QPushButton("Выбрать папку…")
+        browse = QPushButton(_("Выбрать папку…"))
         browse.setObjectName("shotsyncUploadPopupBrowse")
         path_row.addWidget(path_edit, 1)
         path_row.addWidget(browse)
         layout.addLayout(path_row)
 
-        ai = QCheckBox("AI: лица и серии")
+        ai = QCheckBox(_("AI: лица и серии"))
         ai.setObjectName("shotsyncUploadPopupCheck")
         layout.addWidget(ai)
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        cancel = QPushButton("Отмена")
+        cancel = QPushButton(_("Отмена"))
         cancel.setObjectName("shotsyncUploadPopupCancel")
-        send = QPushButton("Отправить")
+        send = QPushButton(_("Отправить"))
         send.setObjectName("shotsyncUploadPopupSend")
         send.setEnabled(False)
         buttons.addWidget(cancel)
@@ -6901,7 +6903,7 @@ class Workspace(QMainWindow):
 
         selected: list[Path | None] = [None]
         def choose_folder() -> None:
-            folder = QFileDialog.getExistingDirectory(dialog, "Папка со съёмкой", str(self.current_dir))
+            folder = QFileDialog.getExistingDirectory(dialog, _("Папка со съёмкой"), str(self.current_dir))
             if not folder:
                 return
             selected[0] = Path(folder)
@@ -6918,7 +6920,7 @@ class Workspace(QMainWindow):
                 return
             shooting_title = name.text().strip()
             if not shooting_title:
-                shooting_title = folder.name or "Новая съёмка"
+                shooting_title = folder.name or _("Новая съёмка")
                 name.setText(shooting_title)
             dialog.close()
             self._start_shotsync_upload(folder, shooting_title, ai.isChecked())
@@ -6930,7 +6932,7 @@ class Workspace(QMainWindow):
     def _start_shotsync_upload(self, folder: Path, title: str, ai_faces_series: bool) -> None:
         self.stack.setCurrentWidget(self.grid_page)
         self.grid_content_stack.setCurrentWidget(self.shotsync_upload_page)
-        self.shotsync_upload_status.setText("Подготавливаем фотографии…")
+        self.shotsync_upload_status.setText(_("Подготавливаем фотографии…"))
         self._upload_progress = (0, 0)
         self._refresh_status_panel()
         original_datetimes = {
@@ -6943,12 +6945,12 @@ class Workspace(QMainWindow):
     def _shotsync_upload_dialog(self) -> tuple[Path, str, bool] | None:
         """Запрашивает все параметры новой съёмки, включая исходную папку."""
         dialog = QDialog(self)
-        dialog.setWindowTitle("Отправить на отбор")
+        dialog.setWindowTitle(_("Отправить на отбор"))
         layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("Название съёмки"))
-        name = QLineEdit(self.current_dir.name or "Новая съёмка")
+        layout.addWidget(QLabel(_("Название съёмки")))
+        name = QLineEdit(self.current_dir.name or _("Новая съёмка"))
         layout.addWidget(name)
-        layout.addWidget(QLabel("Папка с фотографиями"))
+        layout.addWidget(QLabel(_("Папка с фотографиями")))
         folders = QComboBox()
         used = {Path(value) for value in self._shotsync_folder_map().values()}
         candidates = [self.current_dir]
@@ -6959,21 +6961,21 @@ class Workspace(QMainWindow):
         for path in candidates:
             folders.addItem(str(path), path)
         layout.addWidget(folders)
-        browse = QPushButton("Выбрать папку на диске…")
+        browse = QPushButton(_("Выбрать папку на диске…"))
         layout.addWidget(browse)
         selected_external: list[Path | None] = [None]
         def choose_folder() -> None:
-            chosen = QFileDialog.getExistingDirectory(dialog, "Папка со съёмкой", str(self.current_dir))
+            chosen = QFileDialog.getExistingDirectory(dialog, _("Папка со съёмкой"), str(self.current_dir))
             if chosen:
                 selected_external[0] = Path(chosen)
                 folders.setCurrentText(chosen)
         browse.clicked.connect(choose_folder)
-        ai = QCheckBox("AI: лица и серии")
-        ai.setToolTip("Включить обработку лиц и серий на сервере ShotSync")
+        ai = QCheckBox(_("AI: лица и серии"))
+        ai.setToolTip(_("Включить обработку лиц и серий на сервере ShotSync"))
         layout.addWidget(ai)
         buttons = QHBoxLayout()
-        cancel = QPushButton("Отмена")
-        create = QPushButton("Отправить")
+        cancel = QPushButton(_("Отмена"))
+        create = QPushButton(_("Отправить"))
         cancel.clicked.connect(dialog.reject)
         create.clicked.connect(dialog.accept)
         buttons.addWidget(cancel)
@@ -6983,15 +6985,15 @@ class Workspace(QMainWindow):
             return None
         folder = selected_external[0] or folders.currentData()
         if not isinstance(folder, Path) or not folder.is_dir():
-            QMessageBox.warning(self, "ShotSync", "Выберите существующую папку с фотографиями.")
+            QMessageBox.warning(self, "ShotSync", _("Выберите существующую папку с фотографиями."))
             return None
-        title = name.text().strip() or folder.name or "Новая съёмка"
+        title = name.text().strip() or folder.name or _("Новая съёмка")
         return folder, title, ai.isChecked()
 
     def _on_shotsync_upload_progress(self, done: int, total: int) -> None:
         self._upload_progress = (done, total)
         self.shotsync_upload_status.setText(
-            f"Загружено фотографий: {done} из {total}" if total else "Подготавливаем фотографии…"
+            _("Загружено фотографий: {done} из {total}").format(done=done, total=total) if total else _("Подготавливаем фотографии…")
         )
         self._refresh_status_panel()
 
@@ -7016,15 +7018,15 @@ class Workspace(QMainWindow):
         QMessageBox.warning(
             self,
             "ShotSync",
-            f"Съёмка отправлена, но {failed} фото не удалось загрузить.\n"
-            "Повторите отправку той же папки — недостающие кадры догрузятся.",
+            _("Съёмка отправлена, но {failed} фото не удалось загрузить.\nПовторите отправку той же папки — недостающие кадры догрузятся.").format(failed=failed),
+
         )
 
     def _on_shotsync_upload_failed(self, message: str) -> None:
         self._upload_progress = None
         self.grid_content_stack.setCurrentWidget(self.grid)
         self._refresh_status_panel()
-        QMessageBox.warning(self, "ShotSync", f"Не удалось отправить съёмку:\n{message}")
+        QMessageBox.warning(self, "ShotSync", _("Не удалось отправить съёмку:\n{error}").format(error=message))
 
     def _shotsync_fetch_marks(self) -> None:
         """Получает с сервера метки для открытой папки ShotSync."""
@@ -7033,7 +7035,7 @@ class Workspace(QMainWindow):
         session = self.folder_cache.shotsync_session()
         if not session:
             QMessageBox.information(
-                self, "ShotSync", "Эта папка не связана со съёмкой ShotSync."
+                self, "ShotSync", _("Эта папка не связана со съёмкой ShotSync.")
             )
             return
         shooting_id, _title = session
@@ -7052,7 +7054,7 @@ class Workspace(QMainWindow):
     def _on_shotsync_marks_failed(self, message: str) -> None:
         self._shotsync_marks_fetching = False
         self._refresh_status_panel()
-        QMessageBox.warning(self, "ShotSync", f"Не удалось получить метки:\n{message}")
+        QMessageBox.warning(self, "ShotSync", _("Не удалось получить метки:\n{error}").format(error=message))
 
     def _refresh_shotsync_shortcuts(self) -> None:
         """Включает только те действия ShotSync, которые подходят текущей папке."""
@@ -7142,7 +7144,7 @@ class Workspace(QMainWindow):
         self._directory_scan_pending = True
         self._custom_order = self._load_custom_order(directory)
         if self._custom_order and self.sort_combo.findData("custom") < 0:
-            self.sort_combo.addItem("Пользовательский", "custom")
+            self.sort_combo.addItem(_("Пользовательский"), "custom")
             self.sort_combo.setItemIcon(self.sort_combo.count() - 1, _fomantic_icon("sort", 10, "#a8b0bd"))
         self._remember_directory_for_volume(directory)
         self._refresh_shotsync_tab_indicator()
@@ -7181,7 +7183,7 @@ class Workspace(QMainWindow):
         self.grid.clear()
         self._restoring_folder_grid_context = self._pending_folder_grid_context is not None
         if self._restoring_folder_grid_context:
-            self.grid_restore_loader_label.setText("Папка открывается")
+            self.grid_restore_loader_label.setText(_("Папка открывается"))
             self.grid.setUpdatesEnabled(False)
             self._schedule_grid_restore_loader()
         else:
@@ -7235,7 +7237,7 @@ class Workspace(QMainWindow):
         self._custom_order = names
         self.settings.setValue(f"{self._folder_settings_prefix(self.current_dir)}/custom_order", names)
         if self.sort_combo.findData("custom") < 0:
-            self.sort_combo.addItem("Пользовательский", "custom")
+            self.sort_combo.addItem(_("Пользовательский"), "custom")
             self.sort_combo.setItemIcon(self.sort_combo.count() - 1, _fomantic_icon("sort", 10, "#a8b0bd"))
         self.sort_combo.setCurrentIndex(self.sort_combo.findData("custom"))
         self._apply_view()
@@ -7331,7 +7333,7 @@ class Workspace(QMainWindow):
         # окончательный список с восстановленным курсором.
         self._restoring_view_context = True
         self.grid.setUpdatesEnabled(False)
-        self.grid_restore_loader_label.setText("Обновляю список")
+        self.grid_restore_loader_label.setText(_("Обновляю список"))
         self._schedule_grid_restore_loader()
 
     def _restore_pending_view_cursor(self) -> None:
@@ -7415,7 +7417,7 @@ class Workspace(QMainWindow):
         self._apply_view()
         self.seriesModeChanged.emit(enabled)
         self._show_viewer_toast(
-            "Группировка по сериям включена" if enabled else "Группировка по сериям выключена"
+            _("Группировка по сериям включена") if enabled else _("Группировка по сериям выключена")
         )
 
     def _show_viewer_toast(self, message: str) -> None:
@@ -7604,7 +7606,7 @@ class Workspace(QMainWindow):
         if not self._previews_ready_for_manual_ai():
             self._ai_requested_generation = self.view_generation
             self.ai_analysis_available = False
-            self._show_viewer_toast("AI-анализ поставлен в очередь")
+            self._show_viewer_toast(_("AI-анализ поставлен в очередь"))
             self._refresh_status_panel()
             return
         self._launch_ai_analysis()
@@ -7692,12 +7694,12 @@ class Workspace(QMainWindow):
         layout.setContentsMargins(14, 12, 14, 14)
         layout.setSpacing(8)
 
-        title = QLabel("AI: серии и лица")
+        title = QLabel(_("AI: серии и лица"))
         title.setObjectName("toolbarPopupTitle")
         layout.addWidget(title)
         hint = QLabel(
-            "Находит похожие кадры и лица среди фотографий, "
-            "которые ещё не были обработаны."
+            _("Находит похожие кадры и лица среди фотографий, "
+            "которые ещё не были обработаны.")
         )
         hint.setObjectName("toolbarPopupHint")
         hint.setWordWrap(True)
@@ -7708,14 +7710,14 @@ class Workspace(QMainWindow):
             and self._ai_pipeline.pending_count(self.current_dir) > 0
         )
         if self.cache_ready and self.folder_cache is not None and not ai_running:
-            start = QPushButton("Обработать серии и лица")
+            start = QPushButton(_("Обработать серии и лица"))
             start.setObjectName("toolbarPopupPrimaryButton")
             start.setIcon(_fomantic_icon("magic", 16, "#ffffff"))
             start.setIconSize(QSize(16, 16))
             start.clicked.connect(lambda: (menu.close(), self._start_ai_analysis()))
             layout.addWidget(start)
         elif not ai_running:
-            complete = QLabel("В текущей папке все фото уже обработаны.")
+            complete = QLabel(_("В текущей папке все фото уже обработаны."))
             complete.setObjectName("toolbarPopupHint")
             complete.setWordWrap(True)
             layout.addWidget(complete)
@@ -7769,11 +7771,11 @@ class Workspace(QMainWindow):
         title = QLabel("XMP")
         title.setObjectName("toolbarPopupTitle")
         layout.addWidget(title)
-        auto = SettingsCheckBox("Автоматически синхронизировать XMP")
+        auto = SettingsCheckBox(_("Автоматически синхронизировать XMP"))
         auto.setChecked(self._xmp_auto_enabled())
         layout.addWidget(auto)
-        write_xmp = QPushButton("Записать XMP")
-        read_xmp = QPushButton("Прочитать XMP")
+        write_xmp = QPushButton(_("Записать XMP"))
+        read_xmp = QPushButton(_("Прочитать XMP"))
         write_xmp.setIcon(_fomantic_icon("upload", 15, "#d6d6d6"))
         read_xmp.setIcon(_fomantic_icon("download", 15, "#d6d6d6"))
         write_xmp.setIconSize(QSize(15, 15))
@@ -8140,11 +8142,11 @@ class Workspace(QMainWindow):
         pending = sum(state.get("status") == "local_changes" for state in self._xmp_states.values())
         self.xmp_button.setText(f"XMP · {errors}" if errors else "XMP")
         if errors:
-            self.xmp_button.setToolTip(f"XMP: ошибок {errors}")
+            self.xmp_button.setToolTip(_("XMP: ошибок {n}").format(n=errors))
         elif pending:
-            self.xmp_button.setToolTip(f"XMP: локальных изменений {pending}")
+            self.xmp_button.setToolTip(_("XMP: локальных изменений {n}").format(n=pending))
         else:
-            self.xmp_button.setToolTip("XMP синхронизирован")
+            self.xmp_button.setToolTip(_("XMP синхронизирован"))
 
     def _show_utilities_menu(self) -> None:
         """Показывает место будущих пакетных инструментов без неработающих команд."""
@@ -8156,18 +8158,18 @@ class Workspace(QMainWindow):
         layout.setContentsMargins(14, 12, 14, 14)
         layout.setSpacing(8)
 
-        title = QLabel("Утилиты")
+        title = QLabel(_("Утилиты"))
         title.setObjectName("toolbarPopupTitle")
         layout.addWidget(title)
-        hint = QLabel("Инструменты для пакетной работы с файлами.")
+        hint = QLabel(_("Инструменты для пакетной работы с файлами."))
         hint.setObjectName("toolbarPopupHint")
         hint.setWordWrap(True)
         hint.setFixedWidth(270)
         layout.addWidget(hint)
         for label, icon, callback in (
-            ("Групповое переименование", "edit", self._show_batch_rename_dialog),
-            ("Групповой резайс", "expand", self._show_batch_resize_dialog),
-            ("Уменьшить JPG", "download", self._show_shrink_jpeg_dialog),
+            (_("Групповое переименование"), "edit", self._show_batch_rename_dialog),
+            (_("Групповой резайс"), "expand", self._show_batch_resize_dialog),
+            (_("Уменьшить JPG"), "download", self._show_shrink_jpeg_dialog),
         ):
             button = QPushButton(label)
             button.setObjectName("toolbarPopupUtilityButton")
@@ -8175,7 +8177,7 @@ class Workspace(QMainWindow):
             button.setIconSize(QSize(16, 16))
             if callback is None:
                 button.setEnabled(False)
-                button.setToolTip("Пока не реализовано")
+                button.setToolTip(_("Пока не реализовано"))
             else:
                 button.clicked.connect(lambda _checked=False, target=callback: (menu.close(), QTimer.singleShot(0, target)))
             layout.addWidget(button)
@@ -8189,16 +8191,16 @@ class Workspace(QMainWindow):
         if self._is_shotsync_rename_blocked():
             QMessageBox.information(
                 self,
-                "Групповое переименование",
-                "Переименование недоступно для папок, связанных со съёмками ShotSync.",
+                _("Групповое переименование"),
+                _("Переименование недоступно для папок, связанных со съёмками ShotSync."),
             )
             return
         if not self.cache_ready:
-            QMessageBox.information(self, "Групповое переименование", "Подождите, пока загрузится папка.")
+            QMessageBox.information(self, _("Групповое переименование"), _("Подождите, пока загрузится папка."))
             return
         paths = [path for path in self.view_paths if path.is_file() and is_supported_image(path)]
         if not paths:
-            QMessageBox.information(self, "Групповое переименование", "В текущем списке нет фотографий.")
+            QMessageBox.information(self, _("Групповое переименование"), _("В текущем списке нет фотографий."))
             return
         dialog = BatchRenameDialog(paths, self.photo_details, self.settings, self)
         dialog.renameRequested.connect(lambda names, view=dialog: self._rename_from_dialog(view, names))
@@ -8218,7 +8220,7 @@ class Workspace(QMainWindow):
             paths,
             lambda view=dialog, plan=dict(names): self._submit_file_rename(view, plan),
             restart_consumers=False,
-            loading_text="Выполняется переименование",
+            loading_text=_("Выполняется переименование"),
         )
 
     def _submit_file_rename(self, dialog: BatchRenameDialog, names: dict[str, str]) -> None:
@@ -8280,13 +8282,13 @@ class Workspace(QMainWindow):
         try:
             cache_error = future.result()
         except OSError as exc:
-            dialog.rename_failed(f"Не удалось переименовать файлы: {exc}")
+            dialog.rename_failed(_("Не удалось переименовать файлы: {error}").format(error=exc))
             return
         except Exception as exc:
-            dialog.rename_failed(f"Не удалось переименовать файлы: {exc}")
+            dialog.rename_failed(_("Не удалось переименовать файлы: {error}").format(error=exc))
             return
         if cache_error:
-            QMessageBox.warning(dialog, "Групповое переименование", f"Файлы переименованы, но кэш не обновлён:\n{cache_error}")
+            QMessageBox.warning(dialog, _("Групповое переименование"), _("Файлы переименованы, но кэш не обновлён:\n{error}").format(error=cache_error))
         self.folder_change_timer.stop()
         self.load_directory(self.current_dir)
         dialog.accept()
@@ -8314,10 +8316,10 @@ class Workspace(QMainWindow):
         try:
             paths = self._folder_jpeg_paths()
         except OSError as exc:
-            QMessageBox.information(self, "Уменьшить JPG", f"Не удалось прочитать папку: {exc}")
+            QMessageBox.information(self, _("Уменьшить JPG"), _("Не удалось прочитать папку: {error}").format(error=exc))
             return
         if not paths:
-            QMessageBox.information(self, "Уменьшить JPG", "В текущей папке нет JPG-файлов.")
+            QMessageBox.information(self, _("Уменьшить JPG"), _("В текущей папке нет JPG-файлов."))
             return
         dialog = ShrinkJpegDialog(self.current_dir, len(paths), self.settings, self)
         dialog.startRequested.connect(lambda options, view=dialog, items=paths: self._start_shrink_jpeg(view, items, options))
@@ -8341,17 +8343,17 @@ class Workspace(QMainWindow):
         self.folder_change_timer.stop()
         self.load_directory(self.current_dir)
         saved_mb = saved_bytes / (1024 * 1024)
-        summary = f"Готово. Сэкономлено {saved_mb:.1f} МБ."
+        summary = _("Готово. Сэкономлено {mb} МБ.").format(mb=f"{saved_mb:.1f}")
         if errors:
-            summary = f"Готово с ошибками ({len(errors)}). Сэкономлено {saved_mb:.1f} МБ. {errors[0]}"
+            summary = _("Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}").format(count=len(errors), mb=f"{saved_mb:.1f}", first=errors[0])
         dialog.status.setText(summary)
         dialog.cancel_button.setEnabled(True)
-        dialog.cancel_button.setText("Закрыть")
+        dialog.cancel_button.setText(_("Закрыть"))
 
     def _show_batch_resize_dialog(self) -> None:
         paths = [path for path in self.view_paths if path.is_file() and is_supported_image(path)]
         if not paths:
-            QMessageBox.information(self, "Групповой резайс", "В текущем списке нет фотографий.")
+            QMessageBox.information(self, _("Групповой резайс"), _("В текущем списке нет фотографий."))
             return
         dialog = BatchResizeDialog(self.current_dir, self.settings, self)
         dialog.startRequested.connect(lambda options, view=dialog, items=paths: self._start_batch_resize(view, items, options))
@@ -8363,7 +8365,7 @@ class Workspace(QMainWindow):
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            dialog.status.setText(f"Не удалось создать папку: {exc}")
+            dialog.status.setText(_("Не удалось создать папку: {error}").format(error=exc))
             return
         targets = self._resolve_resize_targets(paths, output_dir)
         if targets is None:
@@ -8388,9 +8390,9 @@ class Workspace(QMainWindow):
                     errors.append(f"{Path(source).name}: {error}")
                 dialog.update_progress(completed, len(jobs))
         if errors:
-            dialog.status.setText(f"Готово с ошибками ({len(errors)}): {errors[0]}")
+            dialog.status.setText(_("Готово с ошибками ({count}): {first}").format(count=len(errors), first=errors[0]))
             dialog.cancel_button.setEnabled(True)
-            dialog.cancel_button.setText("Закрыть")
+            dialog.cancel_button.setText(_("Закрыть"))
             return
         dialog.accept()
 
@@ -8405,12 +8407,12 @@ class Workspace(QMainWindow):
                 target = self._next_resize_name(target, planned)
             if target.exists() and not overwrite_all:
                 choice = QMessageBox(self)
-                choice.setWindowTitle("Файл уже существует")
-                choice.setText(f"В папке экспорта уже есть «{target.name}».")
-                overwrite = choice.addButton("Перезаписать", QMessageBox.ButtonRole.AcceptRole)
-                overwrite_all_button = choice.addButton("Перезаписать все", QMessageBox.ButtonRole.YesRole)
-                rename = choice.addButton("Переименовать", QMessageBox.ButtonRole.ActionRole)
-                cancel = choice.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+                choice.setWindowTitle(_("Файл уже существует"))
+                choice.setText(_("В папке экспорта уже есть «{name}».").format(name=target.name))
+                overwrite = choice.addButton(_("Перезаписать"), QMessageBox.ButtonRole.AcceptRole)
+                overwrite_all_button = choice.addButton(_("Перезаписать все"), QMessageBox.ButtonRole.YesRole)
+                rename = choice.addButton(_("Переименовать"), QMessageBox.ButtonRole.ActionRole)
+                cancel = choice.addButton(_("Отмена"), QMessageBox.ButtonRole.RejectRole)
                 choice.exec()
                 clicked = choice.clickedButton()
                 if clicked == cancel or clicked is None:
@@ -8431,7 +8433,7 @@ class Workspace(QMainWindow):
             candidate = target.with_name(f"{target.stem} ({index}){target.suffix}")
             if filesystem_name_key(candidate.name) not in planned and not candidate.exists():
                 return candidate
-        raise OSError("Не удалось подобрать свободное имя")
+        raise OSError(_("Не удалось подобрать свободное имя"))
 
     def _rename_files_safely(
         self, names: dict[str, str], progress: Callable[[int, int], None] | None = None
@@ -8442,18 +8444,18 @@ class Workspace(QMainWindow):
             return
         directory = self.current_dir
         if len({filesystem_name_key(name) for name in changes.values()}) != len(changes):
-            raise OSError("Шаблон создаёт одинаковые имена")
+            raise OSError(_("Шаблон создаёт одинаковые имена"))
         try:
             existing_keys = {filesystem_name_key(path.name) for path in directory.iterdir()}
         except OSError as exc:
-            raise OSError(f"Не удалось прочитать папку: {exc}") from exc
+            raise OSError(_("Не удалось прочитать папку: {error}").format(error=exc)) from exc
         source_keys = {filesystem_name_key(old) for old in changes}
         for old, new in changes.items():
             source, target = directory / old, directory / new
             if not source.is_file():
-                raise OSError(f"Файл «{old}» больше не существует")
+                raise OSError(_("Файл «{name}» больше не существует").format(name=old))
             if filesystem_name_key(target.name) in existing_keys and filesystem_name_key(target.name) not in source_keys:
-                raise OSError(f"Файл «{new}» уже существует")
+                raise OSError(_("Файл «{name}» уже существует").format(name=new))
 
         total_steps = self._rename_step_count(changes)
         target_keys = {filesystem_name_key(new) for new in changes.values()}
@@ -8609,14 +8611,14 @@ class Workspace(QMainWindow):
         selected = len(self._selected_paths())
         text = f"{position}/{filtered}"
         if filtered != total_files:
-            text += f" (всего {total_files})"
+            text += _(" (всего {n})").format(n=total_files)
         if hasattr(self, "full_view"):
             self.full_view.set_counter(
                 f"{position}/{filtered}",
                 self.settings.value("interface/show_full_view_counter", True, bool),
             )
         if selected > 1:
-            text += f" (выделено: {selected})"
+            text += _(" (выделено: {n})").format(n=selected)
         self._status_text = text
         self._fit_status_text()
         self.status_label.setToolTip(text)
@@ -8625,7 +8627,7 @@ class Workspace(QMainWindow):
             done, total = self._upload_progress
             self.status_progress.setRange(0, max(1, total))
             self.status_progress.setValue(done)
-            self.status_progress.setFormat(f"Отправка: {done}/{total}")
+            self.status_progress.setFormat(_("Отправка: {done}/{total}").format(done=done, total=total))
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
             self._set_taskbar_progress(done, total)
@@ -8635,8 +8637,8 @@ class Workspace(QMainWindow):
             done, total, retrying = self._receive_progress
             self.status_progress.setRange(0, max(1, total))
             self.status_progress.setValue(done)
-            suffix = f" · ошибок: {retrying}, повторяем" if retrying else ""
-            self.status_progress.setFormat(f"Приём ShotSync: {done}/{total}{suffix}")
+            suffix = _(" · ошибок: {n}, повторяем").format(n=retrying) if retrying else ""
+            self.status_progress.setFormat(_("Приём ShotSync: {done}/{total}{suffix}").format(done=done, total=total, suffix=suffix))
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
             self._set_taskbar_progress(done, total)
@@ -8646,14 +8648,14 @@ class Workspace(QMainWindow):
             done, total = self._selection_progress
             if not total:
                 self.status_progress.setRange(0, 0)
-                self.status_progress.setFormat("Отбор ShotSync…")
+                self.status_progress.setFormat(_("Отбор ShotSync…"))
                 self.status_progress.setToolTip(self.status_progress.format())
                 self.status_progress.show()
                 self._set_taskbar_progress(0, 0)
                 return
             self.status_progress.setRange(0, max(1, total))
             self.status_progress.setValue(done)
-            self.status_progress.setFormat(f"Отбор ShotSync: {done}/{total}")
+            self.status_progress.setFormat(_("Отбор ShotSync: {done}/{total}").format(done=done, total=total))
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
             self._set_taskbar_progress(done, total)
@@ -8661,7 +8663,7 @@ class Workspace(QMainWindow):
 
         if self._shotsync_marks_fetching:
             self.status_progress.setRange(0, 0)
-            self.status_progress.setFormat("Получение меток ShotSync…")
+            self.status_progress.setFormat(_("Получение меток ShotSync…"))
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
             self._set_taskbar_progress(0, 0)
@@ -8670,7 +8672,7 @@ class Workspace(QMainWindow):
         if self._shotsync_pending_marks:
             self.status_progress.setRange(0, 0)
             self.status_progress.setFormat(
-                f"Синхронизация меток: {self._shotsync_pending_marks}"
+                _("Синхронизация меток: {n}").format(n=self._shotsync_pending_marks)
             )
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
@@ -8679,7 +8681,7 @@ class Workspace(QMainWindow):
 
         if getattr(self, "_directory_scan_pending", False):
             self.status_progress.setRange(0, 0)
-            self.status_progress.setFormat("Сканирую папку…")
+            self.status_progress.setFormat(_("Сканирую папку…"))
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
             self._set_taskbar_progress(0, 0)
@@ -8694,7 +8696,7 @@ class Workspace(QMainWindow):
             self.status_progress.set_cancel_visible(True)
             if ai_total <= 0:
                 self.status_progress.setRange(0, 0)
-                self.status_progress.setFormat("Подготовка AI…")
+                self.status_progress.setFormat(_("Подготовка AI…"))
                 self.status_progress.setToolTip(self.status_progress.format())
                 self.status_progress.show()
                 self._set_taskbar_progress(0, 0)
@@ -8706,7 +8708,7 @@ class Workspace(QMainWindow):
                 elapsed = monotonic() - self._ai_progress_started_at
                 remaining = (ai_total - ai_completed) * elapsed / ai_completed
                 eta = f" ({_format_remaining_time(remaining)})"
-            self.status_progress.setFormat(f"Анализ: {ai_completed}/{ai_total}{eta}")
+            self.status_progress.setFormat(_("Анализ: {done}/{total}{eta}").format(done=ai_completed, total=ai_total, eta=eta))
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
             self._set_taskbar_progress(ai_completed, ai_total)
@@ -8716,7 +8718,7 @@ class Workspace(QMainWindow):
         if self.preview_progress_total and loaded < self.preview_progress_total:
             self.status_progress.setRange(0, self.preview_progress_total)
             self.status_progress.setValue(loaded)
-            self.status_progress.setFormat(f"Превью: {loaded}/{self.preview_progress_total}")
+            self.status_progress.setFormat(_("Превью: {done}/{total}").format(done=loaded, total=self.preview_progress_total))
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
             self._set_taskbar_progress(loaded, self.preview_progress_total)
@@ -8835,7 +8837,7 @@ class Workspace(QMainWindow):
             cameras.setdefault(key, {"model": str(camera.get("model") or "")})
         self.camera_filter.blockSignals(True)
         self.camera_filter.clear()
-        self.camera_filter.addItem("Все камеры", None)
+        self.camera_filter.addItem(_("Все камеры"), None)
         self.camera_filter.setItemIcon(0, _fomantic_icon("images", 12, "#a8b0bd"))
         for key, entry in sorted(cameras.items(), key=lambda item: (str(item[1]["model"]).casefold(), item[0])):
             self.camera_filter.addItem(str(entry["model"]), key)
@@ -8906,7 +8908,7 @@ class Workspace(QMainWindow):
                 button.setProperty("shotLabel", label)
                 button.setText(f"{label}  {count}")
             self.eyes_toggle.setChecked(self.eyes_filter.currentData() == "closed")
-            self.eyes_toggle.setText(f"Закрытые глаза  {closed_eyes_count}")
+            self.eyes_toggle.setText(_("Закрытые глаза  {n}").format(n=closed_eyes_count))
 
     def _set_shot_filter(self, value: str | None) -> None:
         index = self.shot_filter.findData(value)
@@ -9432,7 +9434,7 @@ class Workspace(QMainWindow):
         else:
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle("Комментарий")
+        dialog.setWindowTitle(_("Комментарий"))
         dialog.setModal(True)
         dialog.setMinimumWidth(520)
         layout = QVBoxLayout(dialog)
@@ -9447,7 +9449,7 @@ class Workspace(QMainWindow):
         layout.addWidget(edit)
         set_select = QComboBox()
         for group in self.code_replacement_sets:
-            set_select.addItem(str(group.get("name") or "Без названия"), int(group.get("id") or 0))
+            set_select.addItem(str(group.get("name") or _("Без названия")), int(group.get("id") or 0))
         if set_select.count() > 1:
             set_select.setCurrentIndex(max(0, set_select.findData(active_id)))
             layout.addWidget(set_select)
@@ -9555,12 +9557,12 @@ class Workspace(QMainWindow):
             self._face_similarity(embedding, item.get("embedding", [])) >= 0.42
             for item in self.face_sets
         )
-        toast_message = "Это лицо уже есть в наборе."
+        toast_message = _("Это лицо уже есть в наборе.")
         if not already_added:
             avatar = self._current_face_avatar(face, 80)
             entry = {
                 "id": sha1(json.dumps(embedding).encode()).hexdigest()[:12],
-                "name": "Без имени",
+                "name": _("Без имени"),
                 "embedding": embedding,
                 "avatar": self._pixmap_to_base64(avatar),
             }
@@ -9573,7 +9575,7 @@ class Workspace(QMainWindow):
             if self._xmp_auto_enabled():
                 self._queue_xmp_paths(path for path in self.all_paths if is_supported_image(path))
             self._push_face_set(entry)
-            toast_message = "Лицо добавлено в набор."
+            toast_message = _("Лицо добавлено в набор.")
         self._show_face_sets(toast_message)
 
     def _face_set_by_id(self, face_id: str) -> dict | None:
@@ -9583,10 +9585,10 @@ class Workspace(QMainWindow):
         """Открывает библиотеку людей и позволяет пересобрать или удалить наборы."""
         dialog = QDialog(self)
         dialog.setObjectName("faceSetsDialog")
-        dialog.setWindowTitle("Наборы лиц")
+        dialog.setWindowTitle(_("Наборы лиц"))
         dialog.resize(560, 420)
         layout = QVBoxLayout(dialog)
-        title = QLabel("Наборы лиц")
+        title = QLabel(_("Наборы лиц"))
         title.setObjectName("faceSetsTitle")
         layout.addWidget(title)
         scroll = QScrollArea()
@@ -9597,7 +9599,7 @@ class Workspace(QMainWindow):
         body_layout.setSpacing(6)
         scroll.setWidget(body)
         layout.addWidget(scroll, 1)
-        close = QPushButton("Закрыть")
+        close = QPushButton(_("Закрыть"))
         close.setFixedHeight(34)
         close.clicked.connect(dialog.accept)
         layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
@@ -9609,7 +9611,7 @@ class Workspace(QMainWindow):
                 if child.widget() is not None:
                     child.widget().deleteLater()
             if not self.face_sets:
-                body_layout.addWidget(QLabel("Добавьте лицо, нажав «В набор» на фотографии."))
+                body_layout.addWidget(QLabel(_("Добавьте лицо, нажав «В набор» на фотографии.")))
                 body_layout.addStretch(1)
                 return
             for entry in self.face_sets:
@@ -9625,12 +9627,12 @@ class Workspace(QMainWindow):
                 avatar.setPixmap(pixmap if not pixmap.isNull() else _fomantic_icon("user", 18).pixmap(22, 22))
                 row_layout.addWidget(avatar)
                 name = QLineEdit(str(entry.get("name") or ""))
-                name.setPlaceholderText("Имя")
+                name.setPlaceholderText(_("Имя"))
                 name.setFixedHeight(34)
                 name.editingFinished.connect(lambda face_id=face_id, edit=name: self._rename_face_set(face_id, edit.text()))
                 row_layout.addWidget(name, 1)
                 mark = QToolButton()
-                mark.setText("Быстрая метка")
+                mark.setText(_("Быстрая метка"))
                 mark.setIcon(_fomantic_icon("bookmark", 13))
                 mark.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
                 mark.setFixedHeight(34)
@@ -9638,13 +9640,13 @@ class Workspace(QMainWindow):
                 row_layout.addWidget(mark)
                 show = QToolButton()
                 show.setIcon(_fomantic_icon("images", 13))
-                show.setToolTip("Показать фото с этим лицом")
+                show.setToolTip(_("Показать фото с этим лицом"))
                 show.setFixedSize(34, 34)
                 show.clicked.connect(lambda _checked=False, face_id=face_id: self._show_face_set(face_id, dialog))
                 row_layout.addWidget(show)
                 delete = QToolButton()
                 delete.setIcon(_fomantic_icon("trash", 13))
-                delete.setToolTip("Удалить из набора")
+                delete.setToolTip(_("Удалить из набора"))
                 delete.setFixedSize(34, 34)
                 delete.clicked.connect(lambda _checked=False, face_id=face_id: self._delete_face_set(face_id, rebuild))
                 row_layout.addWidget(delete)
@@ -9676,7 +9678,7 @@ class Workspace(QMainWindow):
     def _rename_face_set(self, face_id: str, name: str) -> None:
         entry = self._face_set_by_id(face_id)
         if entry is not None:
-            entry["name"] = name.strip() or "Без имени"
+            entry["name"] = name.strip() or _("Без имени")
             self._save_face_sets()
             if self._xmp_auto_enabled():
                 self._queue_xmp_paths(path for path in self.all_paths if is_supported_image(path))
@@ -9717,15 +9719,15 @@ class Workspace(QMainWindow):
             action = menu.addAction("★" * rating)
             action.triggered.connect(lambda _checked=False, value=rating: self._apply_mark_to_face(face_id, "rating", value))
         menu.addSeparator()
-        for label, value in (("Красная", "red"), ("Жёлтая", "yellow"), ("Зелёная", "green"), ("Синяя", "blue"), ("Фиолетовая", "purple")):
+        for label, value in ((_("Красная"), "red"), (_("Жёлтая"), "yellow"), (_("Зелёная"), "green"), (_("Синяя"), "blue"), (_("Фиолетовая"), "purple")):
             action = menu.addAction(label)
             action.setIcon(_color_swatch_icon(value))
             action.triggered.connect(lambda _checked=False, value=value: self._apply_mark_to_face(face_id, "color_label", value))
         menu.addSeparator()
-        remove_rating = menu.addAction("Убрать рейтинг")
+        remove_rating = menu.addAction(_("Убрать рейтинг"))
         remove_rating.setIcon(_fomantic_icon("ban", 12))
         remove_rating.triggered.connect(lambda: self._apply_mark_to_face(face_id, "rating", None))
-        remove = menu.addAction("Убрать метку")
+        remove = menu.addAction(_("Убрать метку"))
         remove.setIcon(_fomantic_icon("ban", 12))
         remove.triggered.connect(lambda: self._apply_mark_to_face(face_id, "color_label", ""))
         menu.popup(button.mapToGlobal(QPoint(0, button.height())))
@@ -10030,8 +10032,8 @@ class Workspace(QMainWindow):
             if not editor.is_file() and not is_macos_bundle:
                 QMessageBox.warning(
                     self,
-                    "Внешний редактор",
-                    f"Не найдено приложение или исполняемый файл редактора:\n{editor}",
+                    _("Внешний редактор"),
+                    _("Не найдено приложение или исполняемый файл редактора:\n{path}").format(path=editor),
                 )
                 return
             command = ["open", "-a", str(editor), str(path)] if is_macos_bundle else [str(editor), str(path)]
@@ -10040,15 +10042,15 @@ class Workspace(QMainWindow):
             if command is None:
                 QMessageBox.warning(
                     self,
-                    "Adobe Photoshop не найден",
-                    "Установите Adobe Photoshop или укажите исполняемый файл другого редактора "
-                    "в Настройки → Поведение.",
+                    _("Adobe Photoshop не найден"),
+                    _("Установите Adobe Photoshop или укажите исполняемый файл другого редактора "
+                    "в Настройки → Поведение."),
                 )
                 return
         try:
             subprocess.Popen(command, **detached_process_kwargs())
         except OSError as error:
-            QMessageBox.warning(self, "Не удалось открыть редактор", str(error))
+            QMessageBox.warning(self, _("Не удалось открыть редактор"), str(error))
 
     @staticmethod
     def _photoshop_command(path: Path) -> list[str] | None:
@@ -10067,7 +10069,7 @@ class Workspace(QMainWindow):
                 (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\Photoshop.exe"),
             ):
                 with winreg.OpenKey(hive, key_path) as key:
-                    executable, _ = winreg.QueryValueEx(key, None)
+                    executable, _value_type = winreg.QueryValueEx(key, None)
                     if Path(executable).is_file():
                         return [executable, str(path)]
         except OSError:
@@ -10810,7 +10812,7 @@ class MainWindow(QMainWindow):
         add_tab.setObjectName("titleAction")
         add_tab.setIcon(_chrome_icon("plus"))
         add_tab.setIconSize(QSize(16, 16))
-        add_tab.setToolTip("Новая вкладка")
+        add_tab.setToolTip(_("Новая вкладка"))
         add_tab.clicked.connect(self._add_workspace)
         title_layout.addWidget(add_tab)
         title_layout.addStretch(1)
@@ -10819,7 +10821,7 @@ class MainWindow(QMainWindow):
         settings_button.setIcon(_fomantic_icon("cog", 18, "#c9c9c9"))
         settings_button.setIconSize(QSize(24, 24))
         settings_button.setFixedSize(34, 34)
-        settings_button.setToolTip("Настройки")
+        settings_button.setToolTip(_("Настройки"))
         settings_button.clicked.connect(self._show_settings)
         title_layout.addWidget(settings_button)
         help_button = QToolButton()
@@ -10827,13 +10829,13 @@ class MainWindow(QMainWindow):
         help_button.setIcon(_fomantic_icon("help", 18, "#c9c9c9"))
         help_button.setIconSize(QSize(24, 24))
         help_button.setFixedSize(34, 34)
-        help_button.setToolTip("Помощь")
+        help_button.setToolTip(_("Помощь"))
         help_button.clicked.connect(self._show_help_menu)
         title_layout.addWidget(help_button)
         for icon, tooltip, callback in (
-            ("minimize", "Свернуть", self.showMinimized),
-            ("maximize", "Развернуть", self._toggle_maximized),
-            ("close", "Закрыть", self.close),
+            ("minimize", _("Свернуть"), self.showMinimized),
+            ("maximize", _("Развернуть"), self._toggle_maximized),
+            ("close", _("Закрыть"), self.close),
         ):
             button = QToolButton()
             button.setObjectName("windowControl")
@@ -10875,13 +10877,13 @@ class MainWindow(QMainWindow):
                 if is_newer(version, APP_VERSION):
                     self._show_update_dialog(release, payload.get("releases", []))
                 elif interactive:
-                    QMessageBox.information(self, "Обновления", "У вас установлена актуальная версия Контрольки.")
+                    QMessageBox.information(self, _("Обновления"), _("У вас установлена актуальная версия Контрольки."))
             except Exception:
                 if interactive:
                     QMessageBox.warning(
                         self,
-                        "Обновления",
-                        "Не удалось проверить обновления. Проверьте подключение к интернету и повторите попытку позже.",
+                        _("Обновления"),
+                        _("Не удалось проверить обновления. Проверьте подключение к интернету и повторите попытку позже."),
                     )
 
         def wait_for_finish() -> None:
@@ -10903,15 +10905,15 @@ class MainWindow(QMainWindow):
                     continue
                 item_version = str(item.get("version", ""))
                 if item_version and is_newer(item_version, APP_VERSION):
-                    changes.append(f"<h4>Версия {item_version}</h4>{item.get('changelog', '')}")
+                    changes.append(_("<h4>Версия {version}</h4>{changelog}").format(version=item_version, changelog=item.get('changelog', '')))
         dialog = QMessageBox(self)
-        dialog.setWindowTitle("Доступно обновление")
+        dialog.setWindowTitle(_("Доступно обновление"))
         dialog.setIcon(QMessageBox.Icon.Information)
-        dialog.setText(f"Доступна Контролька {version}")
-        dialog.setInformativeText("".join(changes) or "Откройте страницу загрузки, чтобы узнать об изменениях.")
+        dialog.setText(_("Доступна Контролька {version}").format(version=version))
+        dialog.setInformativeText("".join(changes) or _("Откройте страницу загрузки, чтобы узнать об изменениях."))
         dialog.setTextFormat(Qt.TextFormat.RichText)
-        download = dialog.addButton("Открыть страницу загрузки", QMessageBox.ButtonRole.AcceptRole)
-        dialog.addButton("Позже", QMessageBox.ButtonRole.RejectRole)
+        download = dialog.addButton(_("Открыть страницу загрузки"), QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton(_("Позже"), QMessageBox.ButtonRole.RejectRole)
         dialog.exec()
         if dialog.clickedButton() is download:
             webbrowser.open(str(release.get("landing_url") or "https://shotsync.ru/ctrlka/"))
@@ -11156,8 +11158,8 @@ class MainWindow(QMainWindow):
         if task.errors and task.status != "cancelled":
             QMessageBox.warning(
                 self,
-                "Файловая операция",
-                "Не удалось обработать некоторые объекты:\n" + "\n".join(task.errors),
+                _("Файловая операция"),
+                _("Не удалось обработать некоторые объекты:\n") + "\n".join(task.errors),
             )
 
     def _show_card_import(self, sources: list[tuple[Path, str]], parent: QWidget) -> None:
@@ -11171,14 +11173,14 @@ class MainWindow(QMainWindow):
         """Собирает карту в фоне, чтобы большая вложенная структура не заморозила Qt."""
         sources = [Path(source) for source in options.get("sources", [])]
         if not sources or not all(source.is_dir() for source in sources):
-            QMessageBox.warning(parent, "Импорт с карты памяти", "Одна из выбранных карт больше недоступна.")
+            QMessageBox.warning(parent, _("Импорт с карты памяти"), _("Одна из выбранных карт больше недоступна."))
             return
         reserved_targets = self.transfer_manager.reserved_targets()
         future = self._card_import_executor.submit(
             self._build_card_import_plan, sources, options, reserved_targets
         )
-        progress = QProgressDialog("Подготавливаю список файлов с карты…", None, 0, 0, parent)
-        progress.setWindowTitle("Импорт с карты памяти")
+        progress = QProgressDialog(_("Подготавливаю список файлов с карты…"), None, 0, 0, parent)
+        progress.setWindowTitle(_("Импорт с карты памяти"))
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
@@ -11192,7 +11194,7 @@ class MainWindow(QMainWindow):
             try:
                 scan, entries, destination, backup_destination = future.result()
             except Exception as exc:  # noqa: BLE001 — сообщение пользователю важнее детали потока
-                QMessageBox.warning(parent, "Импорт с карты памяти", f"Не удалось прочитать карту:\n{exc}")
+                QMessageBox.warning(parent, _("Импорт с карты памяти"), _("Не удалось прочитать карту:\n{error}").format(error=exc))
                 return
             self._enqueue_card_import(scan, entries, destination, backup_destination, options, parent)
 
@@ -11213,9 +11215,9 @@ class MainWindow(QMainWindow):
         )
         source_roots = scan.source_roots or (scan.root,)
         if any(destination.resolve().is_relative_to(root.resolve()) for root in source_roots):
-            raise ValueError("Основная папка не может находиться внутри импортируемой карты.")
+            raise ValueError(_("Основная папка не может находиться внутри импортируемой карты."))
         if options["backup_enabled"] and any(backup_destination.resolve().is_relative_to(root.resolve()) for root in source_roots):
-            raise ValueError("Папка резервной копии не может находиться внутри импортируемой карты.")
+            raise ValueError(_("Папка резервной копии не может находиться внутри импортируемой карты."))
         entries = build_import_entries(
             scan, destination, flatten=bool(options["flatten"]), reserved=reserved_targets.__contains__,
         )
@@ -11232,10 +11234,10 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Ставит каждую карту отдельной задачей, чтобы несколько носителей читались параллельно."""
         if not scan.files:
-            QMessageBox.information(parent, "Импорт с карты памяти", "На выбранных картах нет файлов для импорта.")
+            QMessageBox.information(parent, _("Импорт с карты памяти"), _("На выбранных картах нет файлов для импорта."))
             return
         if not entries:
-            QMessageBox.information(parent, "Импорт с карты памяти", "Все файлы уже есть в папке назначения.")
+            QMessageBox.information(parent, _("Импорт с карты памяти"), _("Все файлы уже есть в папке назначения."))
             return
         remaining = list(entries)
         batches: list[list[TransferEntry]] = []
@@ -11264,7 +11266,7 @@ class MainWindow(QMainWindow):
             if identifier is not None:
                 identifiers.append((identifier, card_entries))
         if not identifiers:
-            QMessageBox.warning(parent, "Импорт с карты памяти", "Не удалось поставить импорт в очередь.")
+            QMessageBox.warning(parent, _("Импорт с карты памяти"), _("Не удалось поставить импорт в очередь."))
             return
         if options["backup_enabled"]:
             for identifier, card_entries in identifiers:
@@ -11284,8 +11286,8 @@ class MainWindow(QMainWindow):
         if task.status != "finished":
             QMessageBox.warning(
                 self,
-                "Резервная копия",
-                "Основной импорт завершился с ошибкой или был отменён; резервная копия не запускалась.",
+                _("Резервная копия"),
+                _("Основной импорт завершился с ошибкой или был отменён; резервная копия не запускалась."),
             )
             return
         try:
@@ -11293,7 +11295,7 @@ class MainWindow(QMainWindow):
                 entries, import_root, backup_root, flatten=flatten, reserved=self.transfer_manager.target_reserved,
             )
         except OSError as exc:
-            QMessageBox.warning(self, "Резервная копия", f"Не удалось подготовить резервную копию:\n{exc}")
+            QMessageBox.warning(self, _("Резервная копия"), _("Не удалось подготовить резервную копию:\n{error}").format(error=exc))
             return
         self.transfer_manager.enqueue(backup_entries, backup_root, move=False)
 
@@ -11324,16 +11326,16 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(14, 12, 14, 14)
         layout.setSpacing(8)
 
-        title = QLabel("Помощь")
+        title = QLabel(_("Помощь"))
         title.setObjectName("helpPopupTitle")
         layout.addWidget(title)
 
-        online = QPushButton("Онлайн-справка")
+        online = QPushButton(_("Онлайн-справка"))
         online.setObjectName("helpPopupPrimaryButton")
         online.clicked.connect(lambda: (menu.close(), webbrowser.open("https://shotsync.ru/help/s/kontrolka/")))
         layout.addWidget(online)
 
-        hotkeys = QPushButton("Горячие клавиши")
+        hotkeys = QPushButton(_("Горячие клавиши"))
         hotkeys.setObjectName("helpPopupButton")
         hotkeys.clicked.connect(lambda: (menu.close(), HelpDialog(self.settings, self).exec()))
         layout.addWidget(hotkeys)
@@ -11375,7 +11377,7 @@ class MainWindow(QMainWindow):
         )
         self.tabs.setTabToolTip(
             index,
-            "Папка связана с ShotSync" if linked else str(workspace.current_dir),
+            _("Папка связана с ShotSync") if linked else str(workspace.current_dir),
         )
 
     def _close_workspace(self, index: int) -> None:
@@ -11398,8 +11400,8 @@ class MainWindow(QMainWindow):
         if self.transfer_manager.active or self.transfer_manager.pending:
             answer = QMessageBox.question(
                 self,
-                "Файловые операции не завершены",
-                "Копирование или перемещение ещё выполняется. Выйти и отменить все операции?",
+                _("Файловые операции не завершены"),
+                _("Копирование или перемещение ещё выполняется. Выйти и отменить все операции?"),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -11840,9 +11842,10 @@ def main() -> None:
     if startup_trace is not None:
         app.installEventFilter(startup_trace)
         startup_trace.snapshot("application-created")
-    qt_ru = QTranslator(app)
-    if qt_ru.load("qtbase_ru", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
-        app.installTranslator(qt_ru)
+    qt_translator = QTranslator(app)
+    qt_translations = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    if qt_translator.load(f"qtbase_{i18n.qt_translation_name()}", qt_translations):
+        app.installTranslator(qt_translator)
     apply_theme(app)
     window = MainWindow(target)
     single_instance.target_received.connect(window.open_external_target)

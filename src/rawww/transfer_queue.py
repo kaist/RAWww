@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from .theme import _fomantic_icon
 from .cache import relocate_folder_caches
+from .i18n import gettext as _
 
 
 # Большой блок снижает число переходов Python ↔ ядро на RAW и видео, но всё ещё
@@ -40,14 +41,14 @@ def format_transfer_size(value: float) -> str:
     """Форматирует объём или скорость без лишней ложной точности."""
     value = max(0.0, float(value))
     if value >= 1024**4:
-        return f"{value / 1024**4:.1f} ТБ"
+        return _("{n} ТБ").format(n=f"{value / 1024**4:.1f}")
     if value >= 1024**3:
-        return f"{value / 1024**3:.1f} ГБ"
+        return _("{n} ГБ").format(n=f"{value / 1024**3:.1f}")
     if value >= 1024**2:
-        return f"{value / 1024**2:.1f} МБ"
+        return _("{n} МБ").format(n=f"{value / 1024**2:.1f}")
     if value >= 1024:
-        return f"{value / 1024:.1f} КБ"
-    return f"{value:.0f} Б"
+        return _("{n} КБ").format(n=f"{value / 1024:.1f}")
+    return _("{n} Б").format(n=f"{value:.0f}")
 
 
 def format_transfer_eta(seconds: float | None) -> str:
@@ -55,15 +56,15 @@ def format_transfer_eta(seconds: float | None) -> str:
     if seconds is None:
         return "—"
     if 0 < seconds < 1:
-        return "< 1 с"
+        return _("< 1 с")
     seconds = max(0, round(seconds))
     if seconds < 60:
-        return f"{seconds} с"
+        return _("{s} с").format(s=seconds)
     minutes, seconds = divmod(seconds, 60)
     if minutes < 60:
-        return f"{minutes} мин {seconds:02d} с"
+        return _("{m} мин {s} с").format(m=minutes, s=f"{seconds:02d}")
     hours, minutes = divmod(minutes, 60)
-    return f"{hours} ч {minutes:02d} мин"
+    return _("{h} ч {m} мин").format(h=hours, m=f"{minutes:02d}")
 
 
 @dataclass(frozen=True)
@@ -106,7 +107,7 @@ class TransferTask:
 
     @property
     def title(self) -> str:
-        action = "Перемещение" if self.move else "Копирование"
+        action = _("Перемещение") if self.move else _("Копирование")
         return f"{action} → {self.destination}"
 
 
@@ -252,7 +253,7 @@ class TransferManager(QObject):
         try:
             task.total_files, task.total_bytes = self._measure(task)
             task.transfer_started_at = monotonic()
-            self._report(task, "Подготовка завершена")
+            self._report(task, _("Подготовка завершена"))
             for entry in task.entries:
                 self._checkpoint(task)
                 try:
@@ -301,7 +302,7 @@ class TransferManager(QObject):
     def _transfer_entry(self, task: TransferTask, entry: TransferEntry) -> None:
         source, target = entry.source, entry.target
         if not source.exists():
-            raise OSError("источник больше не существует")
+            raise OSError(_("источник больше не существует"))
         source_is_dir = source.is_dir()
         if task.move and self._same_device(source, target.parent):
             self._checkpoint(task)
@@ -406,7 +407,7 @@ class TransferManager(QObject):
             self._retry_locked_path(task, lambda: os.replace(prepared, target))
             return
         if not replace:
-            raise OSError("цель появилась после постановки в очередь")
+            raise OSError(_("цель появилась после постановки в очередь"))
         backup = target.with_name(f".{target.name}.rawww-replaced-{task.identifier[:8]}")
         self._remove_path(backup)
         self._retry_locked_path(task, lambda: os.replace(target, backup))
@@ -529,21 +530,21 @@ class TransferQueuePanel(QFrame):
         layout.setSpacing(5)
 
         header = QHBoxLayout()
-        title = QLabel("ФАЙЛОВЫЕ ОПЕРАЦИИ")
+        title = QLabel(_("ФАЙЛОВЫЕ ОПЕРАЦИИ"))
         title.setObjectName("transferQueueTitle")
         header.addWidget(title)
         header.addStretch(1)
         self.pause_button = QToolButton()
         self.pause_button.setObjectName("transferQueueAction")
         self.pause_button.setIconSize(QSize(12, 12))
-        self.pause_button.setToolTip("Пауза")
+        self.pause_button.setToolTip(_("Пауза"))
         self.pause_button.clicked.connect(self._toggle_pause)
         header.addWidget(self.pause_button)
         self.cancel_button = QToolButton()
         self.cancel_button.setObjectName("transferQueueCancel")
         self.cancel_button.setIcon(_fomantic_icon("close", 12, "#e8e8e8"))
         self.cancel_button.setIconSize(QSize(12, 12))
-        self.cancel_button.setToolTip("Отменить активную операцию")
+        self.cancel_button.setToolTip(_("Отменить активную операцию"))
         self.cancel_button.clicked.connect(manager.cancel_active)
         header.addWidget(self.cancel_button)
         layout.addLayout(header)
@@ -573,7 +574,7 @@ class TransferQueuePanel(QFrame):
         pending = list(self.manager.pending)
         self.setVisible(bool(active or pending))
         if not active:
-            self.active_title.setText("Ожидание запуска…")
+            self.active_title.setText(_("Ожидание запуска…"))
             self.progress.setRange(0, 0)
             self.detail.clear()
         else:
@@ -589,31 +590,31 @@ class TransferQueuePanel(QFrame):
                 self.progress.setRange(0, max(1, task.total_files))
                 self.progress.setValue(task.completed_files)
             self.progress.setFormat(
-                f"{task.completed_files} из {task.total_files} файлов"
+                _("{done} из {total} файлов").format(done=task.completed_files, total=task.total_files)
                 if task.total_files
-                else "Подсчёт файлов…"
+                else _("Подсчёт файлов…")
             )
             if task.status == "preparing":
-                self.detail.setText("Подсчитываю файлы и объём…")
+                self.detail.setText(_("Подсчитываю файлы и объём…"))
             else:
                 speed = task.speed_bytes_per_second
                 remaining = max(0, task.total_bytes - task.transferred_bytes)
                 eta = remaining / speed if speed > 0 and task.transferred_bytes and remaining else None
-                volume = (
-                    f"{format_transfer_size(task.transferred_bytes)} из "
-                    f"{format_transfer_size(task.total_bytes)}"
+                volume = _("{done} из {total}").format(
+                    done=format_transfer_size(task.transferred_bytes),
+                    total=format_transfer_size(task.total_bytes),
                 )
                 speed_text = (
-                    f"{format_transfer_size(speed)}/с"
+                    _("{speed}/с").format(speed=format_transfer_size(speed))
                     if task.transferred_bytes
-                    else "измеряю скорость"
+                    else _("измеряю скорость")
                 )
                 eta_text = (
-                    "готово"
+                    _("готово")
                     if remaining == 0
-                    else (format_transfer_eta(eta) if eta is not None else "считаю…")
+                    else (format_transfer_eta(eta) if eta is not None else _("считаю…"))
                 )
-                pause_text = "Пауза · " if task.status == "paused" else ""
+                pause_text = _("Пауза · ") if task.status == "paused" else ""
                 self.detail.setText(
                     f"{pause_text}{volume} · {speed_text} · ~ {eta_text}"
                 )
@@ -621,7 +622,7 @@ class TransferQueuePanel(QFrame):
         self.pause_button.setIcon(
             _fomantic_icon("play" if paused else "pause", 12, "#e8e8e8")
         )
-        self.pause_button.setToolTip("Продолжить" if paused else "Пауза")
+        self.pause_button.setToolTip(_("Продолжить") if paused else _("Пауза"))
         self.pause_button.setEnabled(bool(active))
         self.cancel_button.setEnabled(bool(active))
         self._rebuild_queue(active[1:], pending)
@@ -648,9 +649,9 @@ class TransferQueuePanel(QFrame):
         self.queue_container.show()
         parts = []
         if other_active:
-            parts.append(f"ещё выполняется: {len(other_active)}")
+            parts.append(_("ещё выполняется: {n}").format(n=len(other_active)))
         if pending:
-            parts.append(f"в очереди: {len(pending)}")
+            parts.append(_("в очереди: {n}").format(n=len(pending)))
         caption = QLabel(" · ".join(parts).capitalize())
         caption.setObjectName("transferQueueCaption")
         self.queue_layout.addWidget(caption)
@@ -668,7 +669,7 @@ class TransferQueuePanel(QFrame):
             cancel.setObjectName("transferQueueItemCancel")
             cancel.setIcon(_fomantic_icon("close", 11, "#e8e8e8"))
             cancel.setIconSize(QSize(11, 11))
-            cancel.setToolTip("Убрать из очереди")
+            cancel.setToolTip(_("Убрать из очереди"))
             cancel.clicked.connect(
                 lambda _checked=False, identifier=task.identifier: self.manager.cancel(identifier)
             )

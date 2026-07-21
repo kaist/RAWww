@@ -121,9 +121,12 @@ def _prune_qt_translations(directory: Path) -> None:
     translations = CONTENTS / "PySide6" / "translations"
     if not translations.is_dir():
         return
+    from rawww.i18n import QT_TRANSLATION_NAMES
+
+    kept = {f"qtbase_{name}.qm" for name in QT_TRANSLATION_NAMES.values()}
     removed = []
     for path in translations.glob("*.qm"):
-        if path.name != "qtbase_ru.qm":
+        if path.name not in kept:
             removed.append(path)
             path.unlink()
     if removed:
@@ -232,6 +235,7 @@ def main() -> None:
             "--add-data", f"{ROOT / 'src' / 'rawww' / 'models'}{os.pathsep}data/models",
             "--add-data", f"{ROOT / 'src' / 'rawww' / 'tools'}{os.pathsep}data/tools",
             "--add-data", f"{ROOT / 'src' / 'rawww' / 'assets'}{os.pathsep}data/assets",
+            "--add-data", f"{ROOT / 'src' / 'rawww' / 'locale'}{os.pathsep}data/locale",
             "--collect-binaries", "onnxruntime",
             "--hidden-import", "rawpy",
             "--hidden-import", "rawww._build_version",

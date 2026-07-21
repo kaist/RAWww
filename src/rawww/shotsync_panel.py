@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .i18n import gettext as _
+
 IconProvider = Callable[..., QIcon]
 SHOTSYNC_BASE_URL = "https://shotsync.ru"
 
@@ -117,7 +119,7 @@ class ShotSyncPanel(QWidget):
         layout = QVBoxLayout(page)
         layout.setContentsMargins(16, 24, 16, 16)
         layout.addStretch(1)
-        label = QLabel("Проверяем вход в ShotSync…")
+        label = QLabel(_("Проверяем вход в ShotSync…"))
         label.setObjectName("shotsyncHint")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setWordWrap(True)
@@ -132,11 +134,11 @@ class ShotSyncPanel(QWidget):
         layout.setContentsMargins(16, 22, 16, 16)
         layout.setSpacing(10)
 
-        title = QLabel("Вход в ShotSync")
+        title = QLabel(_("Вход в ShotSync"))
         title.setObjectName("shotsyncTitle")
         layout.addWidget(title)
 
-        subtitle = QLabel("Войдите, чтобы открыть свои съёмки с shotsync.ru")
+        subtitle = QLabel(_("Войдите, чтобы открыть свои съёмки с shotsync.ru"))
         subtitle.setObjectName("shotsyncHint")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
@@ -147,7 +149,7 @@ class ShotSyncPanel(QWidget):
         self.login_error.hide()
         layout.addWidget(self.login_error)
 
-        self.submit_button = QPushButton("Войти в ShotSync")
+        self.submit_button = QPushButton(_("Войти в ShotSync"))
         self.submit_button.setObjectName("shotsyncPrimaryButton")
         self.submit_button.clicked.connect(self.loginRequested)
         layout.addWidget(self.submit_button)
@@ -191,14 +193,14 @@ class ShotSyncPanel(QWidget):
             self.logout_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         else:
             self.logout_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        self.logout_button.setToolTip("Выйти из ShotSync")
+        self.logout_button.setToolTip(_("Выйти из ShotSync"))
         self.logout_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.logout_button.clicked.connect(self._confirm_logout)
         header_layout.addWidget(self.logout_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
         layout.addWidget(header)
 
-        self.send_folder_button = QPushButton("Отправить на ShotSync")
+        self.send_folder_button = QPushButton(_("Отправить на ShotSync"))
         self.send_folder_button.setObjectName("shotsyncSendButton")
         self.send_folder_button.setIcon(self._icon("plus", 17, "#e0e0e0"))
         self.send_folder_button.setIconSize(QSize(17, 17))
@@ -209,7 +211,7 @@ class ShotSyncPanel(QWidget):
         section_row = QHBoxLayout()
         section_row.setContentsMargins(2, 2, 2, 0)
         section_row.setSpacing(5)
-        section = QLabel("СЪЁМКИ НА СЕРВЕРЕ")
+        section = QLabel(_("СЪЁМКИ НА СЕРВЕРЕ"))
         section.setObjectName("shotsyncSection")
         section_row.addWidget(section)
         self.refresh_shootings_button = QToolButton()
@@ -218,7 +220,7 @@ class ShotSyncPanel(QWidget):
         self._refresh_base_icon = self.refresh_shootings_button.icon()
         self.refresh_shootings_button.setIconSize(QSize(11, 11))
         self.refresh_shootings_button.setFixedSize(18, 18)
-        self.refresh_shootings_button.setToolTip("Обновить список съёмок")
+        self.refresh_shootings_button.setToolTip(_("Обновить список съёмок"))
         self.refresh_shootings_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.refresh_shootings_button.clicked.connect(self.refreshRequested)
         section_row.addWidget(self.refresh_shootings_button)
@@ -246,14 +248,14 @@ class ShotSyncPanel(QWidget):
 
     def _confirm_logout(self) -> None:
         msg = QMessageBox(self)
-        msg.setWindowTitle("Выход из ShotSync")
-        msg.setText("Вы уверены, что хотите выйти?")
+        msg.setWindowTitle(_("Выход из ShotSync"))
+        msg.setText(_("Вы уверены, что хотите выйти?"))
         msg.setStandardButtons(
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
         )
         msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        msg.button(QMessageBox.StandardButton.Yes).setText("Выйти")
-        msg.button(QMessageBox.StandardButton.Cancel).setText("Отмена")
+        msg.button(QMessageBox.StandardButton.Yes).setText(_("Выйти"))
+        msg.button(QMessageBox.StandardButton.Cancel).setText(_("Отмена"))
         if msg.exec() == QMessageBox.StandardButton.Yes:
             self.logoutRequested.emit()
 
@@ -280,10 +282,10 @@ class ShotSyncPanel(QWidget):
 
     def set_submitting(self, submitting: bool) -> None:
         self.submit_button.setEnabled(not submitting)
-        self.submit_button.setText("Входим…" if submitting else "Войти в ShotSync")
+        self.submit_button.setText(_("Входим…") if submitting else _("Войти в ShotSync"))
 
     def show_logged_in(self, user: dict) -> None:
-        name = user.get("display_name") or user.get("name") or user.get("login") or "Профиль"
+        name = user.get("display_name") or user.get("name") or user.get("login") or _("Профиль")
         self.profile_name.setText(name)
         self._set_placeholder_avatar()
         self.stack.setCurrentIndex(2)
@@ -324,7 +326,7 @@ class ShotSyncPanel(QWidget):
 
     def set_shootings_error(self, message: str) -> None:
         self.set_refreshing(False)
-        self.shooting_status.setText(message or "Не удалось загрузить съёмки.")
+        self.shooting_status.setText(message or _("Не удалось загрузить съёмки."))
         self.shooting_status.show()
 
     def set_shootings(self, shootings: list) -> None:
@@ -360,12 +362,12 @@ class ShotSyncPanel(QWidget):
         """Полностью перестраивает список карточек по текущим наборам состояний."""
         self.shooting_list.clear()
         if not self._shootings:
-            self.shooting_status.setText("Пока нет ни одной съёмки.")
+            self.shooting_status.setText(_("Пока нет ни одной съёмки."))
             self.shooting_status.show()
             return
         self.shooting_status.hide()
         for shooting in self._shootings:
-            title = shooting.get("title") or "Без названия"
+            title = shooting.get("title") or _("Без названия")
             photo_count = shooting.get("photo_count") or 0
             status = _status_label(shooting.get("status"))
             shooting_id = int(shooting.get("id") or 0)
@@ -374,19 +376,19 @@ class ShotSyncPanel(QWidget):
             offline = shooting_id in self._offline_ids
             mode = self._shooting_modes.get(shooting_id, "")
             is_current = shooting_id == self._current_shooting_id
-            parts = [status, f"{photo_count} фото"]
+            parts = [status, _("{n} фото").format(n=photo_count)]
             if offline:
-                parts.append("офлайн")
+                parts.append(_("офлайн"))
             if receiving:
-                parts.append("● приём: слежение включено")
+                parts.append(_("● приём: слежение включено"))
             elif mode == "uploaded":
-                parts.append("отправлена на отбор")
+                parts.append(_("отправлена на отбор"))
             elif mode == "selection_copy":
-                parts.append("взята на отбор")
+                parts.append(_("взята на отбор"))
             details = " · ".join(part for part in parts if part)
             item = QListWidgetItem(f"{title}\n{details}")
             item.setData(Qt.ItemDataRole.UserRole, shooting)
-            item.setToolTip("Открыть папку" if (receiving or local) else title)
+            item.setToolTip(_("Открыть папку") if (receiving or local) else title)
             item.setSizeHint(QSize(0, self._card_height(shooting, receiving, mode)))
             self.shooting_list.addItem(item)
             self.shooting_list.setItemWidget(item, self._shooting_card(shooting, receiving, local, offline, mode, is_current))
@@ -394,7 +396,7 @@ class ShotSyncPanel(QWidget):
     @staticmethod
     def _card_height(shooting: dict, receiving: bool, mode: str) -> int:
         """Оценивает высоту карточки по заголовку, описанию и числу действий."""
-        title = str(shooting.get("title") or "Без названия")
+        title = str(shooting.get("title") or _("Без названия"))
         title_lines = max(1, (len(title) + 27) // 28)
         description_length = {
             "uploaded": 78,
@@ -415,7 +417,7 @@ class ShotSyncPanel(QWidget):
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(6)
-        title = QLabel(str(shooting.get("title") or "Без названия"))
+        title = QLabel(str(shooting.get("title") or _("Без названия")))
         title.setObjectName("shotsyncShootingTitle")
         title.setWordWrap(True)
         title_row.addWidget(title, 1)
@@ -430,7 +432,7 @@ class ShotSyncPanel(QWidget):
             viewer_button.setIcon(viewer_icon)
             viewer_button.setIconSize(QSize(15, 15))
             viewer_button.setFixedSize(24, 24)
-            viewer_button.setToolTip("Открыть во вьювере ShotSync в браузере")
+            viewer_button.setToolTip(_("Открыть во вьювере ShotSync в браузере"))
             viewer_button.setCursor(Qt.CursorShape.PointingHandCursor)
             if viewer_icon.isNull():
                 viewer_button.setText("🔗")
@@ -440,13 +442,13 @@ class ShotSyncPanel(QWidget):
             title_row.addWidget(viewer_button, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(title_row)
         photo_count = shooting.get("photo_count") or 0
-        state = "Слежение: новые фото будут загружаться в выбранную папку." if receiving else {
-            "uploaded": "Ваша папка отправлена на отбор. Метки можно получить с сервера.",
-            "selection_copy": "Локальная копия съёмки, взятая с сервера для отбора.",
-        }.get(mode, "Съёмка хранится на сервере.")
+        state = _("Слежение: новые фото будут загружаться в выбранную папку.") if receiving else {
+            "uploaded": _("Ваша папка отправлена на отбор. Метки можно получить с сервера."),
+            "selection_copy": _("Локальная копия съёмки, взятая с сервера для отбора."),
+        }.get(mode, _("Съёмка хранится на сервере."))
         if offline:
-            state = "Офлайн · работаем с локальной копией; изменения отправятся при подключении."
-        details = QLabel(f"{photo_count} фото · {state}")
+            state = _("Офлайн · работаем с локальной копией; изменения отправятся при подключении.")
+        details = QLabel(_("{n} фото · {state}").format(n=photo_count, state=state))
         details.setObjectName("shotsyncHint")
         details.setWordWrap(True)
         layout.addWidget(details)
@@ -459,27 +461,27 @@ class ShotSyncPanel(QWidget):
             return button
 
         if mode == "uploaded" and not receiving:
-            marks_button = action_button("Получить метки", "sync")
+            marks_button = action_button(_("Получить метки"), "sync")
             marks_button.clicked.connect(lambda: self.getMarksForRequested.emit(shooting))
             actions.addWidget(marks_button)
         if mode == "uploaded" and not receiving:
-            delete_button = action_button("Удалить с сервера", "trash")
+            delete_button = action_button(_("Удалить с сервера"), "trash")
             delete_button.clicked.connect(lambda: self.deleteServerRequested.emit(shooting))
             actions.addWidget(delete_button)
         if mode == "selection_copy" and not receiving:
-            remove_button = action_button("Удалить локально", "trash")
+            remove_button = action_button(_("Удалить локально"), "trash")
             remove_button.clicked.connect(lambda: self.removeLocalRequested.emit(shooting))
             actions.addWidget(remove_button)
         if not mode and not receiving:
-            select_button = action_button("Взять на отбор", "download")
+            select_button = action_button(_("Взять на отбор"), "download")
             select_button.clicked.connect(lambda: self.selectRequested.emit(shooting))
             actions.addWidget(select_button)
         if receiving:
-            watch_button = action_button("Остановить отслеживание", "stop")
+            watch_button = action_button(_("Остановить отслеживание"), "stop")
             watch_button.clicked.connect(lambda: self.receiveRequested.emit(shooting))
             actions.addWidget(watch_button)
         elif not mode:
-            watch_button = action_button("Получать оригиналы", "eye")
+            watch_button = action_button(_("Получать оригиналы"), "eye")
             watch_button.clicked.connect(lambda: self.receiveRequested.emit(shooting))
             actions.addWidget(watch_button)
         layout.addLayout(actions)
@@ -488,29 +490,29 @@ class ShotSyncPanel(QWidget):
 def _humanize_login_error(raw: str) -> str:
     """Переводит ответ сервера или сетевую ошибку в понятное русское сообщение."""
     if not raw:
-        return "Не удалось войти. Попробуйте ещё раз."
+        return _("Не удалось войти. Попробуйте ещё раз.")
     low = raw.lower()
     if any(k in low for k in ("invalid", "incorrect", "wrong", "неверн", "not found", "not exist",
                                "no active", "does not exist")):
-        return "Неверный логин или пароль."
+        return _("Неверный логин или пароль.")
     if any(k in low for k in ("password", "пароль")):
-        return "Неверный логин или пароль."
+        return _("Неверный логин или пароль.")
     if any(k in low for k in ("login", "логин", "email", "user")):
-        return "Пользователь с таким логином не найден."
+        return _("Пользователь с таким логином не найден.")
     if any(k in low for k in ("connection", "timeout", "host", "network", "refused",
                                "unreachable", "соединен", "подключен", "сеть", "недоступ")):
-        return "Ошибка сети. Проверьте подключение к интернету."
+        return _("Ошибка сети. Проверьте подключение к интернету.")
     if any(k in low for k in ("ssl", "tls", "certificate")):
-        return "Ошибка безопасного соединения (SSL)."
+        return _("Ошибка безопасного соединения (SSL).")
     if any(k in low for k in ("server", "500", "503", "unavailable")):
-        return "Сервер временно недоступен. Попробуйте позже."
+        return _("Сервер временно недоступен. Попробуйте позже.")
     return raw.rstrip(".") + "."
 
 
 def _status_label(status: str | None) -> str:
     return {
-        "active": "Активна",
-        "scheduled": "Запланирована",
-        "finished": "Завершена",
-        "archived": "В архиве",
+        "active": _("Активна"),
+        "scheduled": _("Запланирована"),
+        "finished": _("Завершена"),
+        "archived": _("В архиве"),
     }.get(status or "", "")
