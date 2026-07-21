@@ -35,7 +35,7 @@ from typing import Callable
 from send2trash import send2trash
 
 from PySide6.QtCore import QBuffer, QDir, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
-from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
+from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPixmapCache, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -964,6 +964,59 @@ class MarkIndicatorButton(QToolButton):
             )
 
 
+#: Один провайдер иконок на все карточки: конструктор QFileIconProvider дорогой,
+#: а раньше он создавался на каждую отрисовку каждой папки. Создаётся лениво,
+#: уже после QApplication.
+_FOLDER_ICON_PROVIDER: QFileIconProvider | None = None
+
+
+def _folder_icon_provider() -> QFileIconProvider:
+    global _FOLDER_ICON_PROVIDER
+    if _FOLDER_ICON_PROVIDER is None:
+        _FOLDER_ICON_PROVIDER = QFileIconProvider()
+    return _FOLDER_ICON_PROVIDER
+
+
+def _scaled_card_pixmap(preview: QImage, target: QSize) -> QPixmap:
+    """Возвращает превью, отмасштабированное под карточку, из общего кэша.
+
+    Масштабирование делается один раз и кладётся в ``QPixmapCache`` с жёстким
+    лимитом, поэтому при прокрутке ``paint`` только копирует готовый пиксмап, а
+    не пересчитывает картинку каждый кадр. На одну превью держим ровно один
+    масштаб: при другом размере запись перестраивается на месте, а не плодит
+    вторую копию, — так кэш не забивается разными масштабами одного кадра.
+    """
+    key = f"gridcard:{preview.cacheKey()}"
+    cached = QPixmapCache.find(key)
+    if cached is not None and not cached.isNull() and cached.size() == target:
+        return cached
+    pixmap = QPixmap.fromImage(preview).scaled(
+        target,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    QPixmapCache.insert(key, pixmap)
+    return pixmap
+
+
+def _folder_card_pixmap(path: str, target: QSize) -> QPixmap:
+    """Возвращает иконку папки нужного размера из общего кэша.
+
+    Системная иконка добывается один раз на пару путь+размер: без кэша
+    ``QFileIconProvider`` дергался на каждую перерисовку каждой карточки папки.
+    """
+    key = f"foldericon:{path}:{target.width()}x{target.height()}"
+    cached = QPixmapCache.find(key)
+    if cached is not None and not cached.isNull():
+        return cached
+    icon = _folder_icon_provider().icon(QFileInfo(path))
+    if icon.isNull():
+        return QPixmap()
+    pixmap = icon.pixmap(target)
+    QPixmapCache.insert(key, pixmap)
+    return pixmap
+
+
 class PhotoCardDelegate(QStyledItemDelegate):
     """Рисует карточки файлов в основной сетке и навигационных лентах.
 
@@ -1028,11 +1081,10 @@ class PhotoCardDelegate(QStyledItemDelegate):
                 image_rect.width(),
                 max(24, text_rect.top() - image_rect.top() - 2),
             )
-            icon_provider = QFileIconProvider()
-            folder_icon = icon_provider.icon(QFileInfo(str(path_obj)))
-            if not folder_icon.isNull():
+            folder_pixmap = _folder_card_pixmap(str(path_obj), folder_rect.size())
+            if not folder_pixmap.isNull():
                 painter.fillRect(folder_rect, Qt.GlobalColor.transparent)
-                scaled = folder_icon.pixmap(folder_rect.size()).size().scaled(
+                scaled = folder_pixmap.size().scaled(
                     folder_rect.size(),
                     Qt.AspectRatioMode.KeepAspectRatio
                 )
@@ -1042,13 +1094,12 @@ class PhotoCardDelegate(QStyledItemDelegate):
                     scaled.width(),
                     scaled.height(),
                 )
-                painter.drawPixmap(target, folder_icon.pixmap(scaled))
+                painter.drawPixmap(target, folder_pixmap)
         else:
             painter.fillRect(image_rect, QColor("#8f8f8f"))
 
             preview = index.data(PREVIEW_ROLE)
             if isinstance(preview, QImage) and not preview.isNull():
-                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
                 scaled = preview.size().scaled(image_rect.size(), Qt.AspectRatioMode.KeepAspectRatio)
                 target = QRect(
                     image_rect.left() + (image_rect.width() - scaled.width()) // 2,
@@ -1056,7 +1107,7 @@ class PhotoCardDelegate(QStyledItemDelegate):
                     scaled.width(),
                     scaled.height(),
                 )
-                painter.drawImage(target, preview)
+                painter.drawPixmap(target, _scaled_card_pixmap(preview, scaled))
 
             if path_obj and is_supported_video(path_obj):
                 video_badge = QRect(image_rect.left() + 5, image_rect.bottom() - 20, 22, 16)
@@ -2761,6 +2812,10 @@ class FullImageView(QWidget):
         super().__init__()
         self._pixmap: QPixmap | None = None
         self._smooth = False
+        # Один пиксмап, вписанный в текущий вьюпорт: пересчитывается только при
+        # смене кадра, размера окна или сглаживания, а не на каждый paint.
+        self._fitted_pixmap: QPixmap | None = None
+        self._fitted_key: tuple[int, int, int, bool] | None = None
         self._faces: list[dict] = []
         self._hovered_face = -1
         self._zoomed = False
@@ -2816,6 +2871,9 @@ class FullImageView(QWidget):
             return
         self._pixmap = pixmap
         self._zoomed = True
+        # В зуме кадр рисуется 1:1, вписанная копия не нужна — освобождаем память.
+        self._fitted_pixmap = None
+        self._fitted_key = None
         self._spinner_timer.stop()
         self._view_center = self._zoom_focus()
         self._clamp_view_center()
@@ -3045,10 +3103,11 @@ class FullImageView(QWidget):
         if self._pixmap is None or self._pixmap.isNull():
             painter.end()
             return
-        if self._smooth:
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         target = self._image_rect()
-        painter.drawPixmap(target, self._pixmap)
+        if self._zoomed:
+            painter.drawPixmap(target, self._pixmap)
+        else:
+            painter.drawPixmap(target, self._fitted_for(target.size()))
         if self._zoom_requested and not self._zoomed:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             spinner = QRect(self.rect().center().x() - 16, self.rect().center().y() - 16, 32, 32)
@@ -3063,6 +3122,22 @@ class FullImageView(QWidget):
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(face_rect, 4, 4)
         painter.end()
+
+    def _fitted_for(self, target: QSize) -> QPixmap:
+        """Возвращает кадр, заранее вписанный в ``target``, из кэша виджета."""
+        assert self._pixmap is not None
+        key = (self._pixmap.cacheKey(), target.width(), target.height(), self._smooth)
+        if self._fitted_key != key or self._fitted_pixmap is None:
+            mode = (
+                Qt.TransformationMode.SmoothTransformation
+                if self._smooth
+                else Qt.TransformationMode.FastTransformation
+            )
+            self._fitted_pixmap = self._pixmap.scaled(
+                target, Qt.AspectRatioMode.IgnoreAspectRatio, mode
+            )
+            self._fitted_key = key
+        return self._fitted_pixmap
 
     def _image_rect(self) -> QRect:
         if self._pixmap is None or self._pixmap.isNull():
@@ -11838,6 +11913,10 @@ def main() -> None:
         return
     app.setApplicationName(APP_NAME)
     app.setWindowIcon(_application_icon())
+    # Общий кэш готовых пиксмапов карточек и иконок папок с жёстким потолком:
+    # прокрутка перестаёт пересчитывать масштаб, а память сверху ограничена и
+    # старые (уехавшие с экрана) записи вытесняются автоматически.
+    QPixmapCache.setCacheLimit(65536)
     startup_trace = _StartupWindowTrace(app) if os.environ.get("RAWWW_TRACE_STARTUP") else None
     if startup_trace is not None:
         app.installEventFilter(startup_trace)
