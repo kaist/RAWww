@@ -1267,6 +1267,60 @@ class ViewerStrip(QListWidget):
                         return
         super().mousePressEvent(event)
 
+    def _make_item(
+        self,
+        path: Path,
+        details: dict[str, dict],
+        previews: dict[Path, QImage],
+        series_cards: dict[Path, dict] | None,
+    ) -> QListWidgetItem:
+        """Собирает карточку ленты с метаданными и готовым превью, если оно есть."""
+        item = QListWidgetItem(path.name)
+        item.setData(Qt.ItemDataRole.UserRole, str(path))
+        item.setData(DETAIL_ROLE, details.get(path.name, {}))
+        item.setData(SERIES_ROLE, (series_cards or {}).get(path, {}))
+        preview = previews.get(path)
+        if preview is not None:
+            item.setData(PREVIEW_ROLE, preview)
+        return item
+
+    def extend_paths(
+        self,
+        new_paths: list[Path],
+        details: dict[str, dict],
+        previews: dict[Path, QImage],
+        series_cards: dict[Path, dict] | None = None,
+        *,
+        at_start: bool,
+    ) -> None:
+        """Догружает соседнюю страницу ленты, не пересоздавая уже показанные карточки.
+
+        При добавлении в начало прокрутка компенсируется на выросший диапазон
+        полосы, чтобы кадры под курсором не «прыгнули». Так вертикальная лента
+        справа догружает всю папку по мере пролистывания, а не обрывается на
+        первой странице.
+        """
+        new_paths = [path for path in new_paths if path not in self._items_by_path]
+        if not new_paths:
+            return
+        bar = self.verticalScrollBar() if self.vertical else self.horizontalScrollBar()
+        if at_start:
+            keep = bar.value()
+            before_max = bar.maximum()
+            for offset, path in enumerate(new_paths):
+                item = self._make_item(path, details, previews, series_cards)
+                self.insertItem(offset, item)
+                self._items_by_path[path] = item
+            self._paths[0:0] = new_paths
+            self.doItemsLayout()
+            bar.setValue(keep + (bar.maximum() - before_max))
+        else:
+            for path in new_paths:
+                item = self._make_item(path, details, previews, series_cards)
+                self.addItem(item)
+                self._items_by_path[path] = item
+            self._paths.extend(new_paths)
+
     def set_paths(
         self,
         paths: list[Path],
@@ -1286,13 +1340,7 @@ class ViewerStrip(QListWidget):
             self._items_by_path.clear()
             self._paths = list(paths)
             for path in paths:
-                item = QListWidgetItem(path.name)
-                item.setData(Qt.ItemDataRole.UserRole, str(path))
-                item.setData(DETAIL_ROLE, details.get(path.name, {}))
-                item.setData(SERIES_ROLE, (series_cards or {}).get(path, {}))
-                preview = previews.get(path)
-                if preview is not None:
-                    item.setData(PREVIEW_ROLE, preview)
+                item = self._make_item(path, details, previews, series_cards)
                 self.addItem(item)
                 self._items_by_path[path] = item
         else:
@@ -3717,6 +3765,8 @@ class Workspace(QMainWindow):
         self._full_navigation_indices: dict[Path, int] = {}
         self._full_navigation_series: dict[Path, tuple[Path, ...]] = {}
         self._full_navigation_cards: dict[Path, dict] = {}
+        self._full_strip_range: tuple[int, int] | None = None
+        self._full_strip_range_gen = -1
         self.paths: list[Path] = []
         self.series_cards: dict[Path, dict] = {}
         self.expanded_series: set[Path] = set()
@@ -3854,6 +3904,7 @@ class Workspace(QMainWindow):
         self.full_view.pathRequested.connect(self.open_full)
         self.full_view.videoPlaybackChanged.connect(self._video_playback_changed)
         self.full_view.stripViewportChanged.connect(self._prioritize_visible_full_strip_thumbs)
+        self.full_view.stripViewportChanged.connect(self._maybe_extend_full_strip)
         self.full_view.ratingRequested.connect(self._set_selected_rating)
         self.full_view.colorRequested.connect(self._set_selected_color)
         self.full_view.faceShowRequested.connect(self._filter_face_from_full_view)
@@ -10271,27 +10322,28 @@ class Workspace(QMainWindow):
         series = self._full_series_for_path(current)
         strip_current = current if current in indices else series[0]
         strip_index = indices.get(strip_current, 0)
-        # Нижняя лента — визуальный навигатор, а не второе хранилище всех
-        # файлов папки. Стрелки работают по полному снимку, но Qt создаёт лишь
-        # одну стабильную страницу элементов и не платит за 4000 карточек при
-        # первом входе в Full View.
+        # Лента — визуальный навигатор, а не второе хранилище всех файлов папки.
+        # Стрелки работают по полному снимку, но Qt держит лишь загруженное окно
+        # карточек и не платит за 4000 элементов при первом входе в Full View;
+        # окно доращивается прокруткой в _maybe_extend_full_strip.
+        total = len(strip_paths)
         page_start = (strip_index // FULL_STRIP_PAGE_SIZE) * FULL_STRIP_PAGE_SIZE
-        visible_strip_paths = strip_paths[page_start : page_start + FULL_STRIP_PAGE_SIZE]
+        # Окно ленты расширяется прокруткой (см. _maybe_extend_full_strip), поэтому
+        # сбрасываем его к странице вокруг кадра только при новой навигации или
+        # когда текущий кадр вышел за пределы уже загруженного диапазона.
+        current_range = self._full_strip_range
+        if (
+            current_range is None
+            or self._full_strip_range_gen != self.view_generation
+            or not (current_range[0] <= strip_index < current_range[1])
+        ):
+            current_range = (page_start, min(total, page_start + FULL_STRIP_PAGE_SIZE))
+            self._full_strip_range = current_range
+            self._full_strip_range_gen = self.view_generation
+        range_start, range_end = current_range
+        visible_strip_paths = strip_paths[range_start:range_end]
         useful_paths = [*series, *strip_paths[max(0, strip_index - 12) : strip_index + 13]]
-        previews: dict[Path, QImage] = {}
-        for path in dict.fromkeys(useful_paths):
-            item = self.items_by_path.get(path)
-            preview = item.data(PREVIEW_ROLE) if item is not None else None
-            if isinstance(preview, QImage) and not preview.isNull():
-                previews[path] = preview
-                continue
-            preview = self._thumbnail_cache_get(path)
-            if preview is not None:
-                previews[path] = preview
-                continue
-            cached = self._cache_get((path, THUMB_SIZE))
-            if cached is not None:
-                previews[path] = cached.image
+        previews = self._strip_previews_for(useful_paths)
         self.full_view.set_navigation(
             visible_strip_paths,
             strip_current,
@@ -10330,6 +10382,72 @@ class Workspace(QMainWindow):
         self._prioritize_strip_thumbs(
             [*self.full_view.photo_strip.visible_paths(), *self.full_view.series_strip.visible_paths()]
         )
+
+    def _strip_previews_for(self, paths: list[Path]) -> dict[Path, QImage]:
+        """Собирает уже готовые превью для страницы ленты из памяти и кэша."""
+        previews: dict[Path, QImage] = {}
+        for path in dict.fromkeys(paths):
+            item = self.items_by_path.get(path)
+            preview = item.data(PREVIEW_ROLE) if item is not None else None
+            if isinstance(preview, QImage) and not preview.isNull():
+                previews[path] = preview
+                continue
+            preview = self._thumbnail_cache_get(path)
+            if preview is not None:
+                previews[path] = preview
+                continue
+            cached = self._cache_get((path, THUMB_SIZE))
+            if cached is not None:
+                previews[path] = cached.image
+        return previews
+
+    def _maybe_extend_full_strip(self) -> None:
+        """Догружает соседние страницы ленты, когда прокрутка подходит к её краю.
+
+        Пролистывание высокой вертикальной ленты справа (как и длинной нижней)
+        не должно упираться в первую страницу: у её границ дозагружаем следующий
+        или предыдущий срез полного списка, сохраняя положение прокрутки.
+        """
+        if self.stack.currentWidget() is not self.full_view:
+            return
+        if self._full_strip_range is None or self._full_strip_range_gen != self.view_generation:
+            return
+        strip_paths, indices, _series, strip_cards, _changed = self._full_navigation_snapshot()
+        visible = self.full_view.photo_strip.visible_paths()
+        if not visible:
+            return
+        first_index = indices.get(visible[0])
+        last_index = indices.get(visible[-1])
+        if first_index is None or last_index is None:
+            return
+        total = len(strip_paths)
+        start, end = self._full_strip_range
+        margin = 12
+        if last_index >= end - margin and end < total:
+            new_end = min(total, end + FULL_STRIP_PAGE_SIZE)
+            extra = strip_paths[end:new_end]
+            self.full_view.photo_strip.extend_paths(
+                extra,
+                self.photo_details,
+                self._strip_previews_for(extra),
+                {path: strip_cards.get(path, {}) for path in extra},
+                at_start=False,
+            )
+            end = new_end
+        if first_index <= start + margin and start > 0:
+            new_start = max(0, start - FULL_STRIP_PAGE_SIZE)
+            extra = strip_paths[new_start:start]
+            self.full_view.photo_strip.extend_paths(
+                extra,
+                self.photo_details,
+                self._strip_previews_for(extra),
+                {path: strip_cards.get(path, {}) for path in extra},
+                at_start=True,
+            )
+            start = new_start
+        if (start, end) != self._full_strip_range:
+            self._full_strip_range = (start, end)
+            QTimer.singleShot(0, self._prioritize_visible_full_strip_thumbs)
 
     def _prioritize_strip_thumbs(self, paths: list[Path]) -> None:
         """Ставит элементы ленты перед фоновым сканированием в экранном порядке."""

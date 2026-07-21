@@ -13,8 +13,36 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QLineEdit
 
+from rawww.app import ViewerStrip
 from rawww.shotsync_client import ShotSyncClient
 from rawww.widgets import CodeReplacementsEditor
+
+
+class ViewerStripExtendTests(unittest.TestCase):
+    """Проверяет догрузку соседних страниц ленты без пересборки карточек."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_extend_appends_and_prepends_without_duplicates(self) -> None:
+        strip = ViewerStrip(vertical=True)
+        base = [Path(f"/photos/p_{i:03d}.jpg") for i in range(10)]
+        strip.set_paths(base, base[0], {}, {})
+
+        tail = [Path(f"/photos/p_{i:03d}.jpg") for i in range(10, 15)]
+        strip.extend_paths(tail, {}, {}, at_start=False)
+        self.assertEqual(strip._paths, base + tail)
+
+        head = [Path(f"/photos/p_h{i}.jpg") for i in range(3)]
+        strip.extend_paths(head, {}, {}, at_start=True)
+        self.assertEqual(strip._paths, head + base + tail)
+        self.assertEqual(strip.count(), len(head + base + tail))
+
+        # Повторная догрузка уже показанных путей ничего не меняет.
+        strip.extend_paths(tail, {}, {}, at_start=False)
+        self.assertEqual(strip._paths, head + base + tail)
+        strip.deleteLater()
 
 
 class CodeReplacementsEditorTests(unittest.TestCase):
