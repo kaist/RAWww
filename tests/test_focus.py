@@ -12,7 +12,12 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from rawww.cache import FolderCache
-from rawww.focus import FOCUS_BLUR_THRESHOLD, analyze_focus, focus_is_defect
+from rawww.focus import (
+    FOCUS_BLUR_THRESHOLD,
+    FOCUS_BLUR_THRESHOLD_FACE,
+    analyze_focus,
+    focus_is_defect,
+)
 
 
 def _natural(width: int = 512, height: int = 384, sigma: float = 0.8) -> np.ndarray:
@@ -111,6 +116,19 @@ class FocusAnalysisTests(unittest.TestCase):
         self.assertTrue(focus_is_defect(detail))
         self.assertFalse(focus_is_defect({}))
         self.assertFalse(focus_is_defect({"focus": "broken"}))
+
+    def test_face_relaxes_focus_threshold(self) -> None:
+        # Резкость на грани строгого порога: у портрета с малой ГРИП только
+        # маленький участок остаётся чётким, поэтому наличие лица не должно
+        # приводить к ложной браковке, а без лица тот же кадр — брак.
+        borderline = (FOCUS_BLUR_THRESHOLD + FOCUS_BLUR_THRESHOLD_FACE) / 2
+        face = [{"bbox": {"x": 0.4, "y": 0.2, "width": 0.2, "height": 0.2}}]
+        self.assertTrue(focus_is_defect({"focus": {"blur": borderline}}))
+        self.assertFalse(focus_is_defect({"focus": {"blur": borderline}, "faces": face}))
+        # Кадр без единой резкой зоны бракуется даже при наличии лица.
+        self.assertTrue(
+            focus_is_defect({"focus": {"blur": FOCUS_BLUR_THRESHOLD_FACE + 0.05}, "faces": face})
+        )
 
 
 class FocusCacheTests(unittest.TestCase):
