@@ -14,6 +14,12 @@ from PySide6.QtWidgets import QApplication, QButtonGroup, QComboBox, QDialog, QD
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from .color_management import (
+    INTENT_ABSOLUTE,
+    INTENT_PERCEPTUAL,
+    INTENT_RELATIVE,
+    INTENT_SATURATION,
+)
 from .hotkeys import FIXED_HOTKEYS, HOTKEY_DEFAULTS, _hotkey_sequence, _uses_reserved_navigation_key
 from .error_log import clear_error_log, read_error_log
 from .runtime_paths import filesystem_name_key
@@ -581,8 +587,96 @@ class SettingsDialog(QDialog):
             self.settings.value("interface/zoom_focus_face", True, bool)
         )
         layout.addWidget(self.zoom_focus_face)
+        layout.addWidget(self._color_management_card())
         layout.addStretch(1)
         return tab
+
+    def _color_management_card(self) -> QFrame:
+        """Собирает управление цветом полного просмотра: тумблер, профиль, intent, BPC."""
+        card = QFrame()
+        card.setObjectName("externalEditorCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(14, 13, 14, 14)
+        card_layout.setSpacing(7)
+        heading = QLabel(_("Управление цветом"))
+        heading.setObjectName("externalEditorTitle")
+        card_layout.addWidget(heading)
+        hint = QLabel(
+            _("Переводит кадр в полном просмотре в ICC-профиль монитора. Нужно для "
+            "точных цветов на калиброванном или широкогамутном дисплее.")
+        )
+        hint.setObjectName("externalEditorHint")
+        hint.setWordWrap(True)
+        card_layout.addWidget(hint)
+
+        self.cms_enabled = SettingsCheckBox(_("Управление цветом (ICC)"))
+        self.cms_enabled.setChecked(self.settings.value("color_management/enabled", True, bool))
+        card_layout.addWidget(self.cms_enabled)
+
+        profile_label = QLabel(_("Профиль монитора"))
+        profile_label.setObjectName("externalEditorHint")
+        card_layout.addWidget(profile_label)
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(8)
+        self.cms_profile_path = QLineEdit(self.settings.value("color_management/monitor_profile", "", str))
+        self.cms_profile_path.setObjectName("editorExecutable")
+        self.cms_profile_path.setReadOnly(True)
+        self.cms_profile_path.setPlaceholderText(_("Определять автоматически (из ОС)"))
+        profile_row.addWidget(self.cms_profile_path, 1)
+        profile_browse = QToolButton()
+        profile_browse.setObjectName("editorBrowseButton")
+        profile_browse.setIcon(_fomantic_icon("folder", 15, "#c9c9c9"))
+        profile_browse.setIconSize(QSize(15, 15))
+        profile_browse.setToolTip(_("Выбрать ICC-профиль монитора"))
+        profile_browse.clicked.connect(self._choose_monitor_profile)
+        profile_row.addWidget(profile_browse)
+        profile_clear = QToolButton()
+        profile_clear.setObjectName("editorBrowseButton")
+        profile_clear.setIcon(_fomantic_icon("close", 15, "#c9c9c9"))
+        profile_clear.setIconSize(QSize(15, 15))
+        profile_clear.setToolTip(_("Сбросить на автоопределение"))
+        profile_clear.clicked.connect(lambda: self.cms_profile_path.clear())
+        profile_row.addWidget(profile_clear)
+        card_layout.addLayout(profile_row)
+
+        intent_label = QLabel(_("Цель цветопередачи (rendering intent)"))
+        intent_label.setObjectName("externalEditorHint")
+        card_layout.addWidget(intent_label)
+        self.cms_intent = QComboBox()
+        self.cms_intent.addItem(_("Относительный колориметрический"), INTENT_RELATIVE)
+        self.cms_intent.addItem(_("Перцепционный"), INTENT_PERCEPTUAL)
+        self.cms_intent.addItem(_("Абсолютный колориметрический"), INTENT_ABSOLUTE)
+        self.cms_intent.addItem(_("Насыщенность"), INTENT_SATURATION)
+        stored_intent = self.settings.value("color_management/intent", INTENT_RELATIVE, int)
+        intent_index = self.cms_intent.findData(stored_intent)
+        self.cms_intent.setCurrentIndex(intent_index if intent_index >= 0 else 0)
+        card_layout.addWidget(self.cms_intent)
+
+        self.cms_bpc = SettingsCheckBox(_("Компенсация чёрной точки"))
+        self.cms_bpc.setChecked(
+            self.settings.value("color_management/black_point_compensation", True, bool)
+        )
+        card_layout.addWidget(self.cms_bpc)
+
+        self.cms_enabled.toggled.connect(self.cms_profile_path.setEnabled)
+        self.cms_enabled.toggled.connect(profile_browse.setEnabled)
+        self.cms_enabled.toggled.connect(profile_clear.setEnabled)
+        self.cms_enabled.toggled.connect(self.cms_intent.setEnabled)
+        self.cms_enabled.toggled.connect(self.cms_bpc.setEnabled)
+        for widget in (self.cms_profile_path, profile_browse, profile_clear, self.cms_intent, self.cms_bpc):
+            widget.setEnabled(self.cms_enabled.isChecked())
+        return card
+
+    def _choose_monitor_profile(self) -> None:
+        """Позволяет вручную указать ICC-профиль, если ОС его не отдаёт."""
+        path, _selected = QFileDialog.getOpenFileName(
+            self,
+            _("Профиль монитора"),
+            self.cms_profile_path.text() or "",
+            _("ICC-профили (*.icc *.icm)"),
+        )
+        if path:
+            self.cms_profile_path.setText(path)
 
     def _about_tab(self) -> QWidget:
         """Собирает сведения о версии, лицензии и полезные ссылки."""
@@ -729,6 +823,12 @@ class SettingsDialog(QDialog):
             self.show_full_view_mark_indicator.isChecked(),
         )
         self.settings.setValue("interface/zoom_focus_face", self.zoom_focus_face.isChecked())
+        self.settings.setValue("color_management/enabled", self.cms_enabled.isChecked())
+        self.settings.setValue("color_management/monitor_profile", self.cms_profile_path.text().strip())
+        self.settings.setValue("color_management/intent", self.cms_intent.currentData())
+        self.settings.setValue(
+            "color_management/black_point_compensation", self.cms_bpc.isChecked()
+        )
         self.settings.setValue(i18n.LANGUAGE_SETTING_KEY, self.language_combo.currentData())
         self.settings.setValue("editor/use_custom_executable", self.custom_editor.isChecked())
         self.settings.setValue("editor/executable", self.editor_executable.text().strip())
