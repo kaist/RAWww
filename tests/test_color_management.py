@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import tempfile
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -76,6 +78,31 @@ class DescribeProfileTest(unittest.TestCase):
 
     def test_reads_profile_description(self) -> None:
         self.assertIn("RGB", cm.describe_profile(_adobe_rgb_profile()))
+
+
+class DisplayProfileSourceTest(unittest.TestCase):
+    def test_os_managed_is_false_off_windows(self) -> None:
+        # Вне Windows ОС-управление цветом не применяется — проверяем, что
+        # функция не бросает исключений и возвращает False на текущей платформе.
+        if sys.platform != "win32":
+            self.assertFalse(cm.os_manages_display_color(None))
+
+    def test_display_profile_bytes_never_raises(self) -> None:
+        # Любая неудача чтения профиля обязана превращаться в None/bytes, а не падать.
+        config = cm.ColorManagementConfig(enabled=True)
+        result = cm.display_profile_bytes(None, config)
+        self.assertTrue(result is None or isinstance(result, bytes))
+
+    def test_manual_profile_used_when_present(self) -> None:
+        # Ручной профиль читается напрямую из файла, минуя автоопределение ОС.
+        with tempfile.NamedTemporaryFile(suffix=".icc", delete=False) as handle:
+            handle.write(_adobe_rgb_profile())
+            path = handle.name
+        try:
+            config = cm.ColorManagementConfig(enabled=True, manual_profile_path=path)
+            self.assertEqual(cm.display_profile_bytes(None, config), _adobe_rgb_profile())
+        finally:
+            os.unlink(path)
 
 
 class ApplyTransformTest(unittest.TestCase):

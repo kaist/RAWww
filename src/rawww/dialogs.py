@@ -22,6 +22,7 @@ from .color_management import (
     ColorManagementConfig,
     describe_profile,
     display_profile_bytes,
+    os_manages_display_color,
 )
 from .hotkeys import FIXED_HOTKEYS, HOTKEY_DEFAULTS, _hotkey_sequence, _uses_reserved_navigation_key
 from .error_log import clear_error_log, read_error_log
@@ -623,7 +624,7 @@ class SettingsDialog(QDialog):
         card_layout.addWidget(hint)
 
         self.cms_enabled = SettingsCheckBox(_("Управление цветом (ICC)"))
-        self.cms_enabled.setChecked(self.settings.value("color_management/enabled", False, bool))
+        self.cms_enabled.setChecked(self.settings.value("color_management/enabled", True, bool))
         card_layout.addWidget(self.cms_enabled)
 
         intent_label = QLabel(_("Цель цветопередачи (rendering intent)"))
@@ -690,6 +691,12 @@ class SettingsDialog(QDialog):
         self.cms_reset_profile.setEnabled(enabled and bool(self._cms_manual_profile))
         if not enabled:
             self.cms_profile_status.setText(_("Коррекция под монитор выключена."))
+            return
+        if os_manages_display_color(self.screen()):
+            self.cms_profile_status.setText(
+                _("Расширенный цвет (HDR) включён — цветом управляет Windows; "
+                "приложение отдаёт sRGB, отдельная коррекция не требуется.")
+            )
             return
         icc = display_profile_bytes(self.screen(), self._current_cms_config())
         if not icc:
