@@ -1267,7 +1267,7 @@ def _folder_icon_provider() -> QFileIconProvider:
     return _FOLDER_ICON_PROVIDER
 
 
-def _scaled_card_pixmap(preview: QImage, target: QSize) -> QPixmap:
+def _scaled_card_pixmap(preview: QImage, target: QSize, dpr: float) -> QPixmap:
     """Возвращает превью, отмасштабированное под карточку, из общего кэша.
 
     Масштабирование делается один раз и кладётся в ``QPixmapCache`` с жёстким
@@ -1275,34 +1275,44 @@ def _scaled_card_pixmap(preview: QImage, target: QSize) -> QPixmap:
     не пересчитывает картинку каждый кадр. На одну превью держим ровно один
     масштаб: при другом размере запись перестраивается на месте, а не плодит
     вторую копию, — так кэш не забивается разными масштабами одного кадра.
+
+    Масштаб считается в физических пикселях (``target * dpr``) с проставленным
+    ``devicePixelRatio``: иначе на HiDPI painter дотягивал логический пиксмап до
+    физических пикселей ближайшим соседом и превью теряло резкость.
     """
+    device_target = (QSizeF(target) * dpr).toSize()
     key = f"gridcard:{preview.cacheKey()}"
     cached = QPixmapCache.find(key)
-    if cached is not None and not cached.isNull() and cached.size() == target:
+    if cached is not None and not cached.isNull() and cached.size() == device_target:
         return cached
     pixmap = QPixmap.fromImage(preview).scaled(
-        target,
+        device_target,
         Qt.AspectRatioMode.IgnoreAspectRatio,
         Qt.TransformationMode.SmoothTransformation,
     )
+    pixmap.setDevicePixelRatio(dpr)
     QPixmapCache.insert(key, pixmap)
     return pixmap
 
 
-def _folder_card_pixmap(path: str, target: QSize) -> QPixmap:
+def _folder_card_pixmap(path: str, target: QSize, dpr: float) -> QPixmap:
     """Возвращает иконку папки нужного размера из общего кэша.
 
     Системная иконка добывается один раз на пару путь+размер: без кэша
     ``QFileIconProvider`` дергался на каждую перерисовку каждой карточки папки.
+    Иконка запрашивается в физических пикселях с ``devicePixelRatio``, чтобы на
+    HiDPI не была мыльной.
     """
-    key = f"foldericon:{path}:{target.width()}x{target.height()}"
+    device_target = (QSizeF(target) * dpr).toSize()
+    key = f"foldericon:{path}:{device_target.width()}x{device_target.height()}"
     cached = QPixmapCache.find(key)
     if cached is not None and not cached.isNull():
         return cached
     icon = _folder_icon_provider().icon(QFileInfo(path))
     if icon.isNull():
         return QPixmap()
-    pixmap = icon.pixmap(target)
+    pixmap = icon.pixmap(device_target)
+    pixmap.setDevicePixelRatio(dpr)
     QPixmapCache.insert(key, pixmap)
     return pixmap
 
@@ -1327,6 +1337,7 @@ class PhotoCardDelegate(QStyledItemDelegate):
 
     def paint(self, painter: QPainter, option, index) -> None:
         painter.save()
+        dpr = painter.device().devicePixelRatioF()
         inset = 2 if self.compact else 2
         item_rect = option.rect
         if isinstance(option.widget, PhotoGrid) and option.widget.is_last_grid_column(index.row()):
@@ -1371,7 +1382,7 @@ class PhotoCardDelegate(QStyledItemDelegate):
                 image_rect.width(),
                 max(24, text_rect.top() - image_rect.top() - 2),
             )
-            folder_pixmap = _folder_card_pixmap(str(path_obj), folder_rect.size())
+            folder_pixmap = _folder_card_pixmap(str(path_obj), folder_rect.size(), dpr)
             if not folder_pixmap.isNull():
                 painter.fillRect(folder_rect, Qt.GlobalColor.transparent)
                 scaled = folder_pixmap.size().scaled(
@@ -1397,7 +1408,7 @@ class PhotoCardDelegate(QStyledItemDelegate):
                     scaled.width(),
                     scaled.height(),
                 )
-                painter.drawPixmap(target, _scaled_card_pixmap(preview, scaled))
+                painter.drawPixmap(target, _scaled_card_pixmap(preview, scaled, dpr))
 
             if path_obj and is_supported_video(path_obj):
                 video_badge = QRect(image_rect.left() + 5, image_rect.bottom() - 20, 22, 16)
@@ -3465,18 +3476,28 @@ class FullImageView(QWidget):
         painter.end()
 
     def _fitted_for(self, target: QSize) -> QPixmap:
-        """Возвращает кадр, заранее вписанный в ``target``, из кэша виджета."""
+        """Возвращает кадр, заранее вписанный в ``target``, из кэша виджета.
+
+        Масштаб считается в физических пикселях (``target * dpr``) с проставленным
+        ``devicePixelRatio``: на HiDPI ``target`` задан в логических пикселях, и
+        без этого painter дотягивал вписанную копию до физического размера
+        ближайшим соседом — кадр терял резкость и «сыпался квадратиками».
+        """
         assert self._pixmap is not None
-        key = (self._pixmap.cacheKey(), target.width(), target.height(), self._smooth)
+        dpr = self.devicePixelRatioF()
+        device_target = (QSizeF(target) * dpr).toSize()
+        key = (self._pixmap.cacheKey(), device_target.width(), device_target.height(), self._smooth)
         if self._fitted_key != key or self._fitted_pixmap is None:
             mode = (
                 Qt.TransformationMode.SmoothTransformation
                 if self._smooth
                 else Qt.TransformationMode.FastTransformation
             )
-            self._fitted_pixmap = self._pixmap.scaled(
-                target, Qt.AspectRatioMode.IgnoreAspectRatio, mode
+            fitted = self._pixmap.scaled(
+                device_target, Qt.AspectRatioMode.IgnoreAspectRatio, mode
             )
+            fitted.setDevicePixelRatio(dpr)
+            self._fitted_pixmap = fitted
             self._fitted_key = key
         return self._fitted_pixmap
 
