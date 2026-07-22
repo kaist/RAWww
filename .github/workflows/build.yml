@@ -131,7 +131,13 @@ jobs:
           </dict></plist>
           PLIST
           chmod +x "dist/ctrlka.app/Contents/MacOS/ctrlka"
-          hdiutil create -volname Контролька -srcfolder "dist/ctrlka.app" -ov -format UDZO "dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"
+          # Ad-hoc подпись всего бандла: на Apple Silicon неподписанный код
+          # не запускается, а Gatekeeper иначе объявляет приложение «повреждённым».
+          codesign --force --deep --sign - "dist/ctrlka.app"
+          codesign --verify --deep --strict "dist/ctrlka.app"
+          # -fs HFS+ обязателен: без него hdiutil на macOS 14/15 создаёт APFS-образ,
+          # который не монтируется на более старых версиях macOS.
+          hdiutil create -volname Контролька -srcfolder "dist/ctrlka.app" -fs HFS+ -ov -format UDZO "dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"
 
       - name: Build Linux application
         if: runner.os == 'Linux'
