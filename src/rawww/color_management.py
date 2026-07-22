@@ -49,7 +49,7 @@ class ColorManagementConfig:
     страховка на случай, когда ОС профиль не отдаёт (частый случай на Linux).
     """
 
-    enabled: bool = True
+    enabled: bool = False
     intent: int = INTENT_RELATIVE
     black_point_compensation: bool = True
     manual_profile_path: str = ""
@@ -137,29 +137,44 @@ def _linux_display_profile(screen: QScreen | None) -> bytes | None:
         return None
 
     xlib.XOpenDisplay.restype = ctypes.c_void_p
+    xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
     xlib.XInternAtom.restype = ctypes.c_ulong
+    xlib.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
     xlib.XDefaultRootWindow.restype = ctypes.c_ulong
+    xlib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    # long_offset и long_length — 64-битные long: без явных argtypes ctypes
+    # передаёт их как 32-битный int, и сервер возвращает 0 элементов.
+    xlib.XGetWindowProperty.restype = ctypes.c_int
+    xlib.XGetWindowProperty.argtypes = [
+        ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+        ctypes.c_long, ctypes.c_long, ctypes.c_int, ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte)),
+    ]
+    xlib.XFree.argtypes = [ctypes.c_void_p]
+    xlib.XCloseDisplay.argtypes = [ctypes.c_void_p]
     display = xlib.XOpenDisplay(None)
     if not display:
         return None
     try:
-        atom = xlib.XInternAtom(ctypes.c_void_p(display), b"_ICC_PROFILE", True)
+        atom = xlib.XInternAtom(display, b"_ICC_PROFILE", True)
         if not atom:
             return None
-        root = xlib.XDefaultRootWindow(ctypes.c_void_p(display))
+        root = xlib.XDefaultRootWindow(display)
         actual_type = ctypes.c_ulong()
         actual_format = ctypes.c_int()
         nitems = ctypes.c_ulong()
         bytes_after = ctypes.c_ulong()
         data = ctypes.POINTER(ctypes.c_ubyte)()
         status = xlib.XGetWindowProperty(
-            ctypes.c_void_p(display),
-            ctypes.c_ulong(root),
-            ctypes.c_ulong(atom),
+            display,
+            root,
+            atom,
             0,
-            0x7FFFFFFF,
+            0x1FFFFFFF,
             False,
-            ctypes.c_ulong(4),  # AnyPropertyType
+            0,  # AnyPropertyType
             ctypes.byref(actual_type),
             ctypes.byref(actual_format),
             ctypes.byref(nitems),
@@ -174,6 +189,21 @@ def _linux_display_profile(screen: QScreen | None) -> bytes | None:
             xlib.XFree(data)
     finally:
         xlib.XCloseDisplay(ctypes.c_void_p(display))
+
+
+def describe_profile(icc: bytes | None) -> str:
+    """Возвращает человекочитаемое название ICC-профиля или пустую строку.
+
+    Используется настройками, чтобы показать пользователю, какой профиль монитора
+    сейчас применяется. При любой ошибке разбора возвращается пустая строка.
+    """
+    if not icc:
+        return ""
+    try:
+        profile = ImageCms.ImageCmsProfile(BytesIO(icc))
+        return (ImageCms.getProfileDescription(profile) or "").strip()
+    except Exception:
+        return ""
 
 
 def display_profile_bytes(screen: QScreen | None, config: ColorManagementConfig) -> bytes | None:

@@ -201,7 +201,7 @@ def _application_settings() -> QSettings:
 def _color_management_config(settings: QSettings) -> ColorManagementConfig:
     """Собирает настройки управления цветом полного просмотра из ``QSettings``."""
     return ColorManagementConfig(
-        enabled=settings.value("color_management/enabled", True, bool),
+        enabled=settings.value("color_management/enabled", False, bool),
         intent=settings.value("color_management/intent", INTENT_RELATIVE, int),
         black_point_compensation=settings.value(
             "color_management/black_point_compensation", True, bool
