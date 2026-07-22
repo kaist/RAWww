@@ -12,9 +12,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np  # noqa: E402
 from PIL import ImageCms  # noqa: E402
-from PySide6.QtGui import QImage  # noqa: E402
+from PySide6.QtGui import QColorSpace, QImage, qRgb  # noqa: E402
 
 from rawww import color_management as cm  # noqa: E402
+
+
+def _adobe_rgb_profile() -> bytes:
+    """Реальный широкогамутный ICC (Adobe RGB) из Qt — для проверок с монитором."""
+    return bytes(QColorSpace(QColorSpace.NamedColorSpace.AdobeRgb).iccProfile())
 
 
 def _identity_transform():
@@ -49,6 +54,28 @@ class ColorManagementConfigTest(unittest.TestCase):
         config = cm.ColorManagementConfig(enabled=True)
         srgb = cm._srgb_profile_bytes()
         self.assertIsNone(cm.srgb_to_display_transform(srgb, config))
+
+    def test_wide_gamut_profile_builds_transform_and_changes_pixels(self) -> None:
+        # Реальный профиль монитора (Adobe RGB) даёт непустой transform, и
+        # насыщенный цвет заметно меняется при пересчёте sRGB → монитор.
+        config = cm.ColorManagementConfig(enabled=True)
+        transform = cm.srgb_to_display_transform(_adobe_rgb_profile(), config)
+        self.assertIsNotNone(transform)
+        image = QImage(16, 16, QImage.Format.Format_RGB888)
+        image.fill(qRgb(220, 30, 30))
+        result = cm.apply_transform_to_qimage(image, transform)
+        self.assertNotEqual(
+            image.pixelColor(0, 0).getRgb(), result.pixelColor(0, 0).getRgb()
+        )
+
+
+class DescribeProfileTest(unittest.TestCase):
+    def test_returns_empty_for_missing(self) -> None:
+        self.assertEqual(cm.describe_profile(None), "")
+        self.assertEqual(cm.describe_profile(b""), "")
+
+    def test_reads_profile_description(self) -> None:
+        self.assertIn("RGB", cm.describe_profile(_adobe_rgb_profile()))
 
 
 class ApplyTransformTest(unittest.TestCase):

@@ -19,6 +19,9 @@ from .color_management import (
     INTENT_PERCEPTUAL,
     INTENT_RELATIVE,
     INTENT_SATURATION,
+    ColorManagementConfig,
+    describe_profile,
+    display_profile_bytes,
 )
 from .hotkeys import FIXED_HOTKEYS, HOTKEY_DEFAULTS, _hotkey_sequence, _uses_reserved_navigation_key
 from .error_log import clear_error_log, read_error_log
@@ -587,61 +590,37 @@ class SettingsDialog(QDialog):
             self.settings.value("interface/zoom_focus_face", True, bool)
         )
         layout.addWidget(self.zoom_focus_face)
-        layout.addWidget(self._color_management_card())
+        self._add_color_management_section(layout)
         layout.addStretch(1)
         return tab
 
-    def _color_management_card(self) -> QFrame:
-        """Собирает управление цветом полного просмотра: тумблер, профиль, intent, BPC."""
-        card = QFrame()
-        card.setObjectName("externalEditorCard")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(14, 13, 14, 14)
-        card_layout.setSpacing(7)
+    def _add_color_management_section(self, layout: QVBoxLayout) -> None:
+        """Добавляет управление цветом полного просмотра в стиле остальной вкладки.
+
+        Раздел кладётся прямо в layout вкладки без отдельной карточки-подложки:
+        заголовок и подсказки используют те же стили, что и другие настройки, а
+        профиль монитора выбирается кнопками — так не появляется поле ввода с
+        чужим фоном. Строка статуса показывает, какой профиль сейчас активен.
+        """
+        layout.addSpacing(6)
         heading = QLabel(_("Управление цветом"))
-        heading.setObjectName("externalEditorTitle")
-        card_layout.addWidget(heading)
+        heading.setObjectName("settingsSectionTitle")
+        layout.addWidget(heading)
         hint = QLabel(
-            _("Переводит кадр в полном просмотре в ICC-профиль монитора. Нужно для "
-            "точных цветов на калиброванном или широкогамутном дисплее.")
+            _("Переводит кадр в полном просмотре в ICC-профиль монитора — для точных "
+            "цветов на калиброванном или широкогамутном дисплее.")
         )
-        hint.setObjectName("externalEditorHint")
+        hint.setObjectName("settingsHint")
         hint.setWordWrap(True)
-        card_layout.addWidget(hint)
+        layout.addWidget(hint)
 
         self.cms_enabled = SettingsCheckBox(_("Управление цветом (ICC)"))
-        self.cms_enabled.setChecked(self.settings.value("color_management/enabled", True, bool))
-        card_layout.addWidget(self.cms_enabled)
-
-        profile_label = QLabel(_("Профиль монитора"))
-        profile_label.setObjectName("externalEditorHint")
-        card_layout.addWidget(profile_label)
-        profile_row = QHBoxLayout()
-        profile_row.setSpacing(8)
-        self.cms_profile_path = QLineEdit(self.settings.value("color_management/monitor_profile", "", str))
-        self.cms_profile_path.setObjectName("editorExecutable")
-        self.cms_profile_path.setReadOnly(True)
-        self.cms_profile_path.setPlaceholderText(_("Определять автоматически (из ОС)"))
-        profile_row.addWidget(self.cms_profile_path, 1)
-        profile_browse = QToolButton()
-        profile_browse.setObjectName("editorBrowseButton")
-        profile_browse.setIcon(_fomantic_icon("folder", 15, "#c9c9c9"))
-        profile_browse.setIconSize(QSize(15, 15))
-        profile_browse.setToolTip(_("Выбрать ICC-профиль монитора"))
-        profile_browse.clicked.connect(self._choose_monitor_profile)
-        profile_row.addWidget(profile_browse)
-        profile_clear = QToolButton()
-        profile_clear.setObjectName("editorBrowseButton")
-        profile_clear.setIcon(_fomantic_icon("close", 15, "#c9c9c9"))
-        profile_clear.setIconSize(QSize(15, 15))
-        profile_clear.setToolTip(_("Сбросить на автоопределение"))
-        profile_clear.clicked.connect(lambda: self.cms_profile_path.clear())
-        profile_row.addWidget(profile_clear)
-        card_layout.addLayout(profile_row)
+        self.cms_enabled.setChecked(self.settings.value("color_management/enabled", False, bool))
+        layout.addWidget(self.cms_enabled)
 
         intent_label = QLabel(_("Цель цветопередачи (rendering intent)"))
-        intent_label.setObjectName("externalEditorHint")
-        card_layout.addWidget(intent_label)
+        intent_label.setObjectName("settingsHint")
+        layout.addWidget(intent_label)
         self.cms_intent = QComboBox()
         self.cms_intent.addItem(_("Относительный колориметрический"), INTENT_RELATIVE)
         self.cms_intent.addItem(_("Перцепционный"), INTENT_PERCEPTUAL)
@@ -650,33 +629,90 @@ class SettingsDialog(QDialog):
         stored_intent = self.settings.value("color_management/intent", INTENT_RELATIVE, int)
         intent_index = self.cms_intent.findData(stored_intent)
         self.cms_intent.setCurrentIndex(intent_index if intent_index >= 0 else 0)
-        card_layout.addWidget(self.cms_intent)
+        layout.addWidget(self.cms_intent)
 
         self.cms_bpc = SettingsCheckBox(_("Компенсация чёрной точки"))
         self.cms_bpc.setChecked(
             self.settings.value("color_management/black_point_compensation", True, bool)
         )
-        card_layout.addWidget(self.cms_bpc)
+        layout.addWidget(self.cms_bpc)
 
-        self.cms_enabled.toggled.connect(self.cms_profile_path.setEnabled)
-        self.cms_enabled.toggled.connect(profile_browse.setEnabled)
-        self.cms_enabled.toggled.connect(profile_clear.setEnabled)
-        self.cms_enabled.toggled.connect(self.cms_intent.setEnabled)
-        self.cms_enabled.toggled.connect(self.cms_bpc.setEnabled)
-        for widget in (self.cms_profile_path, profile_browse, profile_clear, self.cms_intent, self.cms_bpc):
-            widget.setEnabled(self.cms_enabled.isChecked())
-        return card
+        profile_label = QLabel(_("Профиль монитора"))
+        profile_label.setObjectName("settingsHint")
+        layout.addWidget(profile_label)
+        self.cms_profile_status = QLabel()
+        self.cms_profile_status.setObjectName("settingsHint")
+        self.cms_profile_status.setWordWrap(True)
+        layout.addWidget(self.cms_profile_status)
+
+        self._cms_manual_profile = self.settings.value("color_management/monitor_profile", "", str)
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+        self.cms_choose_profile = QPushButton(_("Выбрать профиль…"))
+        self.cms_choose_profile.setObjectName("settingsSecondaryButton")
+        self.cms_choose_profile.clicked.connect(self._choose_monitor_profile)
+        button_row.addWidget(self.cms_choose_profile)
+        self.cms_reset_profile = QPushButton(_("Определять автоматически"))
+        self.cms_reset_profile.setObjectName("settingsSecondaryButton")
+        self.cms_reset_profile.clicked.connect(self._reset_monitor_profile)
+        button_row.addWidget(self.cms_reset_profile)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        self._cms_dependent = [self.cms_intent, self.cms_bpc, self.cms_choose_profile]
+        self.cms_enabled.toggled.connect(self._update_cms_profile_status)
+        self._update_cms_profile_status()
+
+    def _current_cms_config(self) -> ColorManagementConfig:
+        """Собирает конфигурацию CMS из текущего состояния виджетов диалога."""
+        return ColorManagementConfig(
+            enabled=self.cms_enabled.isChecked(),
+            intent=int(self.cms_intent.currentData()),
+            black_point_compensation=self.cms_bpc.isChecked(),
+            manual_profile_path=self._cms_manual_profile,
+        )
+
+    def _update_cms_profile_status(self) -> None:
+        """Обновляет доступность контролов и показывает активный профиль монитора."""
+        enabled = self.cms_enabled.isChecked()
+        for widget in self._cms_dependent:
+            widget.setEnabled(enabled)
+        self.cms_reset_profile.setEnabled(enabled and bool(self._cms_manual_profile))
+        if not enabled:
+            self.cms_profile_status.setText(_("Коррекция под монитор выключена."))
+            return
+        icc = display_profile_bytes(self.screen(), self._current_cms_config())
+        if not icc:
+            self.cms_profile_status.setText(
+                _("Профиль монитора не найден — кадр показывается как sRGB.")
+            )
+            return
+        name = describe_profile(icc)
+        if not name and self._cms_manual_profile:
+            name = Path(self._cms_manual_profile).name
+        if not name:
+            name = _("без названия")
+        source = _("выбран вручную") if self._cms_manual_profile else _("определён из системы")
+        self.cms_profile_status.setText(
+            _("Активный профиль: {name} ({source}).").format(name=name, source=source)
+        )
 
     def _choose_monitor_profile(self) -> None:
         """Позволяет вручную указать ICC-профиль, если ОС его не отдаёт."""
         path, _selected = QFileDialog.getOpenFileName(
             self,
             _("Профиль монитора"),
-            self.cms_profile_path.text() or "",
+            self._cms_manual_profile or "",
             _("ICC-профили (*.icc *.icm)"),
         )
         if path:
-            self.cms_profile_path.setText(path)
+            self._cms_manual_profile = path
+            self._update_cms_profile_status()
+
+    def _reset_monitor_profile(self) -> None:
+        """Сбрасывает ручной профиль обратно на автоопределение из ОС."""
+        self._cms_manual_profile = ""
+        self._update_cms_profile_status()
 
     def _about_tab(self) -> QWidget:
         """Собирает сведения о версии, лицензии и полезные ссылки."""
@@ -824,7 +860,7 @@ class SettingsDialog(QDialog):
         )
         self.settings.setValue("interface/zoom_focus_face", self.zoom_focus_face.isChecked())
         self.settings.setValue("color_management/enabled", self.cms_enabled.isChecked())
-        self.settings.setValue("color_management/monitor_profile", self.cms_profile_path.text().strip())
+        self.settings.setValue("color_management/monitor_profile", self._cms_manual_profile.strip())
         self.settings.setValue("color_management/intent", self.cms_intent.currentData())
         self.settings.setValue(
             "color_management/black_point_compensation", self.cms_bpc.isChecked()

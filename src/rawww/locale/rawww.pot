@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-21 17:06+0000\n"
+"POT-Creation-Date: 2026-07-22 17:51+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1140,6 +1140,66 @@ msgid "Показывать индикатор меток в полном про
 msgstr ""
 
 msgid "Акцент на лице при зуме"
+msgstr ""
+
+msgid "Управление цветом"
+msgstr ""
+
+msgid ""
+"Переводит кадр в полном просмотре в ICC-профиль монитора — для точных "
+"цветов на калиброванном или широкогамутном дисплее."
+msgstr ""
+
+msgid "Управление цветом (ICC)"
+msgstr ""
+
+msgid "Цель цветопередачи (rendering intent)"
+msgstr ""
+
+msgid "Относительный колориметрический"
+msgstr ""
+
+msgid "Перцепционный"
+msgstr ""
+
+msgid "Абсолютный колориметрический"
+msgstr ""
+
+msgid "Насыщенность"
+msgstr ""
+
+msgid "Компенсация чёрной точки"
+msgstr ""
+
+msgid "Профиль монитора"
+msgstr ""
+
+msgid "Выбрать профиль…"
+msgstr ""
+
+msgid "Определять автоматически"
+msgstr ""
+
+msgid "Коррекция под монитор выключена."
+msgstr ""
+
+msgid "Профиль монитора не найден — кадр показывается как sRGB."
+msgstr ""
+
+msgid "без названия"
+msgstr ""
+
+msgid "выбран вручную"
+msgstr ""
+
+msgid "определён из системы"
+msgstr ""
+
+#, python-brace-format
+msgid "Активный профиль: {name} ({source})."
+msgstr ""
+
+msgid "ICC-профили (*.icc *.icm)"
 msgstr ""
 
 msgid "Контролька"
