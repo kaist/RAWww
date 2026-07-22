@@ -117,6 +117,10 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          # Собираем бандл с нуля: PyInstaller уже создаёт запечатанный
+          # dist/ctrlka.app, и копирование onedir поверх оставило бы
+          # рассогласованную подпись (_CodeSignature) и лишнюю копию файлов.
+          rm -rf "dist/ctrlka.app"
           mkdir -p "dist/ctrlka.app/Contents/MacOS"
           cp -R dist/ctrlka/. "dist/ctrlka.app/Contents/MacOS/"
           cat > "dist/ctrlka.app/Contents/Info.plist" <<'PLIST'
@@ -131,17 +135,18 @@ jobs:
           </dict></plist>
           PLIST
           chmod +x "dist/ctrlka.app/Contents/MacOS/ctrlka"
-          # Ad-hoc подпись: на Apple Silicon неподписанный код не запускается, а
-          # Gatekeeper иначе объявляет приложение «повреждённым». Подписываем каждый
-          # Mach-O по отдельности снизу вверх — codesign --deep не понимает
-          # нестандартный layout PyInstaller (например каталог bin/PIL/.dylibs).
+          # Ad-hoc подпись каждого Mach-O по отдельности: на Apple Silicon
+          # неподписанный код не запускается. Запечатать бандл целиком нельзя —
+          # библиотеки PyInstaller лежат внутри Contents/MacOS (например каталог
+          # bin/PIL/.dylibs), а codesign отвергает такой layout при запечатывании.
+          # Поэтому подписываем сами бинарники, главный исполняемый — последним.
           while IFS= read -r -d '' file; do
             if file "$file" | grep -q 'Mach-O'; then
               codesign --force --sign - "$file"
             fi
           done < <(find "dist/ctrlka.app/Contents/MacOS" -type f)
-          codesign --force --sign - "dist/ctrlka.app"
-          codesign --verify --strict "dist/ctrlka.app"
+          codesign --force --sign - "dist/ctrlka.app/Contents/MacOS/ctrlka"
+          codesign --verify --strict "dist/ctrlka.app/Contents/MacOS/ctrlka"
           # -fs HFS+ обязателен: без него hdiutil на macOS 14/15 создаёт APFS-образ,
           # который не монтируется на более старых версиях macOS.
           hdiutil create -volname Контролька -srcfolder "dist/ctrlka.app" -fs HFS+ -ov -format UDZO "dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"
