@@ -35,7 +35,7 @@ from typing import Callable
 from send2trash import send2trash
 
 from PySide6.QtCore import QBuffer, QDir, QEasingCurve, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
-from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPixmapCache, QPolygon, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
+from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPixmapCache, QPolygon, QScreen, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -79,6 +79,13 @@ from PySide6.QtWidgets import (
 )
 
 from .cache import FolderCache, cache_size, clear_cache, maintain_folder_caches, prune_folder_cache, relocate_folder_caches, remove_folder_cache
+from .color_management import (
+    ColorManagementConfig,
+    INTENT_RELATIVE,
+    apply_transform_to_qimage,
+    display_profile_bytes,
+    srgb_to_display_transform,
+)
 from .decode_cache import DecodeCache
 from .error_log import install_error_logging
 from .decode_scheduler import DecodeScheduler
@@ -189,6 +196,18 @@ def _application_settings() -> QSettings:
             QSettings.Format.IniFormat,
         )
     return QSettings(SETTINGS_NAME, SETTINGS_NAME)
+
+
+def _color_management_config(settings: QSettings) -> ColorManagementConfig:
+    """Собирает настройки управления цветом полного просмотра из ``QSettings``."""
+    return ColorManagementConfig(
+        enabled=settings.value("color_management/enabled", True, bool),
+        intent=settings.value("color_management/intent", INTENT_RELATIVE, int),
+        black_point_compensation=settings.value(
+            "color_management/black_point_compensation", True, bool
+        ),
+        manual_profile_path=settings.value("color_management/monitor_profile", "", str),
+    )
 
 
 def _resize_export_worker(job: tuple[str, str, int, bool, int, bool, float, int, int, bool, int]) -> tuple[str, str, str | None]:
@@ -2604,6 +2623,8 @@ class FullView(QFrame):
         self.zoom_action.triggered.connect(self._toggle_zoom)
         self.addAction(self.zoom_action)
 
+        self.apply_color_management()
+
     STRIP_FULL = 0
     STRIP_COLLAPSED = 1
     STRIP_HIDDEN = 2
@@ -2967,6 +2988,10 @@ class FullView(QFrame):
         """Обновляет индикатор метки без повторного открытия просмотра."""
         self._update_mark_indicator()
 
+    def apply_color_management(self) -> None:
+        """Передаёт актуальные настройки управления цветом в область просмотра."""
+        self.image_view.set_color_management(_color_management_config(_application_settings()))
+
     def _update_mark_indicator(self) -> None:
         detail = self._mark_detail
         rating = int(detail.get("rating") or 0)
@@ -3167,7 +3192,14 @@ class FullImageView(QWidget):
         # Один пиксмап, вписанный в текущий вьюпорт: пересчитывается только при
         # смене кадра, размера окна или сглаживания, а не на каждый paint.
         self._fitted_pixmap: QPixmap | None = None
-        self._fitted_key: tuple[int, int, int, bool] | None = None
+        self._fitted_key: tuple | None = None
+        # Управление цветом: до прихода настроек коррекция выключена. Профиль
+        # монитора читается лениво и обновляется при переезде окна на другой экран.
+        self._cms_config = ColorManagementConfig(enabled=False)
+        self._display_icc: bytes | None = None
+        self._cms_screen: QScreen | None = None
+        self._cms_zoom_pixmap: QPixmap | None = None
+        self._cms_zoom_key: tuple | None = None
         self._faces: list[dict] = []
         self._hovered_face = -1
         self._zoomed = False
@@ -3197,6 +3229,39 @@ class FullImageView(QWidget):
         self._smooth = smooth
         self._note_mouse_activity()
         self.update()
+
+    def set_color_management(self, config: ColorManagementConfig) -> None:
+        """Применяет настройки управления цветом и перечитывает профиль монитора."""
+        self._cms_config = config
+        self._refresh_display_profile()
+        self._invalidate_cms_cache()
+        self.update()
+
+    def _refresh_display_profile(self) -> None:
+        """Читает ICC-профиль текущего монитора (или ничего, если CMS выключен)."""
+        screen = self.screen()
+        self._cms_screen = screen
+        self._display_icc = (
+            display_profile_bytes(screen, self._cms_config) if self._cms_config.enabled else None
+        )
+
+    def _invalidate_cms_cache(self) -> None:
+        self._fitted_pixmap = None
+        self._fitted_key = None
+        self._cms_zoom_pixmap = None
+        self._cms_zoom_key = None
+
+    def _cms_signature(self) -> tuple:
+        """Хэшируемый ключ текущей коррекции для кэшей вписанного кадра и зума."""
+        icc = self._display_icc
+        return (self._cms_config, len(icc) if icc else 0, hash(icc) if icc else 0)
+
+    def _color_transform(self):
+        """Возвращает transform sRGB → монитор, обновляя профиль при смене экрана."""
+        if self._cms_config.enabled and self.screen() is not self._cms_screen:
+            self._refresh_display_profile()
+            self._invalidate_cms_cache()
+        return srgb_to_display_transform(self._display_icc, self._cms_config)
 
     @property
     def zoomed(self) -> bool:
@@ -3457,7 +3522,7 @@ class FullImageView(QWidget):
             return
         target = self._image_rect()
         if self._zoomed:
-            painter.drawPixmap(target, self._pixmap)
+            self._draw_zoomed(painter, target)
         else:
             painter.drawPixmap(target, self._fitted_for(target.size()))
         if self._zoom_requested and not self._zoomed:
@@ -3475,6 +3540,46 @@ class FullImageView(QWidget):
             painter.drawRoundedRect(face_rect, 4, 4)
         painter.end()
 
+    def _draw_zoomed(self, painter: QPainter, target: QRect) -> None:
+        """Рисует кадр в зуме 1:1, корректируя цвет только видимой области.
+
+        В зуме на экран попадает лишь часть кадра, поэтому CMS применяется к
+        видимому куску вьюпорта, а не ко всему оригиналу — цена коррекции не
+        растёт с мегапикселями. Без активной коррекции рисуем как раньше.
+        """
+        assert self._pixmap is not None
+        transform = self._color_transform()
+        if transform is None:
+            painter.drawPixmap(target, self._pixmap)
+            return
+        visible = target.intersected(self.rect())
+        if visible.isEmpty():
+            return
+        source = QRect(
+            visible.left() - target.left(),
+            visible.top() - target.top(),
+            visible.width(),
+            visible.height(),
+        ).intersected(self._pixmap.rect())
+        if source.isEmpty():
+            return
+        key = (
+            self._pixmap.cacheKey(),
+            source.left(),
+            source.top(),
+            source.width(),
+            source.height(),
+            self._cms_signature(),
+        )
+        if self._cms_zoom_key != key or self._cms_zoom_pixmap is None:
+            corrected = apply_transform_to_qimage(self._pixmap.copy(source).toImage(), transform)
+            self._cms_zoom_pixmap = QPixmap.fromImage(corrected)
+            self._cms_zoom_key = key
+        painter.drawPixmap(
+            QPoint(target.left() + source.left(), target.top() + source.top()),
+            self._cms_zoom_pixmap,
+        )
+
     def _fitted_for(self, target: QSize) -> QPixmap:
         """Возвращает кадр, заранее вписанный в ``target``, из кэша виджета.
 
@@ -3486,7 +3591,14 @@ class FullImageView(QWidget):
         assert self._pixmap is not None
         dpr = self.devicePixelRatioF()
         device_target = (QSizeF(target) * dpr).toSize()
-        key = (self._pixmap.cacheKey(), device_target.width(), device_target.height(), self._smooth)
+        transform = self._color_transform()
+        key = (
+            self._pixmap.cacheKey(),
+            device_target.width(),
+            device_target.height(),
+            self._smooth,
+            self._cms_signature(),
+        )
         if self._fitted_key != key or self._fitted_pixmap is None:
             mode = (
                 Qt.TransformationMode.SmoothTransformation
@@ -3497,6 +3609,12 @@ class FullImageView(QWidget):
                 device_target, Qt.AspectRatioMode.IgnoreAspectRatio, mode
             )
             fitted.setDevicePixelRatio(dpr)
+            if transform is not None:
+                # Коррекция идёт по вписанному кадру (размер вьюпорта), а не по
+                # оригиналу — цена не зависит от мегапикселей исходника.
+                corrected = apply_transform_to_qimage(fitted.toImage(), transform)
+                fitted = QPixmap.fromImage(corrected)
+                fitted.setDevicePixelRatio(dpr)
             self._fitted_pixmap = fitted
             self._fitted_key = key
         return self._fitted_pixmap
@@ -11581,6 +11699,7 @@ class MainWindow(QMainWindow):
                     candidate._reload_hotkeys()
                     candidate._refresh_status_panel()
                     candidate.full_view.refresh_mark_indicator()
+                    candidate.full_view.apply_color_management()
         if workspace.shotsync_client.has_key():
             workspace._sync_code_replacements()
 
