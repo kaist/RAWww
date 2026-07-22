@@ -84,6 +84,7 @@ from .color_management import (
     INTENT_RELATIVE,
     apply_transform_to_qimage,
     display_profile_bytes,
+    os_manages_display_color,
     srgb_to_display_transform,
 )
 from .decode_cache import DecodeCache
@@ -201,7 +202,7 @@ def _application_settings() -> QSettings:
 def _color_management_config(settings: QSettings) -> ColorManagementConfig:
     """Собирает настройки управления цветом полного просмотра из ``QSettings``."""
     return ColorManagementConfig(
-        enabled=settings.value("color_management/enabled", False, bool),
+        enabled=settings.value("color_management/enabled", True, bool),
         intent=settings.value("color_management/intent", INTENT_RELATIVE, int),
         black_point_compensation=settings.value(
             "color_management/black_point_compensation", True, bool
@@ -3238,12 +3239,18 @@ class FullImageView(QWidget):
         self.update()
 
     def _refresh_display_profile(self) -> None:
-        """Читает ICC-профиль текущего монитора (или ничего, если CMS выключен)."""
+        """Читает ICC-профиль текущего монитора (или ничего, если CMS выключен).
+
+        Если цветом дисплея уже управляет ОС (Windows в режиме расширенного
+        цвета/HDR), профиль не берём: там композитор применяет его сам, а наша
+        коррекция дала бы двойное управление цветом.
+        """
         screen = self.screen()
         self._cms_screen = screen
-        self._display_icc = (
-            display_profile_bytes(screen, self._cms_config) if self._cms_config.enabled else None
-        )
+        if not self._cms_config.enabled or os_manages_display_color(screen):
+            self._display_icc = None
+        else:
+            self._display_icc = display_profile_bytes(screen, self._cms_config)
 
     def _invalidate_cms_cache(self) -> None:
         self._fitted_pixmap = None

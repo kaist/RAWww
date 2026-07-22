@@ -70,13 +70,201 @@ def _read_file_bytes(path: str) -> bytes | None:
         return None
 
 
-def _windows_display_profile(screen: QScreen | None) -> bytes | None:
-    """Достаёт ICC-профиль монитора через GDI (``GetICMProfileW``)."""
+#: Константы Windows Color System / DisplayConfig для чтения профиля дисплея.
+_WIN_QDC_ONLY_ACTIVE_PATHS = 2
+_WIN_INFO_GET_SOURCE_NAME = 1
+_WIN_INFO_GET_ADVANCED_COLOR = 9
+_WIN_CPT_ICC = 0
+_WIN_CPST_NONE = 4
+_WIN_CPST_STANDARD_DISPLAY = 7  # SDR-профиль дисплея (для advanced color)
+_WIN_SCOPE_SYSTEM_WIDE = 0
+_WIN_SCOPE_CURRENT_USER = 1
+
+
+def _windows_color_directory() -> str:
+    """Каталог Windows с .icm-профилями (WCS-API отдаёт лишь имя файла)."""
     import ctypes
     from ctypes import wintypes
 
-    name = screen.name() if screen is not None else ""
+    try:
+        mscms = ctypes.WinDLL("mscms")
+        size = wintypes.DWORD(260 * 2)
+        buffer = ctypes.create_unicode_buffer(260)
+        if mscms.GetColorDirectoryW(None, buffer, ctypes.byref(size)):
+            return buffer.value
+    except Exception:
+        pass
+    windir = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.path.join(windir, "System32", "spool", "drivers", "color")
+
+
+def _windows_profile_by_name(name: str) -> bytes | None:
+    """Достраивает путь до профиля (если API вернул только имя) и читает байты."""
+    if not name:
+        return None
+    path = name if os.path.isabs(name) else os.path.join(_windows_color_directory(), name)
+    return _read_file_bytes(path)
+
+
+def _windows_display_target(screen: QScreen | None):
+    """Ищет монитор в DisplayConfig и возвращает ``(adapter_id, source_id, hdr)``.
+
+    ``adapter_id`` — структура ``LUID`` (нужна современному WCS-API), ``source_id``
+    — номер источника, ``hdr`` — включён ли расширенный цвет/HDR. При любой
+    неудаче возвращает ``(None, None, False)``: тогда работают только легаси-пути.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class _LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    class _HEADER(ctypes.Structure):
+        _fields_ = [
+            ("type", wintypes.DWORD), ("size", wintypes.DWORD),
+            ("adapterId", _LUID), ("id", wintypes.DWORD),
+        ]
+
+    class _SOURCE(ctypes.Structure):
+        _fields_ = [("adapterId", _LUID), ("id", wintypes.DWORD), ("modeInfoIdx", wintypes.DWORD), ("statusFlags", wintypes.DWORD)]
+
+    class _TARGET(ctypes.Structure):
+        _fields_ = [
+            ("adapterId", _LUID), ("id", wintypes.DWORD), ("modeInfoIdx", wintypes.DWORD),
+            ("outputTechnology", wintypes.DWORD), ("rotation", wintypes.DWORD), ("scaling", wintypes.DWORD),
+            ("rr_num", wintypes.DWORD), ("rr_den", wintypes.DWORD),
+            ("scanLineOrdering", wintypes.DWORD), ("targetAvailable", wintypes.BOOL), ("statusFlags", wintypes.DWORD),
+        ]
+
+    class _PATH(ctypes.Structure):
+        _fields_ = [("sourceInfo", _SOURCE), ("targetInfo", _TARGET), ("flags", wintypes.DWORD)]
+
+    class _MODE(ctypes.Structure):
+        _fields_ = [("_pad", ctypes.c_byte * 64)]
+
+    class _SOURCE_NAME(ctypes.Structure):
+        _fields_ = [("header", _HEADER), ("viewGdiDeviceName", wintypes.WCHAR * 32)]
+
+    class _ADV_COLOR(ctypes.Structure):
+        _fields_ = [("header", _HEADER), ("value", wintypes.DWORD), ("colorEncoding", wintypes.DWORD), ("bits", wintypes.DWORD)]
+
+    user32 = ctypes.WinDLL("user32")
+    n_path = wintypes.UINT(0)
+    n_mode = wintypes.UINT(0)
+    if user32.GetDisplayConfigBufferSizes(_WIN_QDC_ONLY_ACTIVE_PATHS, ctypes.byref(n_path), ctypes.byref(n_mode)) != 0:
+        return None, None, False
+    paths = (_PATH * n_path.value)()
+    modes = (_MODE * n_mode.value)()
+    if user32.QueryDisplayConfig(_WIN_QDC_ONLY_ACTIVE_PATHS, ctypes.byref(n_path), paths, ctypes.byref(n_mode), modes, None) != 0:
+        return None, None, False
+
+    wanted = screen.name() if screen is not None else ""
+    for index in range(n_path.value):
+        path = paths[index]
+        adapter = path.sourceInfo.adapterId
+        source_id = path.sourceInfo.id
+
+        source_name = _SOURCE_NAME()
+        source_name.header.type = _WIN_INFO_GET_SOURCE_NAME
+        source_name.header.size = ctypes.sizeof(source_name)
+        source_name.header.adapterId = adapter
+        source_name.header.id = source_id
+        gdi_name = source_name.viewGdiDeviceName if user32.DisplayConfigGetDeviceInfo(ctypes.byref(source_name)) == 0 else ""
+
+        # Берём совпавший по имени экран, а без совпадения — первый активный путь.
+        if wanted and gdi_name and gdi_name != wanted:
+            continue
+
+        adv = _ADV_COLOR()
+        adv.header.type = _WIN_INFO_GET_ADVANCED_COLOR
+        adv.header.size = ctypes.sizeof(adv)
+        adv.header.adapterId = adapter
+        adv.header.id = path.targetInfo.id
+        hdr = bool(adv.value & 0x2) if user32.DisplayConfigGetDeviceInfo(ctypes.byref(adv)) == 0 else False
+        return adapter, source_id, hdr
+    return None, None, False
+
+
+def _windows_color_profile_default(adapter, source_id: int, scope: int, subtype: int) -> bytes | None:
+    """Современный ``ColorProfileGetDisplayDefault`` (Win10 21H2+), иначе ``None``."""
+    import ctypes
+    from ctypes import wintypes
+
+    class _LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    try:
+        mscms = ctypes.WinDLL("mscms")
+        mscms.ColorProfileGetDisplayDefault.argtypes = [
+            wintypes.DWORD, _LUID, wintypes.UINT, wintypes.INT, wintypes.INT,
+            ctypes.POINTER(wintypes.LPWSTR),
+        ]
+        mscms.ColorProfileGetDisplayDefault.restype = wintypes.BOOL
+    except (OSError, AttributeError):
+        return None
+    out = wintypes.LPWSTR()
+    try:
+        ok = mscms.ColorProfileGetDisplayDefault(scope, adapter, source_id, _WIN_CPT_ICC, subtype, ctypes.byref(out))
+    except Exception:
+        return None
+    if not ok or not out.value:
+        if out:
+            _windows_local_free(out)
+        return None
+    name = out.value
+    _windows_local_free(out)
+    return _windows_profile_by_name(name)
+
+
+def _windows_local_free(pointer) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.LocalFree.argtypes = [wintypes.LPVOID]
+    kernel32.LocalFree.restype = wintypes.LPVOID
+    kernel32.LocalFree(ctypes.cast(pointer, wintypes.LPVOID))
+
+
+def _windows_wcs_default(name: str, scope: int) -> bytes | None:
+    """WCS ``WcsGetDefaultColorProfile`` для указанного scope, иначе ``None``."""
+    import ctypes
+    from ctypes import wintypes
+
+    try:
+        mscms = ctypes.WinDLL("mscms")
+        mscms.WcsGetDefaultColorProfileSize.argtypes = [
+            wintypes.DWORD, wintypes.LPCWSTR, wintypes.INT, wintypes.INT,
+            wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+        ]
+        mscms.WcsGetDefaultColorProfileSize.restype = wintypes.BOOL
+        mscms.WcsGetDefaultColorProfile.argtypes = [
+            wintypes.DWORD, wintypes.LPCWSTR, wintypes.INT, wintypes.INT,
+            wintypes.DWORD, wintypes.DWORD, wintypes.LPWSTR,
+        ]
+        mscms.WcsGetDefaultColorProfile.restype = wintypes.BOOL
+    except (OSError, AttributeError):
+        return None
+    need = wintypes.DWORD(0)
+    if not mscms.WcsGetDefaultColorProfileSize(scope, name, _WIN_CPT_ICC, _WIN_CPST_NONE, 0, ctypes.byref(need)) or need.value == 0:
+        return None
+    buffer = ctypes.create_unicode_buffer(need.value // 2 + 1)
+    if not mscms.WcsGetDefaultColorProfile(scope, name, _WIN_CPT_ICC, _WIN_CPST_NONE, 0, need, buffer):
+        return None
+    return _windows_profile_by_name(buffer.value)
+
+
+def _windows_geticmprofile(name: str) -> bytes | None:
+    """Легаси-путь GDI ``GetICMProfileW`` — последний фолбэк на старых системах."""
+    import ctypes
+    from ctypes import wintypes
+
     gdi32 = ctypes.WinDLL("gdi32")
+    gdi32.CreateDCW.restype = wintypes.HDC
+    gdi32.CreateDCW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPVOID]
+    gdi32.DeleteDC.argtypes = [wintypes.HDC]
+    gdi32.GetICMProfileW.argtypes = [wintypes.HDC, ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR]
+    gdi32.GetICMProfileW.restype = wintypes.BOOL
     # Имя экрана в Qt на Windows совпадает с device name вида "\\.\DISPLAY1".
     hdc = gdi32.CreateDCW("DISPLAY", name or None, None, None)
     if not hdc:
@@ -84,8 +272,6 @@ def _windows_display_profile(screen: QScreen | None) -> bytes | None:
     if not hdc:
         return None
     try:
-        # GetICMProfileW заполняет путь к файлу профиля; берём буфер с запасом,
-        # чтобы не зависеть от предварительного запроса длины.
         size = wintypes.DWORD(1024)
         buffer = ctypes.create_unicode_buffer(size.value)
         if not gdi32.GetICMProfileW(hdc, ctypes.byref(size), buffer):
@@ -93,6 +279,49 @@ def _windows_display_profile(screen: QScreen | None) -> bytes | None:
         return _read_file_bytes(buffer.value)
     finally:
         gdi32.DeleteDC(hdc)
+
+
+def _windows_display_profile(screen: QScreen | None) -> bytes | None:
+    """Определяет ICC-профиль монитора «по-взрослому»: WCS → GDI.
+
+    Порядок: современный ``ColorProfileGetDisplayDefault`` (учитывает per-user и
+    новые дисплеи) → ``WcsGetDefaultColorProfile`` → легаси ``GetICMProfileW``.
+    В режиме расширенного цвета/HDR все они отдают sRGB — но в этом случае цветом
+    управляет сама Windows, и коррекцию делать не нужно (см. ``os_manages_display_color``).
+    """
+    name = screen.name() if screen is not None else ""
+    adapter, source_id, _hdr = _windows_display_target(screen)
+    if adapter is not None:
+        for scope in (_WIN_SCOPE_CURRENT_USER, _WIN_SCOPE_SYSTEM_WIDE):
+            for subtype in (_WIN_CPST_STANDARD_DISPLAY, _WIN_CPST_NONE):
+                icc = _windows_color_profile_default(adapter, source_id, scope, subtype)
+                if icc is not None:
+                    return icc
+    for scope in (_WIN_SCOPE_CURRENT_USER, _WIN_SCOPE_SYSTEM_WIDE):
+        icc = _windows_wcs_default(name, scope)
+        if icc is not None:
+            return icc
+    return _windows_geticmprofile(name)
+
+
+def _windows_advanced_color_active(screen: QScreen | None) -> bool:
+    """Включён ли на мониторе расширенный цвет/HDR (тогда цветом управляет ОС)."""
+    try:
+        return bool(_windows_display_target(screen)[2])
+    except Exception:
+        return False
+
+
+def os_manages_display_color(screen: QScreen | None) -> bool:
+    """``True``, если ОС сама доводит цвет до монитора и наш CMS применять нельзя.
+
+    Актуально для Windows в режиме расширенного цвета/HDR: там композитор DWM
+    применяет профиль монитора сам, и повторная коррекция в приложении дала бы
+    двойное управление цветом. На остальных ОС всегда ``False``.
+    """
+    if sys.platform != "win32":
+        return False
+    return _windows_advanced_color_active(screen)
 
 
 def _macos_display_profile(screen: QScreen | None) -> bytes | None:

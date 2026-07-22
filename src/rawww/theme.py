@@ -420,6 +420,10 @@ def apply_theme(app: QApplication) -> None:
             border: 1px solid #3c3c3c;
             border-radius: 7px;
         }
+        QFrame#externalEditorCard QLabel,
+        QFrame#externalEditorCard QCheckBox {
+            background: transparent;
+        }
         QLabel#externalEditorTitle {
             color: #eeeeee;
             font-size: 14px;
