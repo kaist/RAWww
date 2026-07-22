@@ -595,32 +595,40 @@ class SettingsDialog(QDialog):
         return tab
 
     def _add_color_management_section(self, layout: QVBoxLayout) -> None:
-        """Добавляет управление цветом полного просмотра в стиле остальной вкладки.
+        """Добавляет карточку управления цветом полного просмотра.
 
-        Раздел кладётся прямо в layout вкладки без отдельной карточки-подложки:
-        заголовок и подсказки используют те же стили, что и другие настройки, а
-        профиль монитора выбирается кнопками — так не появляется поле ввода с
-        чужим фоном. Строка статуса показывает, какой профиль сейчас активен.
+        Окантовка блока сохранена в стиле остальных карточек диалога
+        (``externalEditorCard``). Внутренние элементы используют только глобально
+        стилизованные виджеты (подписи, комбобокс, кнопки), чтобы на вкладке
+        «Интерфейс» не всплывали дефолтные подложки Qt: прежние поля
+        ``editorExecutable``/``editorBrowseButton`` стилизованы лишь для
+        ``behaviorTabPage`` и на этой вкладке выглядели чужеродно. Строка статуса
+        показывает, какой профиль монитора сейчас активен.
         """
-        layout.addSpacing(6)
+        card = QFrame()
+        card.setObjectName("externalEditorCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(14, 13, 14, 14)
+        card_layout.setSpacing(7)
+
         heading = QLabel(_("Управление цветом"))
-        heading.setObjectName("settingsSectionTitle")
-        layout.addWidget(heading)
+        heading.setObjectName("externalEditorTitle")
+        card_layout.addWidget(heading)
         hint = QLabel(
             _("Переводит кадр в полном просмотре в ICC-профиль монитора — для точных "
             "цветов на калиброванном или широкогамутном дисплее.")
         )
-        hint.setObjectName("settingsHint")
+        hint.setObjectName("externalEditorHint")
         hint.setWordWrap(True)
-        layout.addWidget(hint)
+        card_layout.addWidget(hint)
 
         self.cms_enabled = SettingsCheckBox(_("Управление цветом (ICC)"))
         self.cms_enabled.setChecked(self.settings.value("color_management/enabled", False, bool))
-        layout.addWidget(self.cms_enabled)
+        card_layout.addWidget(self.cms_enabled)
 
         intent_label = QLabel(_("Цель цветопередачи (rendering intent)"))
-        intent_label.setObjectName("settingsHint")
-        layout.addWidget(intent_label)
+        intent_label.setObjectName("externalEditorHint")
+        card_layout.addWidget(intent_label)
         self.cms_intent = QComboBox()
         self.cms_intent.addItem(_("Относительный колориметрический"), INTENT_RELATIVE)
         self.cms_intent.addItem(_("Перцепционный"), INTENT_PERCEPTUAL)
@@ -629,21 +637,21 @@ class SettingsDialog(QDialog):
         stored_intent = self.settings.value("color_management/intent", INTENT_RELATIVE, int)
         intent_index = self.cms_intent.findData(stored_intent)
         self.cms_intent.setCurrentIndex(intent_index if intent_index >= 0 else 0)
-        layout.addWidget(self.cms_intent)
+        card_layout.addWidget(self.cms_intent)
 
         self.cms_bpc = SettingsCheckBox(_("Компенсация чёрной точки"))
         self.cms_bpc.setChecked(
             self.settings.value("color_management/black_point_compensation", True, bool)
         )
-        layout.addWidget(self.cms_bpc)
+        card_layout.addWidget(self.cms_bpc)
 
         profile_label = QLabel(_("Профиль монитора"))
-        profile_label.setObjectName("settingsHint")
-        layout.addWidget(profile_label)
+        profile_label.setObjectName("externalEditorHint")
+        card_layout.addWidget(profile_label)
         self.cms_profile_status = QLabel()
-        self.cms_profile_status.setObjectName("settingsHint")
+        self.cms_profile_status.setObjectName("externalEditorHint")
         self.cms_profile_status.setWordWrap(True)
-        layout.addWidget(self.cms_profile_status)
+        card_layout.addWidget(self.cms_profile_status)
 
         self._cms_manual_profile = self.settings.value("color_management/monitor_profile", "", str)
         button_row = QHBoxLayout()
@@ -657,7 +665,9 @@ class SettingsDialog(QDialog):
         self.cms_reset_profile.clicked.connect(self._reset_monitor_profile)
         button_row.addWidget(self.cms_reset_profile)
         button_row.addStretch(1)
-        layout.addLayout(button_row)
+        card_layout.addLayout(button_row)
+
+        layout.addWidget(card)
 
         self._cms_dependent = [self.cms_intent, self.cms_bpc, self.cms_choose_profile]
         self.cms_enabled.toggled.connect(self._update_cms_profile_status)
