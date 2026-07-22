@@ -136,17 +136,17 @@ jobs:
           PLIST
           chmod +x "dist/ctrlka.app/Contents/MacOS/ctrlka"
           # Ad-hoc подпись каждого Mach-O по отдельности: на Apple Silicon
-          # неподписанный код не запускается. Запечатать бандл целиком нельзя —
-          # библиотеки PyInstaller лежат внутри Contents/MacOS (например каталог
-          # bin/PIL/.dylibs), а codesign отвергает такой layout при запечатывании.
-          # Поэтому подписываем сами бинарники, главный исполняемый — последним.
+          # неподписанный код не запускается. Бандл целиком не трогаем — библиотеки
+          # PyInstaller лежат внутри Contents/MacOS (например bin/PIL/.dylibs и
+          # bin/base_library.zip), и codesign отвергает такой layout. По той же
+          # причине не делаем codesign --verify по главному exe: проверка
+          # резолвится на весь бандл и падает на неподписанном base_library.zip
+          # (это архив стдлиба Python, подпись ему не нужна).
           while IFS= read -r -d '' file; do
             if file "$file" | grep -q 'Mach-O'; then
               codesign --force --sign - "$file"
             fi
           done < <(find "dist/ctrlka.app/Contents/MacOS" -type f)
-          codesign --force --sign - "dist/ctrlka.app/Contents/MacOS/ctrlka"
-          codesign --verify --strict "dist/ctrlka.app/Contents/MacOS/ctrlka"
           # -fs HFS+ обязателен: без него hdiutil на macOS 14/15 создаёт APFS-образ,
           # который не монтируется на более старых версиях macOS.
           hdiutil create -volname Контролька -srcfolder "dist/ctrlka.app" -fs HFS+ -ov -format UDZO "dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"
