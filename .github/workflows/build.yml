@@ -1,6 +1,9 @@
 name: Build desktop packages
 
 on:
+  push:
+    branches:
+      - devin/1784810648-macos-launch-diagnostics
   workflow_dispatch:
     inputs:
       create_release:
@@ -108,6 +111,35 @@ jobs:
         if: runner.os == 'macOS'
         # PAR::Packer создаёт вложенный загрузчик и требует управляющий терминал.
         run: script -q /dev/null uv run python scripts/build_pyinstaller.py
+
+      - name: PROBE native PyInstaller .app layout
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -x
+          echo "== верхний уровень dist =="
+          ls -la dist
+          echo "== структура ctrlka.app (3 уровня) =="
+          find dist/ctrlka.app -maxdepth 3 -print | head -120 || true
+          echo "== где лежит data/assets =="
+          find dist/ctrlka.app -type d -name assets | head || true
+          find dist/ctrlka.app -type d -name data | head || true
+          echo "== Info.plist =="
+          cat dist/ctrlka.app/Contents/Info.plist || true
+          echo "== подпись, как её сделал PyInstaller =="
+          codesign --display --verbose=4 dist/ctrlka.app 2>&1 | head -40 || true
+          codesign --verify --deep --strict --verbose=4 dist/ctrlka.app 2>&1 | head -40 || true
+          echo "== реальный запуск нативного .app (offscreen) =="
+          QT_QPA_PLATFORM=offscreen RAWWW_CAPTURE_SCREENSHOT="$RUNNER_TEMP/native.png" dist/ctrlka.app/Contents/MacOS/ctrlka 2>&1 | tail -40 &
+          pid=$!
+          launched=0
+          for _ in $(seq 1 15); do
+            [ -s "$RUNNER_TEMP/native.png" ] && { launched=1; break; }
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          kill "$pid" 2>/dev/null || true
+          echo "PROBE launched=$launched"
 
       - name: Smoke-test macOS application
         if: runner.os == 'macOS'
