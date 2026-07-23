@@ -1,9 +1,6 @@
 name: Build desktop packages
 
 on:
-  push:
-    branches:
-      - devin/1784810648-macos-launch-diagnostics
   workflow_dispatch:
     inputs:
       create_release:
