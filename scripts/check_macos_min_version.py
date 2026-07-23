@@ -23,7 +23,13 @@ import sys
 from pathlib import Path
 
 
-VERSION_LINE = re.compile(r"^\s*(minos|version)\s+(\d+)\.(\d+)(?:\.(\d+))?\s*$")
+CMD_LINE = re.compile(r"^\s*cmd\s+(LC_\w+)\s*$")
+PLATFORM_LINE = re.compile(r"^\s*platform\s+(\d+)\s*$")
+# minos — поле LC_BUILD_VERSION, version — поле LC_VERSION_MIN_MACOSX. Другие
+# команды (LC_SOURCE_VERSION, current/compatibility version у LC_ID_DYLIB) тоже
+# содержат слово version, поэтому читаем поле только внутри нужной команды.
+FIELD_LINE = re.compile(r"^\s*(minos|version)\s+(\d+)\.(\d+)(?:\.(\d+))?\s*$")
+PLATFORM_MACOS = 1
 
 
 def _iter_macho(bundle: Path):
@@ -44,13 +50,31 @@ def _min_macos(path: Path) -> tuple[int, int] | None:
         ["otool", "-l", str(path)], capture_output=True, text=True
     ).stdout
     best: tuple[int, int] | None = None
+    current_cmd: str | None = None
+    is_macos = True  # LC_VERSION_MIN_MACOSX без поля platform — всегда macOS
     for line in dump.splitlines():
-        match = VERSION_LINE.match(line)
-        if match:
-            found = (int(match.group(2)), int(match.group(3)))
-            # Для файла берём наибольшее требование среди всех архитектур/команд.
-            if best is None or found > best:
-                best = found
+        cmd = CMD_LINE.match(line)
+        if cmd:
+            current_cmd = cmd.group(1)
+            is_macos = current_cmd == "LC_VERSION_MIN_MACOSX"
+            continue
+        platform = PLATFORM_LINE.match(line)
+        if platform and current_cmd == "LC_BUILD_VERSION":
+            is_macos = int(platform.group(1)) == PLATFORM_MACOS
+            continue
+        field = FIELD_LINE.match(line)
+        if not field:
+            continue
+        key = field.group(1)
+        relevant = (key == "minos" and current_cmd == "LC_BUILD_VERSION") or (
+            key == "version" and current_cmd == "LC_VERSION_MIN_MACOSX"
+        )
+        if not (relevant and is_macos):
+            continue
+        found = (int(field.group(2)), int(field.group(3)))
+        # Для файла берём наибольшее требование среди всех архитектур/команд.
+        if best is None or found > best:
+            best = found
     return best
 
 
