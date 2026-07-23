@@ -28,9 +28,15 @@ jobs:
           - name: macOS Apple Silicon DMG
             os: macos-14
             macos_arch: arm64
+            # arm-раннеров старше macos-14 у GitHub нет, а arm-колёса numpy
+            # начинаются с macOS 14, поэтому фактический минимум на Apple Silicon — 14.
+            macos_min: "14.0"
           - name: macOS Intel DMG
-            os: macos-15-intel
+            # Собираем на самом старом Intel-раннере: тогда pip берёт «низкие»
+            # колёса (numpy 10.13 и т.п.), а не собранные под macOS 14/15.
+            os: macos-13
             macos_arch: intel
+            macos_min: "13.0"
           - name: Linux AppImage
             os: ubuntu-22.04
 
@@ -110,6 +116,10 @@ jobs:
       - name: Build macOS application
         if: runner.os == 'macOS'
         # PAR::Packer создаёт вложенный загрузчик и требует управляющий терминал.
+        # MACOSX_DEPLOYMENT_TARGET фиксирует минимум для того, что компилируется на
+        # раннере (ExifTool через PAR::Packer), чтобы оно не целилось в SDK раннера.
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
         run: script -q /dev/null uv run python scripts/build_pyinstaller.py
 
       - name: Check macOS minimum deployment version
@@ -117,8 +127,8 @@ jobs:
         # Ловит регрессию совместимости: колёса (PySide6/shiboken) могут быть
         # собраны под слишком новую macOS и падать у пользователя на старой
         # («Symbol not found … Expected in: /usr/lib/libc++.1.dylib»). onnxruntime
-        # не грузится при старте — по нему только предупреждаем.
-        run: uv run python scripts/check_macos_min_version.py dist/ctrlka.app --max-version 11.0 --ignore onnxruntime
+        # не грузится при старте (AI-функции ленивые) — по нему только предупреждаем.
+        run: uv run python scripts/check_macos_min_version.py dist/ctrlka.app --max-version ${{ matrix.macos_min }} --ignore onnxruntime
 
       - name: Smoke-test macOS application
         if: runner.os == 'macOS'
