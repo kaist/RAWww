@@ -27,6 +27,13 @@ def work_path() -> Path:
 
 def data_path(name: str) -> Path:
     if getattr(sys, "frozen", False):
+        # На macOS готовое приложение — это .app: исполняемый файл лежит в
+        # Contents/MacOS, а собранные ресурсы — в Contents/Frameworks
+        # (``sys._MEIPASS``), откуда PyInstaller симлинкует ``data`` в
+        # Contents/Resources. На Windows и Linux сборка кладёт ``data`` рядом с
+        # исполняемым файлом, поэтому там ориентир — его каталог.
+        if sys.platform == "darwin":
+            return Path(sys._MEIPASS) / "data" / name  # type: ignore[attr-defined]
         return Path(sys.executable).resolve().parent / "data" / name
     return Path(__file__).with_name(name)
 

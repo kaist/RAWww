@@ -112,63 +112,17 @@ jobs:
         # PAR::Packer создаёт вложенный загрузчик и требует управляющий терминал.
         run: script -q /dev/null uv run python scripts/build_pyinstaller.py
 
-      - name: PROBE native PyInstaller .app layout
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -x
-          echo "== достижимо ли data через _MEIPASS (Frameworks) =="
-          ls -la "dist/ctrlka.app/Contents/Frameworks" | grep -iE " data| _MEI| Resources" || true
-          ls -ld "dist/ctrlka.app/Contents/Frameworks/data" || true
-          readlink "dist/ctrlka.app/Contents/Frameworks/data" || true
-          ls "dist/ctrlka.app/Contents/Frameworks/data/assets" | head || true
-          echo "== есть ли уже exiftool в .app =="
-          find dist/ctrlka.app -name 'exiftool*' | head || true
-          ls -la "dist/ctrlka.app/Contents/Resources/data/tools" | head || true
-          echo "== проверка подписи нативного .app (код возврата важен) =="
-          codesign --verify --deep --strict --verbose=2 dist/ctrlka.app; echo "VERIFY_RC=$?"
-          spctl -a -t exec -vvv dist/ctrlka.app; echo "SPCTL_RC=$?"
-          echo "== содержимое Resources/data =="
-          ls -la "dist/ctrlka.app/Contents/Resources/data" || true
-
       - name: Smoke-test macOS application
         if: runner.os == 'macOS'
-        run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka --screenshot dist/ctrlka-startup.png
+        run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka.app --screenshot dist/ctrlka-startup.png
 
       - name: Build macOS DMG
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          # Собираем бандл с нуля: PyInstaller уже создаёт запечатанный
-          # dist/ctrlka.app, и копирование onedir поверх оставило бы
-          # рассогласованную подпись (_CodeSignature) и лишнюю копию файлов.
-          rm -rf "dist/ctrlka.app"
-          mkdir -p "dist/ctrlka.app/Contents/MacOS"
-          cp -R dist/ctrlka/. "dist/ctrlka.app/Contents/MacOS/"
-          cat > "dist/ctrlka.app/Contents/Info.plist" <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-          <key>CFBundleExecutable</key><string>ctrlka</string>
-          <key>CFBundleIdentifier</key><string>ru.ctrlka.app</string>
-          <key>CFBundleName</key><string>Контролька</string>
-          <key>CFBundlePackageType</key><string>APPL</string>
-          <key>CFBundleVersion</key><string>1.0</string>
-          </dict></plist>
-          PLIST
-          chmod +x "dist/ctrlka.app/Contents/MacOS/ctrlka"
-          # Ad-hoc подпись каждого Mach-O по отдельности: на Apple Silicon
-          # неподписанный код не запускается. Бандл целиком не трогаем — библиотеки
-          # PyInstaller лежат внутри Contents/MacOS (например bin/PIL/.dylibs и
-          # bin/base_library.zip), и codesign отвергает такой layout. По той же
-          # причине не делаем codesign --verify по главному exe: проверка
-          # резолвится на весь бандл и падает на неподписанном base_library.zip
-          # (это архив стдлиба Python, подпись ему не нужна).
-          while IFS= read -r -d '' file; do
-            if file "$file" | grep -q 'Mach-O'; then
-              codesign --force --sign - "$file"
-            fi
-          done < <(find "dist/ctrlka.app/Contents/MacOS" -type f)
+          # Раздаём нативный .app от PyInstaller: правильный layout
+          # (Contents/MacOS + Contents/Frameworks) и цельная ad-hoc подпись,
+          # доведённые build_pyinstaller.py. Больше ничего вручную не собираем.
           # -fs HFS+ обязателен: без него hdiutil на macOS 14/15 создаёт APFS-образ,
           # который не монтируется на более старых версиях macOS.
           hdiutil create -volname Контролька -srcfolder "dist/ctrlka.app" -fs HFS+ -ov -format UDZO "dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"
@@ -176,10 +130,9 @@ jobs:
       - name: Verify macOS DMG launches like a real user
         if: runner.os == 'macOS'
         shell: bash
-        # Дымовой тест выше запускает распакованный onedir-бинарник напрямую и в
-        # offscreen-режиме, поэтому не проходит через Gatekeeper, обёртку .app и
-        # проверку подписи — ровно тот путь, на котором у пользователей «ничего не
-        # происходит». Здесь воспроизводим пользовательский путь по итоговому DMG.
+        # Постоянный сторож: воспроизводит пользовательский путь по итоговому DMG
+        # (карантин → монтирование → копирование .app → запуск), которого не даёт
+        # дымовой тест. Именно на этом пути раньше «ничего не происходило».
         run: |
           set -x
           dmg="dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"

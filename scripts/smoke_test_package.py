@@ -20,7 +20,20 @@ JPEG_SAMPLE = b"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkS
 
 
 def _bundled_paths(app_directory: Path) -> tuple[Path, Path]:
-    """Находит исполняемый файл приложения и его ExifTool в готовом каталоге."""
+    """Находит исполняемый файл приложения и его ExifTool в готовом каталоге.
+
+    Поддерживает и onedir-каталог (Windows/Linux), и macOS-бандл ``.app``, где
+    исполняемый файл лежит в ``Contents/MacOS``, а собранные ресурсы — в
+    ``Contents/Resources/data``.
+    """
+    if app_directory.suffix == ".app":
+        app = app_directory / "Contents" / "MacOS" / "ctrlka"
+        exiftool = app_directory / "Contents" / "Resources" / "data" / "tools" / "exiftool"
+        if not app.is_file():
+            raise RuntimeError(f"Application executable is missing: {app}")
+        if not exiftool.is_file():
+            raise RuntimeError(f"Bundled ExifTool is missing: {exiftool}")
+        return app, exiftool
     app = app_directory / ("ctrlka.exe" if os.name == "nt" else "ctrlka")
     exiftool = app_directory / "data" / "tools" / ("exiftool.exe" if os.name == "nt" else "exiftool")
     if not app.is_file():
