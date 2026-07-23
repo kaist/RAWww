@@ -111,45 +111,65 @@ jobs:
 
       - name: Smoke-test macOS application
         if: runner.os == 'macOS'
-        run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka --screenshot dist/ctrlka-startup.png
+        run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka.app --screenshot dist/ctrlka-startup.png
 
       - name: Build macOS DMG
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          # Собираем бандл с нуля: PyInstaller уже создаёт запечатанный
-          # dist/ctrlka.app, и копирование onedir поверх оставило бы
-          # рассогласованную подпись (_CodeSignature) и лишнюю копию файлов.
-          rm -rf "dist/ctrlka.app"
-          mkdir -p "dist/ctrlka.app/Contents/MacOS"
-          cp -R dist/ctrlka/. "dist/ctrlka.app/Contents/MacOS/"
-          cat > "dist/ctrlka.app/Contents/Info.plist" <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-          <key>CFBundleExecutable</key><string>ctrlka</string>
-          <key>CFBundleIdentifier</key><string>ru.ctrlka.app</string>
-          <key>CFBundleName</key><string>Контролька</string>
-          <key>CFBundlePackageType</key><string>APPL</string>
-          <key>CFBundleVersion</key><string>1.0</string>
-          </dict></plist>
-          PLIST
-          chmod +x "dist/ctrlka.app/Contents/MacOS/ctrlka"
-          # Ad-hoc подпись каждого Mach-O по отдельности: на Apple Silicon
-          # неподписанный код не запускается. Бандл целиком не трогаем — библиотеки
-          # PyInstaller лежат внутри Contents/MacOS (например bin/PIL/.dylibs и
-          # bin/base_library.zip), и codesign отвергает такой layout. По той же
-          # причине не делаем codesign --verify по главному exe: проверка
-          # резолвится на весь бандл и падает на неподписанном base_library.zip
-          # (это архив стдлиба Python, подпись ему не нужна).
-          while IFS= read -r -d '' file; do
-            if file "$file" | grep -q 'Mach-O'; then
-              codesign --force --sign - "$file"
-            fi
-          done < <(find "dist/ctrlka.app/Contents/MacOS" -type f)
+          # Раздаём нативный .app от PyInstaller: правильный layout
+          # (Contents/MacOS + Contents/Frameworks) и цельная ad-hoc подпись,
+          # доведённые build_pyinstaller.py. Больше ничего вручную не собираем.
           # -fs HFS+ обязателен: без него hdiutil на macOS 14/15 создаёт APFS-образ,
           # который не монтируется на более старых версиях macOS.
           hdiutil create -volname Контролька -srcfolder "dist/ctrlka.app" -fs HFS+ -ov -format UDZO "dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"
+
+      - name: Verify macOS DMG launches like a real user
+        if: runner.os == 'macOS'
+        shell: bash
+        # Постоянный сторож: воспроизводит пользовательский путь по итоговому DMG
+        # (карантин → монтирование → копирование .app → запуск), которого не даёт
+        # дымовой тест. Именно на этом пути раньше «ничего не происходило».
+        run: |
+          set -x
+          dmg="dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"
+          # Помечаем DMG карантином, как это делает браузер при скачивании.
+          xattr -w com.apple.quarantine "0181;00000000;Safari;00000000-0000-0000-0000-000000000000" "$dmg" || true
+          mount_dir="$(mktemp -d)"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir"
+          app_dir="$RUNNER_TEMP/ctrlka-installed.app"
+          rm -rf "$app_dir"
+          # Копируем .app из образа, как пользователь перетаскивает его в Applications.
+          cp -R "$mount_dir/ctrlka.app" "$app_dir"
+          hdiutil detach "$mount_dir"
+
+          echo "== Оценка Gatekeeper (spctl) =="
+          spctl -a -t exec -vvv "$app_dir" || true
+          echo "== Проверка подписи бандла =="
+          codesign --verify --deep --strict --verbose=4 "$app_dir" || true
+          echo "== Подпись главного исполняемого файла =="
+          codesign --display --verbose=4 "$app_dir/Contents/MacOS/ctrlka" || true
+
+          echo "== Запуск подписанного бандла =="
+          # Снимаем карантин — это эквивалент кнопки «Открыть всё равно».
+          xattr -dr com.apple.quarantine "$app_dir" || true
+          exec_path="$app_dir/Contents/MacOS/ctrlka"
+          QT_QPA_PLATFORM=offscreen RAWWW_CAPTURE_SCREENSHOT="$RUNNER_TEMP/launch.png" "$exec_path" &
+          pid=$!
+          launched=0
+          for _ in $(seq 1 15); do
+            if [ -s "$RUNNER_TEMP/launch.png" ]; then launched=1; break; fi
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          if kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+          if [ "$launched" != 1 ]; then
+            echo "ЗАПУСК ПРОВАЛЕН: подписанный бандл не дошёл до отрисовки"
+            echo "== Системные причины (kernel/amfid/taskgated) за 3 мин =="
+            log show --last 3m --predicate 'process == "kernel" OR process == "amfid" OR process == "taskgated" OR process == "syspolicyd"' --style compact 2>/dev/null | grep -iE "ctrlka|amfi|codesign|invalid|kill" | tail -60 || true
+            exit 1
+          fi
+          echo "ЗАПУСК OK: подписанный бандл отрисовал стартовый экран"
 
       - name: Build Linux application
         if: runner.os == 'Linux'
