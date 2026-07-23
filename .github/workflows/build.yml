@@ -117,29 +117,19 @@ jobs:
         shell: bash
         run: |
           set -x
-          echo "== верхний уровень dist =="
-          ls -la dist
-          echo "== структура ctrlka.app (3 уровня) =="
-          find dist/ctrlka.app -maxdepth 3 -print | head -120 || true
-          echo "== где лежит data/assets =="
-          find dist/ctrlka.app -type d -name assets | head || true
-          find dist/ctrlka.app -type d -name data | head || true
-          echo "== Info.plist =="
-          cat dist/ctrlka.app/Contents/Info.plist || true
-          echo "== подпись, как её сделал PyInstaller =="
-          codesign --display --verbose=4 dist/ctrlka.app 2>&1 | head -40 || true
-          codesign --verify --deep --strict --verbose=4 dist/ctrlka.app 2>&1 | head -40 || true
-          echo "== реальный запуск нативного .app (offscreen) =="
-          QT_QPA_PLATFORM=offscreen RAWWW_CAPTURE_SCREENSHOT="$RUNNER_TEMP/native.png" dist/ctrlka.app/Contents/MacOS/ctrlka 2>&1 | tail -40 &
-          pid=$!
-          launched=0
-          for _ in $(seq 1 15); do
-            [ -s "$RUNNER_TEMP/native.png" ] && { launched=1; break; }
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 1
-          done
-          kill "$pid" 2>/dev/null || true
-          echo "PROBE launched=$launched"
+          echo "== достижимо ли data через _MEIPASS (Frameworks) =="
+          ls -la "dist/ctrlka.app/Contents/Frameworks" | grep -iE " data| _MEI| Resources" || true
+          ls -ld "dist/ctrlka.app/Contents/Frameworks/data" || true
+          readlink "dist/ctrlka.app/Contents/Frameworks/data" || true
+          ls "dist/ctrlka.app/Contents/Frameworks/data/assets" | head || true
+          echo "== есть ли уже exiftool в .app =="
+          find dist/ctrlka.app -name 'exiftool*' | head || true
+          ls -la "dist/ctrlka.app/Contents/Resources/data/tools" | head || true
+          echo "== проверка подписи нативного .app (код возврата важен) =="
+          codesign --verify --deep --strict --verbose=2 dist/ctrlka.app; echo "VERIFY_RC=$?"
+          spctl -a -t exec -vvv dist/ctrlka.app; echo "SPCTL_RC=$?"
+          echo "== содержимое Resources/data =="
+          ls -la "dist/ctrlka.app/Contents/Resources/data" || true
 
       - name: Smoke-test macOS application
         if: runner.os == 'macOS'
