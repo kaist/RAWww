@@ -14,7 +14,10 @@ dependencies = [
     "onnxruntime>=1.23.0 ; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "pillow>=12.3.0",
     "pyobjc-framework-cocoa>=12.2.1 ; sys_platform == 'darwin'",
-    "pyside6-addons>=6.11.1",
+    # PySide6 6.8+ требует macOS 12, 6.10+ — macOS 13 (а фактически dylib собран
+    # под macOS 15). Последняя серия с колёсами под macOS 11 — 6.7.x, поэтому
+    # фиксируем 6.7.3, чтобы собранный .app запускался на macOS 11+.
+    "pyside6-addons==6.7.3",
     "rawpy>=0.27.0",
     "send2trash>=2.1.0",
     "threadpoolctl>=3.6.0",
