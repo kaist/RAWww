@@ -19,7 +19,7 @@ from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMenu, QStackedWidget, QWidget
 
-from rawww.app import ChromeTabBar, FullView, MainWindow, Workspace, _application_settings, _format_remaining_time, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_xmp_task
+from rawww.app import ChromeTabBar, FullView, MainWindow, Workspace, _application_settings, _drive_key, _format_remaining_time, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_xmp_task
 from rawww.hotkeys import FIXED_HOTKEYS
 from rawww.theme import apply_theme
 
@@ -657,6 +657,60 @@ class AppStateTests(unittest.TestCase):
             self.assertEqual(window.workspace_stack.currentWidget().current_dir, Path(directory))
             window.close()
             window.deleteLater()
+
+    def test_dropping_folders_into_favorites_adds_them_without_duplicates(self) -> None:
+        """Сброс папок в список избранного добавляет их, пропуская уже сохранённые."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            workspace = Workspace(defer_initial_scan=True)
+            before = workspace.favorites_list.count()
+
+            workspace._add_folders_to_favorites([first, second, first])
+
+            stored = {
+                workspace.favorites_list.item(row).data(Qt.ItemDataRole.UserRole)
+                for row in range(workspace.favorites_list.count())
+            }
+            self.assertIn(str(first), stored)
+            self.assertIn(str(second), stored)
+            self.assertEqual(workspace.favorites_list.count(), before + 2)
+
+            workspace._add_folders_to_favorites([first])
+            self.assertEqual(workspace.favorites_list.count(), before + 2)
+            workspace.close()
+            workspace.deleteLater()
+
+    def test_dropping_folders_on_tab_bar_opens_new_tabs(self) -> None:
+        """Папки, брошенные на пустое место панели вкладок, открываются каждая в своей вкладке."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "a"
+            second = root / "b"
+            first.mkdir()
+            second.mkdir()
+            window = MainWindow()
+            before = window.tabs.count()
+
+            window._open_folders_in_new_tabs([first, second])
+            self.assertEqual(window.tabs.count(), before + 2)
+
+            window._open_folders_in_new_tabs([first])
+            self.assertEqual(window.tabs.count(), before + 2)
+            window.close()
+            window.deleteLater()
+
+    @unittest.skipIf(os.name == "nt", "Проверяется POSIX-идентификатор тома")
+    def test_posix_volume_keys_are_distinct_per_mount_point(self) -> None:
+        """На POSIX якорь у всех путей общий, поэтому ключ тома берётся из точки монтирования."""
+        self.assertNotEqual(_drive_key(Path("/")), _drive_key(Path("/Volumes/CARD")))
+        self.assertNotEqual(
+            _drive_key(Path("/media/user/A")),
+            _drive_key(Path("/media/user/B")),
+        )
 
     @unittest.skipUnless(os.name == "nt", "Системное меню Проводника есть только в Windows")
     def test_photo_context_menu_uses_windows_shell(self) -> None:

@@ -3739,7 +3739,14 @@ class DirectoryTree(_SmoothScrollMixin, QTreeView):
 
 
 class FavoritesList(_SmoothScrollMixin, QListWidget):
-    """Переупорядочиваемый список, в котором при перетаскивании отображается путь к папке."""
+    """Переупорядочиваемый список, в котором при перетаскивании отображается путь к папке.
+
+    Кроме внутреннего переупорядочивания список принимает папки, брошенные извне
+    (из дерева, сетки или файлового менеджера), и просит координатора добавить их
+    в избранное сигналом ``foldersDropped``.
+    """
+
+    foldersDropped = Signal(object)   # список папок, брошенных в избранное извне
 
     def __init__(self) -> None:
         super().__init__()
@@ -3761,6 +3768,36 @@ class FavoritesList(_SmoothScrollMixin, QListWidget):
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.MoveAction)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.source() is self:
+            super().dragEnterEvent(event)
+            return
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if event.source() is self:
+            super().dragMoveEvent(event)
+            return
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        # Своё перетаскивание — это переупорядочивание, его выполняет модель.
+        if event.source() is self:
+            super().dropEvent(event)
+            return
+        folders = [path for path in _local_paths_from_mime(event.mimeData()) if path.is_dir()]
+        if folders:
+            self.foldersDropped.emit(folders)
+            event.acceptProposedAction()
+            return
+        event.ignore()
 
 
 class FavoritesSplitterHandle(QSplitterHandle):
@@ -3942,6 +3979,7 @@ class ChromeTabBar(QTabBar):
     """
     closeRequested = Signal(int)
     pathsDropped = Signal(object, int, object)   # пути, индекс табуляции, действие
+    foldersDropped = Signal(object)   # папки, брошенные на пустое место панели
 
     def __init__(self) -> None:
         super().__init__()
@@ -3956,20 +3994,29 @@ class ChromeTabBar(QTabBar):
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # noqa: N802
-        if event.mimeData().hasUrls() and self.tabAt(event.position().toPoint()) >= 0:
+        # Над вкладкой — сброс в её папку, на пустом месте — открытие новой.
+        if event.mimeData().hasUrls():
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dropEvent(self, event) -> None:  # noqa: N802
         paths = _local_paths_from_mime(event.mimeData())
-        index = self.tabAt(event.position().toPoint())
-        if not paths or index < 0:
+        if not paths:
             event.ignore()
             return
-        action = event.proposedAction() if event.mimeData().hasFormat("application/x-rawww-drag") else Qt.DropAction.CopyAction
-        self.pathsDropped.emit(paths, index, action)
-        event.acceptProposedAction()
+        index = self.tabAt(event.position().toPoint())
+        if index >= 0:
+            action = event.proposedAction() if event.mimeData().hasFormat("application/x-rawww-drag") else Qt.DropAction.CopyAction
+            self.pathsDropped.emit(paths, index, action)
+            event.acceptProposedAction()
+            return
+        folders = [path for path in paths if path.is_dir()]
+        if folders:
+            self.foldersDropped.emit(folders)
+            event.acceptProposedAction()
+            return
+        event.ignore()
 
     def tabSizeHint(self, index: int) -> QSize:  # noqa: N802
         return QSize(self._tab_width, 38)
@@ -5018,6 +5065,7 @@ class Workspace(QMainWindow):
         self.favorites_list = FavoritesList()
         self.favorites_list.itemActivated.connect(self._open_favorite)
         self.favorites_list.itemClicked.connect(self._open_favorite)
+        self.favorites_list.foldersDropped.connect(self._add_folders_to_favorites)
         self.favorites_list.model().rowsMoved.connect(lambda *_: self._save_favorites())
         favorites_layout.addWidget(self.favorites_list, 1)
         self._load_favorites()
@@ -5907,21 +5955,47 @@ class Workspace(QMainWindow):
         if hasattr(self, "favorites_panel") and self.favorites_panel.height() >= 48:
             self.settings.setValue("sidebar/favorites_height", self.favorites_panel.height())
 
-    def _add_current_directory_to_favorites(self) -> None:
-        path = self.current_dir
-        if not path.is_dir():
-            return
+    def _favorite_item_for_path(self, path: Path) -> QListWidgetItem | None:
+        """Ищет пункт избранного с тем же путём, что и ``path``."""
         path_key = self._favorite_path_key(path)
         for row in range(self.favorites_list.count()):
             item = self.favorites_list.item(row)
             if self._favorite_path_key(Path(item.data(Qt.ItemDataRole.UserRole))) == path_key:
-                self.favorites_list.setCurrentItem(item)
-                return
+                return item
+        return None
+
+    def _append_favorite_path(self, path: Path) -> QListWidgetItem | None:
+        """Добавляет папку в конец избранного, пропуская дубликаты.
+
+        Возвращает новый пункт или ``None``, если папка недоступна либо уже есть
+        в списке. Сохранение настроек остаётся за вызывающей стороной, чтобы
+        групповое добавление писало их один раз.
+        """
+        if not path.is_dir() or self._favorite_item_for_path(path) is not None:
+            return None
         item = QListWidgetItem(self.volume_icon_provider.icon(QFileInfo(str(path))), path.name or str(path))
         item.setData(Qt.ItemDataRole.UserRole, str(path))
         item.setToolTip(str(path))
         self.favorites_list.addItem(item)
+        return item
+
+    def _add_current_directory_to_favorites(self) -> None:
+        path = self.current_dir
+        if not path.is_dir():
+            return
+        item = self._append_favorite_path(path)
+        if item is None:
+            existing = self._favorite_item_for_path(path)
+            if existing is not None:
+                self.favorites_list.setCurrentItem(existing)
+            return
         self._save_favorites()
+
+    def _add_folders_to_favorites(self, folders: list[Path]) -> None:
+        """Добавляет в избранное папки, перетащенные в список извне, одним действием."""
+        added = [self._append_favorite_path(folder) for folder in folders]
+        if any(item is not None for item in added):
+            self._save_favorites()
 
     def _open_favorite(self, item: QListWidgetItem) -> None:
         path = Path(item.data(Qt.ItemDataRole.UserRole))
@@ -11371,6 +11445,7 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self._select_workspace)
         self.tabs.closeRequested.connect(self._close_workspace)
         self.tabs.pathsDropped.connect(self._drop_on_workspace_tab)
+        self.tabs.foldersDropped.connect(self._open_folders_in_new_tabs)
         title_layout.addWidget(self.tabs)
         add_tab = QToolButton()
         add_tab.setObjectName("titleAction")
@@ -11669,6 +11744,11 @@ class MainWindow(QMainWindow):
             return
         self.tabs.setCurrentIndex(index)
         workspace._receive_dropped_paths(paths, workspace.current_dir, action)
+
+    def _open_folders_in_new_tabs(self, folders: list[Path]) -> None:
+        """Открывает папки, брошенные на пустое место панели вкладок, каждую в своей вкладке."""
+        for folder in folders:
+            self._open_folder_tab(folder)
 
     def _create_actions(self) -> None:
         """Создаёт общие действия окна: вкладки, кэши, справку и обновления."""
@@ -12109,8 +12189,45 @@ class MainWindow(QMainWindow):
 
 
 def _drive_key(path: Path) -> str:
-    anchor = path.anchor or str(path)
-    return anchor.replace("\\", "/")
+    """Возвращает устойчивый идентификатор тома для сравнения и хранения.
+
+    На Windows том задаёт буква диска (``anchor``). На POSIX якорь у всех путей
+    общий (``/``), поэтому по нему тома схлопывались в один; там идентичность
+    тома определяет сама точка монтирования.
+    """
+    if os.name == "nt":
+        anchor = path.anchor or str(path)
+        return anchor.replace("\\", "/")
+    return str(path)
+
+
+# Служебные и виртуальные файловые системы POSIX, которым не место в списке
+# дисков: пользователю интересны реальные тома и съёмные носители, а не tmpfs,
+# псевдо-ФС ядра и squashfs-образы snap.
+_PSEUDO_FILESYSTEM_TYPES = frozenset({
+    "tmpfs", "devtmpfs", "devfs", "proc", "procfs", "sysfs", "cgroup",
+    "cgroup2", "overlay", "overlayfs", "squashfs", "autofs", "debugfs",
+    "tracefs", "mqueue", "hugetlbfs", "devpts", "securityfs", "pstore",
+    "bpf", "configfs", "fusectl", "ramfs", "binfmt_misc", "efivarfs",
+    "nsfs", "selinuxfs", "rpc_pipefs", "fuse.gvfsd-fuse", "fuse.portal",
+})
+
+
+def _is_pseudo_volume(volume: QStorageInfo) -> bool:
+    """Отсеивает служебные точки монтирования, не относящиеся к дискам.
+
+    На Windows ``QStorageInfo`` отдаёт только буквы дисков, поэтому фильтр
+    трогает лишь POSIX, где список содержит десятки псевдо-ФС, а на macOS ещё и
+    системные тома APFS под ``/System/Volumes``.
+    """
+    if os.name == "nt":
+        return False
+    fs_type = bytes(volume.fileSystemType()).decode("ascii", errors="replace").lower()
+    if fs_type in _PSEUDO_FILESYSTEM_TYPES:
+        return True
+    if sys.platform == "darwin" and volume.rootPath().startswith("/System/Volumes/"):
+        return True
+    return False
 
 
 def _workspace_title(directory: Path) -> str:
@@ -12132,6 +12249,8 @@ def _mounted_volume_paths() -> list[Path]:
     paths: dict[str, Path] = {}
     for volume in QStorageInfo.mountedVolumes():
         if not volume.isValid() or not volume.isReady():
+            continue
+        if _is_pseudo_volume(volume):
             continue
         root = Path(volume.rootPath())
         if root.is_dir():
