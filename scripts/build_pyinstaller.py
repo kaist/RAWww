@@ -155,24 +155,26 @@ def _finalize_macos_app(bundled_exiftool: Path | None) -> None:
     if not resources_data.is_dir():
         raise RuntimeError(f"macOS bundle is missing collected data at {resources_data}")
 
-    signed_extra: list[Path] = []
     if bundled_exiftool is not None:
         tools = resources_data / "tools"
         tools.mkdir(parents=True, exist_ok=True)
         target = tools / bundled_exiftool.name
         shutil.copy2(bundled_exiftool, target)
         target.chmod(target.stat().st_mode | 0o111)
-        signed_extra.append(target)
 
     _prune_translations_in(MACOS_APP / "Contents" / "Frameworks" / "PySide6" / "translations")
 
-    # Подписываем добавленные исполняемые файлы, затем заново запечатываем весь
-    # бандл (inner→outer). Без повторной подписи доложенный ExifTool остался бы
-    # неподписанным Mach-O — на Apple Silicon система откажется его запускать.
-    for path in signed_extra:
-        subprocess.run(["codesign", "--force", "--sign", "-", str(path)], check=True)
+    # Заново запечатываем бандл: добавление ExifTool и удаление лишних переводов
+    # инвалидируют исходный _CodeSignature. Сам ExifTool отдельно не переподписываем
+    # — PAR::Packer дописывает свой архив после Mach-O и ad-hoc подписывает файл, а
+    # codesign --force отвергает такой layout («main executable failed strict
+    # validation»). Готовый ExifTool уже запускается (build_exiftool проверяет -ver),
+    # поэтому просто печатаем его в ресурсы бандла как есть.
     subprocess.run(["codesign", "--force", "--sign", "-", str(MACOS_APP)], check=True)
-    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(MACOS_APP)], check=True)
+    # Проверяем без --deep: строгая проверка вложенного PAR-ExifTool ложно падает на
+    # его дописанном архиве, тогда как печать самого бандла (главный exe + сумма
+    # ресурсов) должна быть целостной.
+    subprocess.run(["codesign", "--verify", "--strict", str(MACOS_APP)], check=True)
     print(f"Finalized and re-signed macOS bundle: {MACOS_APP}")
 
 
