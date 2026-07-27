@@ -1,0 +1,130 @@
+## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
+## SPDX-License-Identifier: GPL-3.0-or-later
+
+"""Проверяет минимальную версию macOS у Mach-O внутри собранного приложения.
+
+Тег бинарного wheel может обещать более старую macOS, чем load-команды его
+файлов. Свежий runner такую несовместимость не замечает, поэтому готовый бандл
+нужно проверять отдельно до публикации.
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+CMD_LINE = re.compile(r"^\s*cmd\s+(LC_\w+)\s*$")
+PLATFORM_LINE = re.compile(r"^\s*platform\s+(\d+)\s*$")
+FIELD_LINE = re.compile(r"^\s*(minos|version)\s+(\d+)\.(\d+)(?:\.(\d+))?\s*$")
+PLATFORM_MACOS = 1
+
+
+def _iter_macho(bundle: Path):
+    """Отдаёт обычные файлы бандла, которые системная утилита считает Mach-O."""
+    for path in bundle.rglob("*"):
+        if not path.is_file() or path.is_symlink():
+            continue
+        probe = subprocess.run(
+            ["file", "-b", str(path)], capture_output=True, text=True, check=False
+        )
+        if "Mach-O" in probe.stdout:
+            yield path
+
+
+def _min_macos(path: Path) -> tuple[int, int] | None:
+    """Возвращает наибольшую минимальную macOS среди команд и архитектур файла."""
+    dump = subprocess.run(
+        ["otool", "-l", str(path)], capture_output=True, text=True, check=False
+    ).stdout
+    best: tuple[int, int] | None = None
+    current_cmd: str | None = None
+    is_macos = True
+    for line in dump.splitlines():
+        cmd = CMD_LINE.match(line)
+        if cmd:
+            current_cmd = cmd.group(1)
+            is_macos = current_cmd == "LC_VERSION_MIN_MACOSX"
+            continue
+        platform = PLATFORM_LINE.match(line)
+        if platform and current_cmd == "LC_BUILD_VERSION":
+            is_macos = int(platform.group(1)) == PLATFORM_MACOS
+            continue
+        field = FIELD_LINE.match(line)
+        if not field:
+            continue
+        key = field.group(1)
+        relevant = (key == "minos" and current_cmd == "LC_BUILD_VERSION") or (
+            key == "version" and current_cmd == "LC_VERSION_MIN_MACOSX"
+        )
+        if not (relevant and is_macos):
+            continue
+        found = (int(field.group(2)), int(field.group(3)))
+        if best is None or found > best:
+            best = found
+    return best
+
+
+def main() -> int:
+    """Печатает несовместимые файлы и возвращает ненулевой код при нарушении."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("bundle", type=Path, help="путь к .app или каталогу сборки")
+    parser.add_argument(
+        "--max-version",
+        default="11.0",
+        help="максимально допустимая минимальная версия macOS (major.minor)",
+    )
+    parser.add_argument(
+        "--ignore",
+        action="append",
+        default=[],
+        help="подстрока пути, для которой превышение только предупреждает",
+    )
+    args = parser.parse_args()
+
+    ceiling = tuple(int(part) for part in args.max_version.split("."))[:2]
+    if len(ceiling) == 1:
+        ceiling = (ceiling[0], 0)
+
+    hard_violations: list[tuple[Path, tuple[int, int]]] = []
+    soft_violations: list[tuple[Path, tuple[int, int]]] = []
+    highest: tuple[int, int] | None = None
+    for path in _iter_macho(args.bundle):
+        version = _min_macos(path)
+        if version is None:
+            continue
+        if highest is None or version > highest:
+            highest = version
+        if version > ceiling:
+            ignored = any(token in str(path) for token in args.ignore)
+            (soft_violations if ignored else hard_violations).append((path, version))
+
+    def _fmt(items: list[tuple[Path, tuple[int, int]]]) -> str:
+        return "\n".join(
+            f"  {major}.{minor}\t{path.relative_to(args.bundle)}"
+            for path, (major, minor) in sorted(
+                items, key=lambda item: item[1], reverse=True
+            )
+        )
+
+    print(f"Максимальная минимальная версия macOS среди Mach-O: {highest}")
+    if soft_violations:
+        print(
+            f"ПРЕДУПРЕЖДЕНИЕ: библиотеки требуют macOS выше {args.max_version} "
+            f"(нагружают только отдельные функции):\n{_fmt(soft_violations)}"
+        )
+    if hard_violations:
+        print(
+            f"ОШИБКА: библиотеки требуют macOS выше {args.max_version} и нужны для "
+            f"запуска:\n{_fmt(hard_violations)}"
+        )
+        return 1
+    print(f"OK: все критичные Mach-O запускаются на macOS {args.max_version}+")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
