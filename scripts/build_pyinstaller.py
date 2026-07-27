@@ -200,10 +200,19 @@ def _finalize_macos_app() -> None:
     _prune_translations_in(MACOS_APP / "Contents" / "Frameworks" / "PySide6" / "translations")
     _localize_macos_bundle_name(MACOS_APP)
 
+    # pyexiv2 поставляет собственные Mach-O: расширение Python и libexiv2.
+    # После --collect-all они появляются уже после исходной подписи PyInstaller;
+    # Apple Silicon не загрузит такую библиотеку из подписанного .app без
+    # отдельной ad-hoc подписи (inner -> outer).
+    pyexiv2_lib = MACOS_APP / "Contents" / "Frameworks" / "pyexiv2" / "lib"
+    for path in pyexiv2_lib.glob("*"):
+        if path.is_file() and path.suffix in {".dylib", ".so"}:
+            subprocess.run(["codesign", "--force", "--sign", "-", str(path)], check=True)
+
     # Удаление лишних переводов инвалидирует исходный _CodeSignature, поэтому
     # после изменения ресурсов запечатываем бандл заново.
     subprocess.run(["codesign", "--force", "--sign", "-", str(MACOS_APP)], check=True)
-    subprocess.run(["codesign", "--verify", "--strict", str(MACOS_APP)], check=True)
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", str(MACOS_APP)], check=True)
     print(f"Finalized and re-signed macOS bundle: {MACOS_APP}")
 
 
