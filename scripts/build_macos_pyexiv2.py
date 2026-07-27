@@ -82,6 +82,10 @@ add_subdirectory(exiv2 EXCLUDE_FROM_ALL)
 find_package(pybind11 CONFIG REQUIRED)
 pybind11_add_module(exiv2api pyexiv2/pyexiv2/lib/exiv2api.cpp)
 target_link_libraries(exiv2api PRIVATE exiv2lib)
+# Exiv2 создаёт exiv2lib_export.h и exv_conf.h в корне build-каталога.
+# При встраивании Exiv2 через add_subdirectory этот путь не попадает в
+# публичный interface target, а binding включает заголовки напрямую.
+target_include_directories(exiv2api PRIVATE "${CMAKE_BINARY_DIR}")
 set_target_properties(exiv2api PROPERTIES LIBRARY_OUTPUT_DIRECTORY \"${OUTPUT_DIR}\")
 """,
         encoding="utf-8",
