@@ -105,6 +105,20 @@ class AppStateTests(unittest.TestCase):
         view.deleteLater()
         parent.deleteLater()
 
+    def test_full_view_delete_shortcut_reports_shift_modifier(self) -> None:
+        parent = QWidget()
+        view = FullView(parent)
+        requested = []
+        view.deleteRequested.connect(requested.append)
+        view.show()
+        view.setFocus()
+
+        QTest.keyClick(view, Qt.Key.Key_Delete, Qt.KeyboardModifier.ShiftModifier)
+
+        self.assertEqual(requested, [True])
+        view.deleteLater()
+        parent.deleteLater()
+
     def test_portable_settings_use_an_ini_file_in_work_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             work_directory = Path(directory)
@@ -284,6 +298,44 @@ class AppStateTests(unittest.TestCase):
 
         self.assertIs(workspace.grid.currentItem(), new_items[open_path])
         self.assertEqual(workspace.grid.selectedItems(), [new_items[open_path]])
+        workspace.close()
+        workspace.deleteLater()
+
+    def test_file_panel_paths_uses_open_photo_in_full_view(self) -> None:
+        workspace = Workspace(defer_initial_scan=True)
+        selected_path = Path("/photos/selected-in-grid.jpg")
+        open_path = Path("/photos/open-in-view.jpg")
+        item = QListWidgetItem(selected_path.name)
+        item.setData(Qt.ItemDataRole.UserRole, str(selected_path))
+        workspace.grid.addItem(item)
+        item.setSelected(True)
+        workspace.current_path = open_path
+        workspace.stack.setCurrentWidget(workspace.full_view)
+
+        self.assertEqual(workspace._file_panel_paths(), [open_path])
+        workspace.close()
+        workspace.deleteLater()
+
+    def test_removing_open_photo_in_full_view_opens_next_photo(self) -> None:
+        workspace = Workspace(defer_initial_scan=True)
+        current = Path("/photos/current.jpg")
+        next_path = Path("/photos/next.jpg")
+        workspace.all_paths = [current, next_path]
+        workspace.view_paths = [current, next_path]
+        workspace.paths = [current, next_path]
+        workspace.current_path = current
+        for path in workspace.paths:
+            item = QListWidgetItem(path.name)
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            workspace.grid.addItem(item)
+            workspace.items_by_path[path] = item
+        workspace.stack.setCurrentWidget(workspace.full_view)
+        workspace.open_full = Mock()
+
+        workspace._remove_paths_from_grid([current])
+
+        workspace.open_full.assert_called_once_with(next_path)
+        self.assertEqual(workspace.paths, [next_path])
         workspace.close()
         workspace.deleteLater()
 

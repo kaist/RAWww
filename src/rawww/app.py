@@ -2389,6 +2389,7 @@ class FullView(QFrame):
     videoPlaybackChanged = Signal(bool)
     originalRequested = Signal(object)
     markIndicatorRequested = Signal()
+    deleteRequested = Signal(bool)  # нажат ли Shift
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -3131,6 +3132,8 @@ class FullView(QFrame):
         key = event.key()
         if key in {Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter}:
             self.exitRequested.emit()
+        elif key == Qt.Key.Key_Delete:
+            self.deleteRequested.emit(bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
         elif key == Qt.Key.Key_Z:
             self._toggle_zoom()
         elif self.image_view.zoomed and key in {
@@ -4511,6 +4514,7 @@ class Workspace(QMainWindow):
         self.full_view = FullView(self.stack)
         self.full_view.set_vertical(self.vertical_orientation)
         self.full_view.exitRequested.connect(self.show_grid)
+        self.full_view.deleteRequested.connect(self._delete_full_view_photo)
         self.full_view.originalRequested.connect(self._request_original_zoom)
         self.full_view.nextRequested.connect(self.next_image)
         self.full_view.previousRequested.connect(self.previous_image)
@@ -6134,8 +6138,19 @@ class Workspace(QMainWindow):
             permanent=self._delete_permanently_for_shortcut(shift_pressed),
         )
 
+    def _delete_full_view_photo(self, shift_pressed: bool) -> None:
+        """Удаляет открытый кадр, не полагаясь на оставшееся в гриде выделение."""
+        if self.current_path is None:
+            return
+        self._delete_paths(
+            [self.current_path],
+            permanent=self._delete_permanently_for_shortcut(shift_pressed),
+        )
+
     def _file_panel_paths(self) -> list[Path]:
         """Возвращает пути, выбранные в активной файловой панели."""
+        if self.stack.currentWidget() is self.full_view and self.current_path is not None:
+            return [self.current_path]
         focus = QApplication.focusWidget()
         if self._is_directory_focus_widget(focus):
             selection = self.dir_tree.selectionModel()
@@ -6528,6 +6543,10 @@ class Workspace(QMainWindow):
     def _remove_paths_from_grid(self, deleted: list[Path]) -> None:
         """Убирает удалённые пути из сетки без её полной пересборки."""
         removed = set(deleted)
+        removed_current = (
+            self.stack.currentWidget() is self.full_view
+            and self.current_path in removed
+        )
         old_paths = list(self.paths)
         path_rows = {path: index for index, path in enumerate(old_paths)}
         selected_rows = [path_rows[path] for path in removed if path in path_rows]
@@ -6590,6 +6609,13 @@ class Workspace(QMainWindow):
             self.grid.setCurrentItem(item)
             self.grid.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
         self.grid.setFocus(Qt.FocusReason.OtherFocusReason)
+        if removed_current:
+            if anchor is not None:
+                self.open_full(anchor)
+            else:
+                self.show_grid()
+        elif self.stack.currentWidget() is self.full_view and self.current_path is not None:
+            self._refresh_full_view_navigation(self.current_path)
 
     def _refresh_volume_buttons(self) -> None:
         """Синхронизирует боковую панель со смонтированными дисками.
@@ -11799,6 +11825,13 @@ class MainWindow(QMainWindow):
         for index in range(self.workspace_stack.count()):
             workspace = self.workspace_stack.widget(index)
             if isinstance(workspace, Workspace) and workspace.current_dir in touched:
+                if task.move:
+                    moved_from_current = [
+                        entry.source for entry in task.entries
+                        if entry.source.parent == workspace.current_dir and not entry.source.exists()
+                    ]
+                    if moved_from_current:
+                        workspace._remove_paths_from_grid(moved_from_current)
                 workspace.load_directory(workspace.current_dir)
         if task.errors and task.status != "cancelled":
             QMessageBox.warning(
