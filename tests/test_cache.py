@@ -373,6 +373,18 @@ class CacheTests(unittest.TestCase):
             self.assertNotIn(path.name, cache.load_photo_details(include_metadata=False))
             cache.close(flush=False)
 
+    def test_photo_selection_normalizes_missing_color_to_empty_string(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            path = folder / "sample.jpg"
+            Image.new("RGB", (32, 32)).save(path)
+            cache = FolderCache(folder, {path.name}, cache_root=folder / "cache")
+
+            cache.store_photo_selection(path.name, rating=None, color_label=None, comment="")
+
+            self.assertEqual(cache.load_photo_details()[path.name]["color_label"], "")
+            cache.close(flush=False)
+
     def test_rename_photo_names_preserves_cache_data_for_a_name_swap(self) -> None:
         with TemporaryDirectory() as tmp:
             folder = Path(tmp)

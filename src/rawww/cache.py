@@ -513,9 +513,11 @@ class FolderCache:
         return details
 
     def store_photo_selection(
-        self, name: str, *, rating: int | None, color_label: str, comment: str,
+        self, name: str, *, rating: int | None, color_label: str | None, comment: str,
         keywords: Iterable[str] | None = None,
     ) -> None:
+        """Сохраняет отбор, приводя отсутствие цветной метки к пустой строке."""
+        color_label = str(color_label or "")
         with self._lock:
             db = self._db_or_raise()
             if keywords is None:

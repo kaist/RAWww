@@ -354,7 +354,7 @@ class SelectionMarkSyncer(QObject):
                 kind="meta",
                 payload_json=json.dumps(
                     {
-                        "color_label": detail.get("color_label", ""),
+                        "color_label": detail.get("color_label") or "",
                         "comment": detail.get("comment", ""),
                     }
                 ),

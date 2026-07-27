@@ -7643,9 +7643,10 @@ class Workspace(QMainWindow):
         )
 
     def _apply_external_selection(
-        self, name: str, *, rating: int | None, color_label: str, comment: str
+        self, name: str, *, rating: int | None, color_label: str | None, comment: str
     ) -> None:
         """Обновляет рейтинг, цвет и комментарий файла и перерисовывает карточку."""
+        color_label = str(color_label or "")
         detail = self.photo_details.setdefault(name, {})
         detail.update(rating=rating, color_label=color_label, comment=comment)
         for path, item in self.items_by_path.items():
@@ -10542,6 +10543,9 @@ class Workspace(QMainWindow):
 
     def _update_selection(self, **changes) -> None:
         """Применяет метаданные к выделению, кэшу, XMP и открытому просмотрщику."""
+        if "color_label" in changes:
+            # Единое представление нужно фильтру «Без цвета» и SQLite-полю NOT NULL.
+            changes["color_label"] = str(changes["color_label"] or "")
         selected_paths = self._selected_paths()
         paths = list(selected_paths)
         if self.current_path is not None and self.stack.currentWidget() is self.full_view:
@@ -10705,6 +10709,7 @@ class Workspace(QMainWindow):
         self.settings.setValue("auto_advance", enabled)
 
     def _apply_quick_mark(self) -> None:
+        """Переключает быструю метку, сохраняя единое пустое значение полей."""
         kind, value = self.quick_mark
         paths = self._selected_paths()
         if self.current_path is not None and self.stack.currentWidget() is self.full_view:
@@ -10712,7 +10717,10 @@ class Workspace(QMainWindow):
         if not paths:
             return
         current = self.photo_details.get(paths[0].name, {}).get(kind)
-        self._update_selection(**{kind: None if current == value else value})
+        # Пустой цвет участвует в фильтре «Без цвета», поэтому None здесь
+        # нельзя оставлять. У рейтинга, напротив, отсутствие звёзд — None.
+        cleared_value = "" if kind == "color_label" else None
+        self._update_selection(**{kind: cleared_value if current == value else value})
 
     def _toggle_full_view_mark_indicator(self) -> None:
         """Ставит быструю метку клавишей M, а повторным нажатием снимает её."""

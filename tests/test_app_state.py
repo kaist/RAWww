@@ -384,6 +384,38 @@ class AppStateTests(unittest.TestCase):
         host.rating_filter = SimpleNamespace(currentData=lambda: 5)
         self.assertTrue(Workspace._xmp_change_requires_view_rebuild(host, {"rating"}))
 
+    def test_repeated_quick_color_mark_clears_to_empty_string(self) -> None:
+        path = Path("/photos/photo.jpg")
+        host = SimpleNamespace(
+            quick_mark=("color_label", "red"),
+            current_path=None,
+            stack=SimpleNamespace(currentWidget=lambda: None),
+            full_view=object(),
+            photo_details={path.name: {"color_label": "red"}},
+            _selected_paths=lambda: [path],
+            _update_selection=Mock(),
+        )
+
+        Workspace._apply_quick_mark(host)
+
+        host._update_selection.assert_called_once_with(color_label="")
+
+    def test_repeated_quick_rating_mark_clears_to_none(self) -> None:
+        path = Path("/photos/photo.jpg")
+        host = SimpleNamespace(
+            quick_mark=("rating", 5),
+            current_path=None,
+            stack=SimpleNamespace(currentWidget=lambda: None),
+            full_view=object(),
+            photo_details={path.name: {"rating": 5}},
+            _selected_paths=lambda: [path],
+            _update_selection=Mock(),
+        )
+
+        Workspace._apply_quick_mark(host)
+
+        host._update_selection.assert_called_once_with(rating=None)
+
     def test_renaming_one_member_of_raw_jpeg_pair_keeps_and_copies_xmp(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
