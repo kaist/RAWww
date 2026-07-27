@@ -184,7 +184,7 @@ VOLUME_REFRESH_INTERVAL_MS = 2_000
 SHOTSYNC_BASE_URL = "https://shotsync.ru"
 SHOTSYNC_VOLUME_KEY = "__shotsync__"
 ENABLE_EXIF_METADATA = True
-APP_NAME = "Контролька"
+APP_NAME = _("Контролька")
 APP_VERSION = __version__
 SETTINGS_NAME = "ctrlka"
 

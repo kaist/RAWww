@@ -1,15 +1,13 @@
-#define MyAppName "Контролька"
 #include "..\build\installer_version.iss"
-#define MyAppPublisher "Контролька"
 #define MyAppExeName "ctrlka.exe"
 
 [Setup]
 AppId={{B7C7D83A-8E48-4E44-9A6B-000000000001}
-AppName={#MyAppName}
+AppName={cm:AppDisplayName}
 AppVersion={#MyAppVersion}
-AppPublisher={#MyAppPublisher}
+AppPublisher={cm:AppDisplayName}
 DefaultDirName={autopf}\ctrlka
-DefaultGroupName={#MyAppName}
+DefaultGroupName={cm:AppDisplayName}
 OutputDir=..\dist\installer
 OutputBaseFilename=ctrlka-windows-setup
 Compression=lzma2
@@ -33,21 +31,25 @@ Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 [CustomMessages]
 russian.CreateDesktopIcon=Создать ярлык на рабочем столе
 russian.AdditionalIcons=Дополнительные значки:
+russian.AppDisplayName=Контролька
 english.CreateDesktopIcon=Create a desktop shortcut
 english.AdditionalIcons=Additional icons:
+english.AppDisplayName=Controlka
 german.CreateDesktopIcon=Desktop-Verknüpfung erstellen
 german.AdditionalIcons=Zusätzliche Symbole:
+german.AppDisplayName=Controlka
 #if FileExists(AddBackslash(SourcePath) + "ChineseSimplified.isl")
 chinesesimplified.CreateDesktopIcon=创建桌面快捷方式
 chinesesimplified.AdditionalIcons=附加图标：
+chinesesimplified.AppDisplayName=Controlka
 #endif
 
 [Files]
 Source: "..\dist\ctrlka\*"; DestDir: "{app}"; Excludes: "work\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autoprograms}\{cm:AppDisplayName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{autodesktop}\{cm:AppDisplayName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"

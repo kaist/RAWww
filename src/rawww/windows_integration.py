@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS
+from .i18n import gettext as _
 
 
 DEFAULT_EXTENSIONS = (
@@ -19,7 +20,6 @@ DEFAULT_EXTENSIONS = (
     ".x3f", ".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm",
 )
 VERB = "rawww.open"
-LABEL = "Открыть в Контрольке"
 _BASE = r"Software\Classes"
 DEFAULT_APP_PROG_ID = "Kontrolka.Photo"
 DEFAULT_APP_CAPABILITIES = r"Software\Kontrolka\Capabilities"
@@ -52,16 +52,17 @@ def register(executable: Path, extensions: tuple[str, ...] = DEFAULT_EXTENSIONS)
     import winreg
 
     executable = executable.resolve()
+    label = _("Открыть в Контрольке")
     for extension in extensions:
         verb = f"{_BASE}\\SystemFileAssociations\\{extension}\\shell\\{VERB}"
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, verb, 0, winreg.KEY_WRITE) as key:
-            winreg.SetValueEx(key, None, 0, winreg.REG_SZ, LABEL)
+            winreg.SetValueEx(key, None, 0, winreg.REG_SZ, label)
             winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, f'"{executable}",0')
         _set_command(winreg, f"{verb}\\command", f'"{executable}" "%1"')
     for kind, argument in (("Directory", "%1"), ("Directory\\Background", "%V")):
         verb = f"{_BASE}\\{kind}\\shell\\{VERB}"
         with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, verb, 0, winreg.KEY_WRITE) as key:
-            winreg.SetValueEx(key, None, 0, winreg.REG_SZ, LABEL)
+            winreg.SetValueEx(key, None, 0, winreg.REG_SZ, label)
             winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, f'"{executable}",0')
         _set_command(winreg, f"{verb}\\command", f'"{executable}" "{argument}"')
 
@@ -87,18 +88,21 @@ def register_default_app(
     import winreg
 
     executable = executable.resolve()
+    app_name = _("Контролька")
+    type_name = _("Контролька: фотографии RAW и JPG")
+    description = _("Быстрый просмотр и отбор RAW и JPG")
     command = f'"{executable}" "%1"'
     with winreg.CreateKeyEx(
         winreg.HKEY_CURRENT_USER, f"{_BASE}\\{DEFAULT_APP_PROG_ID}", 0, winreg.KEY_WRITE
     ) as key:
-        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, "Контролька: фотографии RAW и JPG")
-        winreg.SetValueEx(key, "FriendlyTypeName", 0, winreg.REG_SZ, "Контролька: фотографии RAW и JPG")
+        winreg.SetValueEx(key, None, 0, winreg.REG_SZ, type_name)
+        winreg.SetValueEx(key, "FriendlyTypeName", 0, winreg.REG_SZ, type_name)
     _set_command(winreg, f"{_BASE}\\{DEFAULT_APP_PROG_ID}\\shell\\open\\command", command)
     with winreg.CreateKeyEx(
         winreg.HKEY_CURRENT_USER, DEFAULT_APP_CAPABILITIES, 0, winreg.KEY_WRITE
     ) as key:
-        winreg.SetValueEx(key, "ApplicationName", 0, winreg.REG_SZ, "Контролька")
-        winreg.SetValueEx(key, "ApplicationDescription", 0, winreg.REG_SZ, "Быстрый просмотр и отбор RAW и JPG")
+        winreg.SetValueEx(key, "ApplicationName", 0, winreg.REG_SZ, app_name)
+        winreg.SetValueEx(key, "ApplicationDescription", 0, winreg.REG_SZ, description)
     for extension in extensions:
         with winreg.CreateKeyEx(
             winreg.HKEY_CURRENT_USER,
@@ -117,7 +121,13 @@ def register_default_app(
     with winreg.CreateKeyEx(
         winreg.HKEY_CURRENT_USER, DEFAULT_APP_REGISTRATION, 0, winreg.KEY_WRITE
     ) as key:
-        winreg.SetValueEx(key, "Контролька", 0, winreg.REG_SZ, DEFAULT_APP_CAPABILITIES)
+        # Имя значения — стабильный внутренний идентификатор. Удаляем прежний
+        # русскоязычный вариант, чтобы Windows не показывала приложение дважды.
+        try:
+            winreg.DeleteValue(key, "Контролька")
+        except FileNotFoundError:
+            pass
+        winreg.SetValueEx(key, "Controlka", 0, winreg.REG_SZ, DEFAULT_APP_CAPABILITIES)
 
 
 def open_default_apps_settings() -> None:

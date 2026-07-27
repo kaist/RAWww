@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-22 18:24+0000\n"
+"POT-Creation-Date: 2026-07-27 13:19+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -16,6 +16,9 @@ msgstr ""
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
+
+msgid "Контролька"
+msgstr ""
 
 #, python-brace-format
 msgid "Несколько XMP должны получить имя «{name}»"
@@ -311,6 +314,9 @@ msgstr ""
 msgid "Папка с таким именем уже существует"
 msgstr ""
 
+msgid "Переименовать"
+msgstr ""
+
 msgid "Кэш папки"
 msgstr ""
 
@@ -335,9 +341,6 @@ msgid "Не удалось создать папку: {error}"
 msgstr ""
 
 msgid "Открыть в новой вкладке"
-msgstr ""
-
-msgid "Переименовать"
 msgstr ""
 
 msgid "Удалить"
@@ -1207,9 +1210,6 @@ msgstr ""
 msgid "ICC-профили (*.icc *.icm)"
 msgstr ""
 
-msgid "Контролька"
-msgstr ""
-
 #, python-brace-format
 msgid "Версия {version}"
 msgstr ""
@@ -1875,5 +1875,14 @@ msgstr ""
 
 #, python-brace-format
 msgid "Импортировано: {imported}, пропущено: {skipped}"
+msgstr ""
+
+msgid "Открыть в Контрольке"
+msgstr ""
+
+msgid "Контролька: фотографии RAW и JPG"
+msgstr ""
+
+msgid "Быстрый просмотр и отбор RAW и JPG"
 msgstr ""
 

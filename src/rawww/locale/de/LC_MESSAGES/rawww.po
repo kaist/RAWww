@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-22 18:24+0000\n"
+"POT-Creation-Date: 2026-07-27 13:19+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -17,6 +17,9 @@ msgstr ""
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
+
+msgid "Контролька"
+msgstr "Controlka"
 
 #, python-brace-format
 msgid "Несколько XMP должны получить имя «{name}»"
@@ -312,6 +315,9 @@ msgstr "Geben Sie einen gültigen Ordnernamen ein"
 msgid "Папка с таким именем уже существует"
 msgstr "Ein Ordner mit diesem Namen existiert bereits"
 
+msgid "Переименовать"
+msgstr "Umbenennen"
+
 msgid "Кэш папки"
 msgstr "Ordner-Cache"
 
@@ -340,9 +346,6 @@ msgstr "Ordner konnte nicht erstellt werden: {error}"
 
 msgid "Открыть в новой вкладке"
 msgstr "In neuem Tab öffnen"
-
-msgid "Переименовать"
-msgstr "Umbenennen"
 
 msgid "Удалить"
 msgstr "Löschen"
@@ -891,7 +894,7 @@ msgid "Развернуть"
 msgstr "Maximieren"
 
 msgid "У вас установлена актуальная версия Контрольки."
-msgstr "Sie haben die aktuelle Version von Kontrolka."
+msgstr "Sie haben die aktuelle Version von Controlka."
 
 msgid "Обновления"
 msgstr "Updates"
@@ -912,7 +915,7 @@ msgstr "Update verfügbar"
 
 #, python-brace-format
 msgid "Доступна Контролька {version}"
-msgstr "Kontrolka {version} ist verfügbar"
+msgstr "Controlka {version} ist verfügbar"
 
 msgid "Откройте страницу загрузки, чтобы узнать об изменениях."
 msgstr "Öffnen Sie die Download-Seite, um die Änderungen zu sehen."
@@ -1047,7 +1050,7 @@ msgid "Рабочее пространство"
 msgstr "Arbeitsbereich"
 
 msgid "Выберите, что Контролька будет восстанавливать при следующем запуске."
-msgstr "Wählen Sie, was Kontrolka beim nächsten Start wiederherstellt."
+msgstr "Wählen Sie, was Controlka beim nächsten Start wiederherstellt."
 
 msgid "Восстанавливать открытые вкладки"
 msgstr "Geöffnete Tabs wiederherstellen"
@@ -1138,7 +1141,7 @@ msgid ""
 "Добавляет «Открыть в Контрольке» для поддерживаемых файлов и папок. "
 "Программа просмотра по умолчанию не меняется."
 msgstr ""
-"Fügt «In Kontrolka öffnen» für unterstützte Dateien und Ordner hinzu. Der"
+"Fügt «In Controlka öffnen» für unterstützte Dateien und Ordner hinzu. Der"
 " Standard-Viewer wird nicht geändert."
 
 msgid "Выбрать по умолчанию для JPG и RAW…"
@@ -1163,7 +1166,7 @@ msgid "Соберите приложение, чтобы Проводник за
 msgstr "Bauen Sie die Anwendung, damit der Explorer ctrlka.exe startet."
 
 msgid "Доступно в собранном приложении Контрольки."
-msgstr "In der gebauten Kontrolka-Anwendung verfügbar."
+msgstr "In der gebauten Controlka-Anwendung verfügbar."
 
 msgid "Удалить из Проводника"
 msgstr "Aus dem Explorer entfernen"
@@ -1178,7 +1181,7 @@ msgid "Удалить интеграцию?"
 msgstr "Integration entfernen?"
 
 msgid "Убрать команду «Открыть в Контрольке» из Проводника?"
-msgstr "Den Befehl «In Kontrolka öffnen» aus dem Explorer entfernen?"
+msgstr "Den Befehl «In Controlka öffnen» aus dem Explorer entfernen?"
 
 msgid "Не удалось изменить Проводник"
 msgstr "Der Explorer konnte nicht geändert werden"
@@ -1290,9 +1293,6 @@ msgstr "Aktives Profil: {name} ({source})."
 msgid "ICC-профили (*.icc *.icm)"
 msgstr "ICC-Profile (*.icc *.icm)"
 
-msgid "Контролька"
-msgstr "Kontrolka"
-
 #, python-brace-format
 msgid "Версия {version}"
 msgstr "Version {version}"
@@ -1317,7 +1317,7 @@ msgstr ""
 "<b>Autor:</b> Igor Zalomskij &lt;<a "
 "href=\"mailto:igor@zalomskij.ru\">igor@zalomskij.ru</a>&gt;<br>© 2026 "
 "Igor Zalomskij. Lizenziert unter der GNU GPL v3 oder höher.<br><a "
-"href=\"https://shotsync.ru/ctrlka\">Kontrolka auf ShotSync</a><br><a "
+"href=\"https://shotsync.ru/ctrlka\">Controlka auf ShotSync</a><br><a "
 "href=\"https://github.com/kaist/RAWww\">Quellcode auf GitHub</a>"
 
 msgid ""
@@ -1992,3 +1992,11 @@ msgstr "Tabellen (*.csv *.tsv *.xlsx)"
 msgid "Импортировано: {imported}, пропущено: {skipped}"
 msgstr "Importiert: {imported}, übersprungen: {skipped}"
 
+msgid "Открыть в Контрольке"
+msgstr "In Controlka öffnen"
+
+msgid "Контролька: фотографии RAW и JPG"
+msgstr "Controlka: RAW- und JPG-Fotos"
+
+msgid "Быстрый просмотр и отбор RAW и JPG"
+msgstr "Schnelle Sichtung und Auswahl von RAW- und JPG-Fotos"

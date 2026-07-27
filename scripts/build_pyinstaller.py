@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -69,6 +70,12 @@ PRUNABLE_QT_FILES = (
     "opengl32sw.dll",
 )
 LINUX_QT_RUNTIME_LIBRARIES = ("libEGL.so.1", "libpulse.so.0")
+MACOS_DISPLAY_NAMES = {
+    "en": "Controlka",
+    "de": "Controlka",
+    "ru": "Контролька",
+    "zh-Hans": "Controlka",
+}
 
 
 def _report_size(directory: Path) -> None:
@@ -138,6 +145,44 @@ def _prune_qt_translations(directory: Path) -> None:
     _prune_translations_in(CONTENTS / "PySide6" / "translations")
 
 
+def _localize_macos_bundle_name(app_directory: Path) -> None:
+    """Оставляет имя файла ``ctrlka.app``, но локализует его показ в macOS.
+
+    Finder, Dock и системное меню читают ``InfoPlist.strings`` по языку macOS.
+    Сам путь остаётся ASCII и не меняется между локалями, что важно для скриптов,
+    обновлений и проверки готового DMG.
+    """
+    contents = app_directory / "Contents"
+    info_path = contents / "Info.plist"
+    with info_path.open("rb") as source:
+        info = plistlib.load(source)
+    info.update(
+        {
+            "CFBundleDevelopmentRegion": "en",
+            "CFBundleDisplayName": "Controlka",
+            "CFBundleName": "Controlka",
+            "CFBundleLocalizations": list(MACOS_DISPLAY_NAMES),
+            "LSHasLocalizedDisplayName": True,
+        }
+    )
+    with info_path.open("wb") as target:
+        plistlib.dump(info, target, sort_keys=False)
+
+    resources = contents / "Resources"
+    for language, display_name in MACOS_DISPLAY_NAMES.items():
+        localized = resources / f"{language}.lproj"
+        localized.mkdir(parents=True, exist_ok=True)
+        with (localized / "InfoPlist.strings").open("wb") as target:
+            plistlib.dump(
+                {
+                    "CFBundleDisplayName": display_name,
+                    "CFBundleName": display_name,
+                },
+                target,
+                sort_keys=False,
+            )
+
+
 def _finalize_macos_app(bundled_exiftool: Path | None) -> None:
     """Доводит нативный ``.app`` от PyInstaller до готового к раздаче состояния.
 
@@ -163,6 +208,7 @@ def _finalize_macos_app(bundled_exiftool: Path | None) -> None:
         target.chmod(target.stat().st_mode | 0o111)
 
     _prune_translations_in(MACOS_APP / "Contents" / "Frameworks" / "PySide6" / "translations")
+    _localize_macos_bundle_name(MACOS_APP)
 
     # Заново запечатываем бандл: добавление ExifTool и удаление лишних переводов
     # инвалидируют исходный _CodeSignature. Сам ExifTool отдельно не переподписываем

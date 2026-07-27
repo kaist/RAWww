@@ -9,6 +9,7 @@ import argparse
 import base64
 import json
 import os
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,30 @@ from pathlib import Path
 
 
 JPEG_SAMPLE = b"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDy2iiivZOE/9k="
+MACOS_DISPLAY_NAMES = {
+    "en": "Controlka",
+    "de": "Controlka",
+    "ru": "Контролька",
+    "zh-Hans": "Controlka",
+}
+
+
+def _check_macos_bundle_names(app_directory: Path) -> None:
+    """Проверяет стабильное имя .app и локализованные системные названия."""
+    if app_directory.name != "ctrlka.app":
+        raise RuntimeError(f"macOS bundle must be named ctrlka.app: {app_directory}")
+    contents = app_directory / "Contents"
+    with (contents / "Info.plist").open("rb") as source:
+        info = plistlib.load(source)
+    if info.get("CFBundleDisplayName") != "Controlka":
+        raise RuntimeError("macOS bundle fallback display name is not Controlka")
+    for language, expected in MACOS_DISPLAY_NAMES.items():
+        path = contents / "Resources" / f"{language}.lproj" / "InfoPlist.strings"
+        with path.open("rb") as source:
+            localized = plistlib.load(source)
+        if localized.get("CFBundleDisplayName") != expected:
+            raise RuntimeError(f"Invalid macOS display name for {language}: {localized!r}")
+    print("macOS localized bundle names passed")
 
 
 def _bundled_paths(app_directory: Path) -> tuple[Path, Path]:
@@ -118,6 +143,8 @@ def main() -> None:
     parser.add_argument("--app-dir", type=Path, required=True)
     parser.add_argument("--screenshot", type=Path)
     args = parser.parse_args()
+    if args.app_dir.suffix == ".app":
+        _check_macos_bundle_names(args.app_dir.resolve())
     application, exiftool = _bundled_paths(args.app_dir.resolve())
     _check_exiftool(exiftool)
     _check_application(application, args.screenshot.resolve() if args.screenshot else None)

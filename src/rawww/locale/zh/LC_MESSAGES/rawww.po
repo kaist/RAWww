@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-22 18:24+0000\n"
+"POT-Creation-Date: 2026-07-27 13:19+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -17,6 +17,9 @@ msgstr ""
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Generated-By: Babel 2.18.0\n"
+
+msgid "Контролька"
+msgstr "Controlka"
 
 #, python-brace-format
 msgid "Несколько XMP должны получить имя «{name}»"
@@ -312,6 +315,9 @@ msgstr "请输入有效的文件夹名称"
 msgid "Папка с таким именем уже существует"
 msgstr "同名文件夹已存在"
 
+msgid "Переименовать"
+msgstr "重命名"
+
 msgid "Кэш папки"
 msgstr "文件夹缓存"
 
@@ -339,9 +345,6 @@ msgstr "无法创建文件夹：{error}"
 
 msgid "Открыть в новой вкладке"
 msgstr "在新标签页中打开"
-
-msgid "Переименовать"
-msgstr "重命名"
 
 msgid "Удалить"
 msgstr "删除"
@@ -869,7 +872,7 @@ msgid "Развернуть"
 msgstr "最大化"
 
 msgid "У вас установлена актуальная версия Контрольки."
-msgstr "您已安装最新版本的 Kontrolka。"
+msgstr "您已安装最新版本的 Controlka。"
 
 msgid "Обновления"
 msgstr "更新"
@@ -888,7 +891,7 @@ msgstr "有可用更新"
 
 #, python-brace-format
 msgid "Доступна Контролька {version}"
-msgstr "Kontrolka {version} 现已可用"
+msgstr "Controlka {version} 现已可用"
 
 msgid "Откройте страницу загрузки, чтобы узнать об изменениях."
 msgstr "打开下载页面以查看更新内容。"
@@ -1015,7 +1018,7 @@ msgid "Рабочее пространство"
 msgstr "工作区"
 
 msgid "Выберите, что Контролька будет восстанавливать при следующем запуске."
-msgstr "选择 Kontrolka 下次启动时恢复的内容。"
+msgstr "选择 Controlka 下次启动时恢复的内容。"
 
 msgid "Восстанавливать открытые вкладки"
 msgstr "恢复已打开的标签页"
@@ -1094,7 +1097,7 @@ msgstr "资源管理器集成"
 msgid ""
 "Добавляет «Открыть в Контрольке» для поддерживаемых файлов и папок. "
 "Программа просмотра по умолчанию не меняется."
-msgstr "为受支持的文件和文件夹添加「在 Kontrolka 中打开」。不会更改默认查看器。"
+msgstr "为受支持的文件和文件夹添加「在 Controlka 中打开」。不会更改默认查看器。"
 
 msgid "Выбрать по умолчанию для JPG и RAW…"
 msgstr "设为 JPG 和 RAW 的默认程序…"
@@ -1118,7 +1121,7 @@ msgid "Соберите приложение, чтобы Проводник за
 msgstr "请打包应用，以便资源管理器启动 ctrlka.exe。"
 
 msgid "Доступно в собранном приложении Контрольки."
-msgstr "在打包后的 Kontrolka 应用中可用。"
+msgstr "在打包后的 Controlka 应用中可用。"
 
 msgid "Удалить из Проводника"
 msgstr "从资源管理器中移除"
@@ -1133,7 +1136,7 @@ msgid "Удалить интеграцию?"
 msgstr "移除集成？"
 
 msgid "Убрать команду «Открыть в Контрольке» из Проводника?"
-msgstr "从资源管理器中移除「在 Kontrolka 中打开」命令？"
+msgstr "从资源管理器中移除「在 Controlka 中打开」命令？"
 
 msgid "Не удалось изменить Проводник"
 msgstr "无法修改资源管理器"
@@ -1237,9 +1240,6 @@ msgstr "当前配置文件：{name}（{source}）。"
 msgid "ICC-профили (*.icc *.icm)"
 msgstr "ICC 配置文件 (*.icc *.icm)"
 
-msgid "Контролька"
-msgstr "Kontrolka"
-
 #, python-brace-format
 msgid "Версия {version}"
 msgstr "版本 {version}"
@@ -1260,7 +1260,7 @@ msgstr ""
 "<b>作者：</b> Igor Zalomskij &lt;<a "
 "href=\"mailto:igor@zalomskij.ru\">igor@zalomskij.ru</a>&gt;<br>© 2026 "
 "Igor Zalomskij。基于 GNU GPL v3 或更高版本许可。<br><a "
-"href=\"https://shotsync.ru/ctrlka\">ShotSync 上的 Kontrolka</a><br><a "
+"href=\"https://shotsync.ru/ctrlka\">ShotSync 上的 Controlka</a><br><a "
 "href=\"https://github.com/kaist/RAWww\">GitHub 上的源代码</a>"
 
 msgid ""
@@ -1915,3 +1915,11 @@ msgstr "表格 (*.csv *.tsv *.xlsx)"
 msgid "Импортировано: {imported}, пропущено: {skipped}"
 msgstr "已导入：{imported}，已跳过：{skipped}"
 
+msgid "Открыть в Контрольке"
+msgstr "在 Controlka 中打开"
+
+msgid "Контролька: фотографии RAW и JPG"
+msgstr "Controlka：RAW 和 JPG 照片"
+
+msgid "Быстрый просмотр и отбор RAW и JPG"
+msgstr "快速查看和筛选 RAW 与 JPG 照片"

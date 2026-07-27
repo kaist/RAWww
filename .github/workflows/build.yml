@@ -156,11 +156,11 @@ jobs:
           # Applications: пользователь устанавливает его перетаскиванием.
           dmg_root="$(mktemp -d "$RUNNER_TEMP/ctrlka-dmg.XXXXXX")"
           trap 'rm -rf "$dmg_root"' EXIT
-          ditto "dist/ctrlka.app" "$dmg_root/Контролька.app"
+          ditto "dist/ctrlka.app" "$dmg_root/ctrlka.app"
           ln -s /Applications "$dmg_root/Applications"
           # -fs HFS+ обязателен: без него hdiutil на macOS 14/15 создаёт APFS-образ,
           # который не монтируется на более старых версиях macOS.
-          hdiutil create -volname Контролька -srcfolder "$dmg_root" -fs HFS+ -ov -format UDZO "dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"
+          hdiutil create -volname Controlka -srcfolder "$dmg_root" -fs HFS+ -ov -format UDZO "dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg"
 
       - name: Verify macOS DMG launches like a real user
         if: runner.os == 'macOS'
@@ -182,7 +182,7 @@ jobs:
           app_dir="$RUNNER_TEMP/ctrlka-installed.app"
           rm -rf "$app_dir"
           # Копируем .app из образа, как пользователь перетаскивает его в Applications.
-          cp -R "$mount_dir/Контролька.app" "$app_dir"
+          cp -R "$mount_dir/ctrlka.app" "$app_dir"
           hdiutil detach "$mount_dir"
 
           echo "== Оценка Gatekeeper (spctl) =="
@@ -232,7 +232,10 @@ jobs:
           cat > AppDir/usr/share/applications/ctrlka.desktop <<'DESKTOP'
           [Desktop Entry]
           Type=Application
-          Name=Контролька
+          Name=Controlka
+          Name[ru]=Контролька
+          Name[de]=Controlka
+          Name[zh_CN]=Controlka
           Exec=ctrlka
           Icon=ctrlka
           Categories=Graphics;Photography;

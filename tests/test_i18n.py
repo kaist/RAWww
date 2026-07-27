@@ -93,6 +93,17 @@ class ActivateTest(unittest.TestCase):
         i18n.activate("de")
         self.assertEqual(i18n.gettext("Рейтинг {n}").format(n=3), "Bewertung 3")
 
+    def test_application_name_is_localized(self) -> None:
+        for language, expected in (
+            ("ru", "Контролька"),
+            ("en", "Controlka"),
+            ("de", "Controlka"),
+            ("zh", "Controlka"),
+        ):
+            with self.subTest(language=language):
+                i18n.activate(language)
+                self.assertEqual(i18n.gettext("Контролька"), expected)
+
     def test_activate_russian_returns_source_string(self) -> None:
         i18n.activate("ru")
         self.assertEqual(i18n.gettext("Настройки"), "Настройки")
