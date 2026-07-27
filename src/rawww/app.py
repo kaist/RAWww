@@ -14,6 +14,7 @@ import os
 import sys
 import signal
 import math
+import stat
 import shutil
 import base64
 import json
@@ -5832,6 +5833,7 @@ class Workspace(QMainWindow):
             return
         if visible:
             loader = self.grid_restore_loader
+            self._fit_grid_restore_loader()
             loader.move(
                 max(0, (self.grid_content_stack.width() - loader.width()) // 2),
                 max(0, (self.grid_content_stack.height() - loader.height()) // 2),
@@ -5840,6 +5842,16 @@ class Workspace(QMainWindow):
             loader.raise_()
             return
         self.grid_restore_loader.hide()
+
+    def _fit_grid_restore_loader(self) -> None:
+        """Расширяет оверлей под локализованный текст, сохраняя прогресс читаемым."""
+        text_width = math.ceil(
+            QFontMetricsF(self.grid_restore_loader_label.font()).horizontalAdvance(
+                self.grid_restore_loader_label.text()
+            )
+        )
+        # По 22 px слева и справа совпадают с отступами layout оверлея.
+        self.grid_restore_loader.setFixedSize(max(220, text_width + 44), 76)
 
     def _schedule_grid_restore_loader(self) -> None:
         """Откладывает оверлей, чтобы быстрый переход между папками не мигал."""
@@ -12995,7 +13007,7 @@ def _scan_directory(directory: Path) -> list[Path]:
         entries = []
         for entry in directory.iterdir():
             try:
-                if entry.is_dir():
+                if entry.is_dir() and not _is_hidden_directory(entry):
                     entries.append(entry)
                 elif entry.is_file() and is_supported_media(entry):
                     entries.append(entry)
@@ -13004,6 +13016,26 @@ def _scan_directory(directory: Path) -> list[Path]:
         return entries
     except OSError:
         return []
+
+
+def _is_hidden_directory(path: Path) -> bool:
+    """Отсекает скрытые и системные каталоги, не предназначенные для навигации.
+
+    На POSIX скрытие задаётся точкой в имени, а Windows хранит его в атрибутах.
+    Системные каталоги Windows, например ``System Volume Information``, также
+    исключаются: открывать их из фотокаталога бесполезно и часто нельзя.
+    """
+    if path.name.startswith("."):
+        return True
+    try:
+        attributes = path.stat().st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    hidden_or_system = (
+        getattr(stat, "FILE_ATTRIBUTE_HIDDEN", 0)
+        | getattr(stat, "FILE_ATTRIBUTE_SYSTEM", 0)
+    )
+    return bool(attributes & hidden_or_system)
 
 
 def _scan_canon_bursts(paths: list[Path]) -> dict[Path, BurstIndex]:

@@ -1336,6 +1336,17 @@ class AppStateTests(unittest.TestCase):
             with patch.object(Path, "open", side_effect=PermissionError):
                 self.assertEqual(_scan_directory(folder), [photo])
 
+    def test_directory_scan_skips_hidden_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            hidden = folder / ".hidden"
+            hidden.mkdir()
+            (hidden / "photo.jpg").write_bytes(b"image")
+            photo = folder / "photo.jpg"
+            photo.write_bytes(b"image")
+
+            self.assertEqual(_scan_directory(folder), [photo])
+
     def test_rename_uses_one_pass_when_names_do_not_intersect(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)
