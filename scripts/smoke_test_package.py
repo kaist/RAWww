@@ -86,18 +86,37 @@ def _check_application(executable: Path, screenshot_path: Path | None = None) ->
                 process.wait(timeout=5)
 
 
+def _check_metadata(executable: Path, sample: Path) -> None:
+    """Запускает в готовом пакете чтение fixture через нативный pyexiv2."""
+    environment = os.environ.copy()
+    environment["RAWWW_METADATA_SMOKE_PATH"] = str(sample)
+    result = subprocess.run(
+        [str(executable)], capture_output=True, text=True, env=environment, timeout=30
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Packaged metadata smoke test failed with code {result.returncode}: "
+            f"{result.stdout[-2000:]}{result.stderr[-2000:]}"
+        )
+    print(f"Packaged metadata smoke test passed: {sample.name}")
+
+
 def main() -> None:
     """Запускает проверки для каталога, созданного PyInstaller до упаковки артефакта."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--app-dir", type=Path, required=True)
     parser.add_argument("--screenshot", type=Path)
+    parser.add_argument("--metadata-sample", type=Path, action="append", default=[])
     args = parser.parse_args()
     if args.app_dir.suffix == ".app":
         _check_macos_bundle_names(args.app_dir.resolve())
+    application = _application_path(args.app_dir.resolve())
     _check_application(
-        _application_path(args.app_dir.resolve()),
+        application,
         args.screenshot.resolve() if args.screenshot else None,
     )
+    for sample in args.metadata_sample:
+        _check_metadata(application, sample.resolve())
 
 
 if __name__ == "__main__":
