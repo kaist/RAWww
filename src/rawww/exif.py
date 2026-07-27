@@ -127,8 +127,9 @@ def extract_metadata_batch(paths: list[str]) -> list[tuple[str, str]]:
             if raw is None:
                 continue
             exif = sanitize_exif(raw)
+            # Полный MakerNote может занимать десятки килобайт, но UI использует
+            # только нормализованную сводку ниже. Не раздуваем SQLite-кэш.
             metadata = {
-                "exif": exif,
                 "orientation": normalize_orientation(first_tag(exif, "EXIF:Orientation", "Orientation")),
                 "rating": normalize_rating(first_tag(exif, "XMP:Rating", "EXIF:Rating", "Rating")),
                 "capture_settings": capture_settings(exif),

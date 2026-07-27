@@ -128,8 +128,7 @@ def _is_failed_metadata_payload(payload: str) -> bool:
     except (TypeError, ValueError):
         return True
     return (
-        metadata.get("exif") == {}
-        and metadata.get("orientation") is None
+        metadata.get("orientation") is None
         and metadata.get("rating") is None
         and metadata.get("capture_settings") == {}
         and metadata.get("camera") == {}

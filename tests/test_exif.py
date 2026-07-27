@@ -34,6 +34,7 @@ class ExifTests(unittest.TestCase):
             results = extract_metadata_batch(["photo.raw"])
 
         metadata = json.loads(results[0][1])
+        self.assertNotIn("exif", metadata)
         self.assertEqual(metadata["rating"], 4)
         self.assertEqual(metadata["capture_settings"], {
             "exposure_time": 0.008,
