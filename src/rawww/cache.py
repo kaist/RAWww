@@ -121,6 +121,22 @@ def _cache_name(path: Path) -> str:
     return str(value) if value else path.name
 
 
+def _is_failed_metadata_payload(payload: str) -> bool:
+    """Отличает сохранённый результат без тегов от пустышки старого backend'а."""
+    try:
+        metadata = json.loads(payload)
+    except (TypeError, ValueError):
+        return True
+    return (
+        metadata.get("exif") == {}
+        and metadata.get("orientation") is None
+        and metadata.get("rating") is None
+        and metadata.get("capture_settings") == {}
+        and metadata.get("camera") == {}
+        and metadata.get("original_datetime") is None
+    )
+
+
 def persist_burst_materialization(
     folder: Path,
     source_name: str,
@@ -381,7 +397,25 @@ class FolderCache:
         return self._missing_paths(paths, table)
 
     def missing_metadata_paths(self, paths: list[Path]) -> list[Path]:
-        return self._missing_paths(paths, "photo_metadata")
+        """Возвращает отсутствующие и ошибочно пустые EXIF-записи.
+
+        Ранние версии backend pyexiv2 записывали пустой JSON при ошибке чтения
+        Unicode-пути на Windows. Такие строки не являются результатом анализа
+        и должны быть автоматически обработаны повторно.
+        """
+        missing = []
+        with self._lock:
+            db = self._db_or_raise()
+            for path in paths:
+                stamp = _stamp(path)
+                row = db.execute(
+                    """SELECT metadata_json FROM photo_metadata
+                    WHERE name=? AND file_size=? AND mtime_ns=?""",
+                    (path.name, stamp.size, stamp.mtime_ns),
+                ).fetchone()
+                if row is None or _is_failed_metadata_payload(row[0]):
+                    missing.append(path)
+        return missing
 
     def _missing_paths(self, paths: list[Path], table: str) -> list[Path]:
         missing = []

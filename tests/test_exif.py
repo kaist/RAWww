@@ -44,6 +44,27 @@ class ExifTests(unittest.TestCase):
         })
         self.assertEqual(metadata["camera"], {})
 
+    def test_failed_metadata_read_is_not_cached_as_empty_result(self) -> None:
+        """Ошибка чтения должна остаться кандидатом на повторную обработку."""
+        with patch("rawww.exif.read_metadata_batch", return_value=[None]):
+            self.assertEqual(extract_metadata_batch(["photo.raw"]), [])
+
+    def test_empty_metadata_from_old_backend_is_retried(self) -> None:
+        """Кэш, созданный до исправления Unicode-путей, обновляется сам."""
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            path = folder / "photo.jpg"
+            path.write_bytes(b"image")
+            cache = FolderCache(folder, {path.name}, cache_root=folder / "cache")
+            cache.store_photo_metadata([(
+                str(path),
+                '{"exif":{},"orientation":null,"rating":null,"capture_settings":{},'
+                '"camera":{},"original_datetime":null}',
+            )])
+
+            self.assertEqual(cache.missing_metadata_paths([path]), [path])
+            cache.close(flush=False)
+
     def test_camera_identity_prefers_serial_for_filtering(self) -> None:
         camera = camera_details({"EXIF:Model": "Camera X", "MakerNotes:SerialNumber": "SN-42"})
         self.assertEqual(camera, {"model": "Camera X", "serial_number": "SN-42"})

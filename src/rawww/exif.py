@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +29,11 @@ from .worker_priority import lower_background_priority
 METADATA_BATCH_SIZE = 32
 def read_metadata(path: str) -> dict:
     """Читает EXIF и XMP одного файла, всегда освобождая нативный дескриптор."""
-    image = pyexiv2.Image(path)
+    # Windows-сборка pyexiv2 передаёт байтовый путь в узкий API Exiv2. Для
+    # кириллицы ему нужна системная кодировка, тогда как остальные платформы
+    # корректно принимают UTF-8.
+    encoding = "mbcs" if os.name == "nt" else "utf-8"
+    image = pyexiv2.Image(path, encoding=encoding)
     try:
         exif = image.read_exif()
         xmp = image.read_xmp()
@@ -37,14 +42,17 @@ def read_metadata(path: str) -> dict:
     return _normalize_pyexiv2_metadata(exif, xmp)
 
 
-def read_metadata_batch(paths: list[str]) -> list[dict]:
+def read_metadata_batch(paths: list[str]) -> list[dict | None]:
     """Читает пакет без общего нативного состояния, сохраняя порядок входных путей."""
     results = []
     for path in paths:
         try:
             results.append(read_metadata(path))
         except (OSError, RuntimeError, ValueError):
-            results.append({})
+            # None отличается от честного пустого EXIF: такая фотография должна
+            # остаться в очереди и быть повторно обработана после исправления
+            # временной ошибки доступа или загрузки нативной библиотеки.
+            results.append(None)
     return results
 
 
@@ -115,7 +123,9 @@ def extract_metadata_batch(paths: list[str]) -> list[tuple[str, str]]:
         return results
     for index, path in enumerate(paths):
         try:
-            raw = payloads[index] if index < len(payloads) else {}
+            raw = payloads[index] if index < len(payloads) else None
+            if raw is None:
+                continue
             exif = sanitize_exif(raw)
             metadata = {
                 "exif": exif,
