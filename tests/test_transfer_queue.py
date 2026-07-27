@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -19,7 +19,7 @@ from PySide6.QtGui import QKeySequence
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
 
-from rawww.app import MainWindow
+from rawww.app import MainWindow, Workspace
 from rawww.dialogs import QuickTransferDialog
 from rawww.transfer_queue import (
     TransferEntry,
@@ -139,6 +139,54 @@ class TransferQueueTests(unittest.TestCase):
 
         self.assertEqual([task.identifier for task in self.manager.pending], [first])
         self.assertFalse(self.manager.target_reserved(destination / "second.raw"))
+
+    def test_progress_aggregates_active_tasks_by_bytes(self) -> None:
+        destination = Path(self.temp.name)
+        first = TransferTask([], destination, False)
+        first.transferred_bytes = 3
+        first.total_bytes = 10
+        second = TransferTask([], destination, False)
+        second.transferred_bytes = 12
+        second.total_bytes = 20
+        self.manager.active = {first.identifier: first, second.identifier: second}
+
+        self.assertEqual(self.manager.progress(), (15, 30))
+
+    def test_progress_uses_files_when_active_tasks_have_no_bytes(self) -> None:
+        destination = Path(self.temp.name)
+        task = TransferTask([], destination, False)
+        task.completed_files = 2
+        task.total_files = 3
+        self.manager.active[task.identifier] = task
+
+        self.assertEqual(self.manager.progress(), (2, 3))
+
+    def test_main_window_refreshes_taskbar_when_queue_changes(self) -> None:
+        workspace = SimpleNamespace(_set_taskbar_progress=Mock())
+        window = SimpleNamespace(
+            _closing=False,
+            workspace_stack=SimpleNamespace(currentWidget=lambda: workspace),
+        )
+
+        with patch("rawww.app.Workspace", SimpleNamespace):
+            MainWindow._refresh_transfer_taskbar_progress(window)
+
+        workspace._set_taskbar_progress.assert_called_once_with(0, 0)
+
+    def test_workspace_taskbar_prefers_active_transfer_progress(self) -> None:
+        taskbar = Mock()
+        dock = Mock()
+        workspace = SimpleNamespace(
+            transfer_manager=SimpleNamespace(progress=lambda: (7, 9)),
+            _taskbar_progress=taskbar,
+            _dock_progress=dock,
+            window=lambda: SimpleNamespace(winId=lambda: 42),
+        )
+
+        Workspace._set_taskbar_progress(workspace, 2, 3)
+
+        taskbar.set_progress.assert_called_once_with(42, 7, 9)
+        dock.set_progress.assert_called_once_with(7, 9)
 
     def test_parallel_card_tasks_share_slots_when_regular_queue_is_serial(self) -> None:
         root = Path(self.temp.name)

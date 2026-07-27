@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import unittest
 from contextlib import closing
 from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic, sleep
@@ -19,6 +21,11 @@ import rawww.cache as cache_module
 from rawww.cache import FolderCache
 from rawww.imaging import decode_pixels
 from rawww.ai import AiPipeline, prepare_analysis_batch
+
+
+def _worker_process_id() -> int:
+    """Возвращает PID для проверки реального завершения процесса пула."""
+    return os.getpid()
 
 
 class CacheTests(unittest.TestCase):
@@ -39,6 +46,26 @@ class CacheTests(unittest.TestCase):
         self.assertIsNone(pipeline.embedding_workers)
         self.assertIsNone(pipeline.face_workers)
         pipeline.shutdown()
+
+    def test_released_ai_pool_process_actually_exits(self) -> None:
+        pipeline = AiPipeline()
+        pool = ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn"))
+        try:
+            pool.submit(_worker_process_id).result(timeout=10)
+            processes = tuple(pool._processes.values())
+            self.assertTrue(processes)
+            self.assertTrue(all(process.is_alive() for process in processes))
+            pipeline.source_workers = pool
+
+            pipeline.release_analysis_workers()
+
+            deadline = monotonic() + 5
+            while any(process.is_alive() for process in processes) and monotonic() < deadline:
+                sleep(0.01)
+            self.assertTrue(all(not process.is_alive() for process in processes))
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+            pipeline.shutdown()
 
     def test_ai_cache_preparation_runs_outside_the_caller_thread(self) -> None:
         pipeline = AiPipeline()

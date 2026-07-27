@@ -149,6 +149,7 @@ from .i18n import gettext as _
 
 THUMB_SIZE = 256
 ORIGINAL_SIZE = 0
+VIDEO_THUMBNAIL_TIMEOUT_MS = 10_000
 # Ниже этого eye aspect ratio глаз считается закрытым (порог подобран на кадрах:
 # у открытых глаз EAR заметно выше, у закрытых — ниже).
 EYES_OPEN_THRESHOLD = 0.25
@@ -516,6 +517,10 @@ class VideoThumbnailer(QObject):
         self._sink.videoFrameChanged.connect(self._frame_ready)
         self._player.mediaStatusChanged.connect(self._media_status_changed)
         self._player.errorOccurred.connect(lambda *_args: self._finish_current())
+        self._timeout_timer = QTimer(self)
+        self._timeout_timer.setSingleShot(True)
+        self._timeout_timer.setInterval(VIDEO_THUMBNAIL_TIMEOUT_MS)
+        self._timeout_timer.timeout.connect(self._finish_current)
 
     def request(self, path: Path) -> None:
         if not self._active:
@@ -541,10 +546,15 @@ class VideoThumbnailer(QObject):
 
     def _reset_current(self) -> None:
         self._generation += 1
+        self._timeout_timer.stop()
         self._player.stop()
         self._current = None
         self._current_source = None
         self._ready_for_frame = False
+        # stop() оставляет URL назначенным и на Windows мультимедийный backend
+        # может продолжать держать исходный файл. Пустой source закрывает его явно.
+        if not self._player.source().isEmpty():
+            self._player.setSource(QUrl())
 
     def _maybe_start(self) -> None:
         if self._current is not None:
@@ -561,6 +571,7 @@ class VideoThumbnailer(QObject):
         self._current_source = QUrl.fromLocalFile(str(path))
         self._player.setSource(self._current_source)
         self._player.play()
+        self._timeout_timer.start()
 
     def _is_current_source(self) -> bool:
         return self._current is not None and self._player.source() == self._current_source
@@ -573,6 +584,11 @@ class VideoThumbnailer(QObject):
             QMediaPlayer.MediaStatus.BufferedMedia,
         ):
             self._ready_for_frame = True
+        elif status in (
+            QMediaPlayer.MediaStatus.InvalidMedia,
+            QMediaPlayer.MediaStatus.EndOfMedia,
+        ):
+            self._finish_current()
 
     def _frame_ready(self, frame) -> None:
         if not self._ready_for_frame or not frame.isValid():
@@ -2697,13 +2713,19 @@ class FullView(QFrame):
 
     def stop_video(self) -> None:
         """Полностью останавливает видео при выходе из полноэкранного режима."""
-        if not self._is_video:
+        has_source = not self.video_player.source().isEmpty()
+        if not self._is_video and not has_source:
             return
         self.video_player.stop()
+        if has_source:
+            self.video_player.setSource(QUrl())
+        self._is_video = False
         self.video_play_button.setIcon(_fomantic_icon("play", 12))
 
     def stop_audio(self) -> None:
         self.audio_player.stop()
+        if not self.audio_player.source().isEmpty():
+            self.audio_player.setSource(QUrl())
 
     def set_quick_mark(self, kind: str, value: object) -> None:
         self.meta_bar.set_quick_mark(kind, value)
@@ -2844,8 +2866,7 @@ class FullView(QFrame):
     def set_image(self, decoded: DecodedImage, *, fallback: bool = False) -> None:
         if self._path != decoded.path:
             self.stop_audio()
-        self.video_player.stop()
-        self._is_video = False
+        self.stop_video()
         self._update_mark_indicator()
         self.video_controls.hide()
         self.media_stack.setCurrentWidget(self.image_view)
@@ -4623,10 +4644,7 @@ class Workspace(QMainWindow):
         self.xmp_bulk_timer.stop()
         self._xmp_bulk_queue.clear()
         self._xmp_bulk_queued.clear()
-        self.video_thumbnailer.cancel()
-        self.full_view.stop_video()
-        self.full_view.stop_audio()
-        self.grid_audio_player.stop()
+        self._release_media_sources()
         self._flush_folder_cache(wait=False, close=True)
         self._detach_shotsync_syncer()
         self.shotsync_client.shutdown()
@@ -4689,6 +4707,25 @@ class Workspace(QMainWindow):
                 continue
         return False
 
+    def _release_media_sources(self) -> bool:
+        """Снимает все URL мультимедиа, чтобы Windows не удерживал файлы рабочей папки."""
+        had_media = bool(
+            self.video_thumbnailer._current is not None
+            or not self.full_view.video_player.source().isEmpty()
+            or not self.full_view.audio_player.source().isEmpty()
+            or not self.grid_audio_player.source().isEmpty()
+        )
+        self.full_view.stop_video()
+        self.full_view.stop_audio()
+        self.grid_audio_player.stop()
+        if not self.grid_audio_player.source().isEmpty():
+            self.grid_audio_player.setSource(QUrl())
+        self.grid_audio_path = ""
+        # Остановка FullView может снова активировать очередь миниатюр сигналом
+        # playbackStateChanged, поэтому миниатюрщик сбрасывается последним.
+        self.video_thumbnailer.cancel()
+        return had_media
+
     def _run_after_file_consumers_release(
         self,
         paths: list[Path],
@@ -4722,6 +4759,7 @@ class Workspace(QMainWindow):
         original_dir = self.current_dir
         original_generation = self.directory_generation
         touches_workspace = self._paths_touch_current_workspace(paths)
+        had_media = False
         futures = set(self.scheduler.pending_futures()) if touches_workspace else set()
         if touches_workspace:
             self.populate_timer.stop()
@@ -4733,8 +4771,7 @@ class Workspace(QMainWindow):
             self.pending_grid_full_request = None
             self.scheduler.cancel_pending()
             self.scheduler.abandon_preview_decode_work()
-            self.video_thumbnailer.cancel()
-            self.full_view.stop_video()
+            had_media = self._release_media_sources()
             self._cancel_face_search()
             self._set_face_search_loading(False)
 
@@ -4773,7 +4810,7 @@ class Workspace(QMainWindow):
                 self._file_mutation_waiting = False
                 return
             if any(not future.done() for future in futures):
-                QTimer.singleShot(25, finish_when_released)
+                QTimer.singleShot(10, finish_when_released)
                 return
             self._file_mutation_waiting = False
             try:
@@ -4806,7 +4843,9 @@ class Workspace(QMainWindow):
                 if had_ai:
                     self._start_ai_analysis()
 
-        QTimer.singleShot(0, finish_when_released)
+        # Qt Multimedia освобождает backend асинхронно даже после пустого source.
+        # Один короткий проход event loop убирает редкую гонку rename/rmtree на Windows.
+        QTimer.singleShot(25 if had_media else 0, finish_when_released)
 
     def _start_cache_maintenance(self) -> None:
         """Запускает обслуживание кэша после срочных стартовых задач."""
@@ -5801,30 +5840,44 @@ class Workspace(QMainWindow):
                 current_relative = self.current_dir.relative_to(old_path)
             except ValueError:
                 current_relative = None
-            if current_relative is not None:
-                self._flush_folder_cache(wait=True, close=True)
-                self.folder_cache = None
-                self.cache_ready = False
-            try:
-                old_path.rename(new_path)
-            except OSError as error:
-                editor.setStyleSheet("border: 1px solid #c43d2f;")
-                editor.setToolTip(str(error))
-                if current_relative is not None:
-                    self.load_directory(old_path / current_relative)
-                QTimer.singleShot(0, editor.setFocus)
-                return
-            try:
-                relocate_folder_caches(old_path, new_path)
-            except OSError as error:
-                QMessageBox.warning(
-                    self,
-                    _("Кэш папки"),
-                    _("Папка переименована, но не удалось перенести её кэш:\n{error}").format(error=error),
-                )
-            if current_relative is not None:
-                self.load_directory(new_path / current_relative)
+            self._finish_folder_name_editor()
+            self._run_after_file_consumers_release(
+                [old_path],
+                lambda source=old_path, target=new_path, relative=current_relative:
+                self._rename_directory_now(source, target, relative),
+                restart_consumers=False,
+            )
+            return
         self._finish_folder_name_editor()
+
+    def _rename_directory_now(
+        self,
+        old_path: Path,
+        new_path: Path,
+        current_relative: Path | None,
+    ) -> None:
+        """Переименовывает папку после закрытия декодеров, мультимедиа и SQLite."""
+        if current_relative is not None:
+            self._flush_folder_cache(wait=True, close=True)
+            self.folder_cache = None
+            self.cache_ready = False
+        try:
+            old_path.rename(new_path)
+        except OSError as error:
+            if current_relative is not None:
+                self.load_directory(old_path / current_relative)
+            QMessageBox.warning(self, _("Переименовать"), str(error))
+            return
+        try:
+            relocate_folder_caches(old_path, new_path)
+        except OSError as error:
+            QMessageBox.warning(
+                self,
+                _("Кэш папки"),
+                _("Папка переименована, но не удалось перенести её кэш:\n{error}").format(error=error),
+            )
+        if current_relative is not None:
+            self.load_directory(new_path / current_relative)
 
     def _cancel_folder_name(self) -> None:
         self._finish_folder_name_editor()
@@ -7171,13 +7224,23 @@ class Workspace(QMainWindow):
             _("Удалить"),
         ):
             return
+        self._run_after_file_consumers_release(
+            [folder],
+            lambda target=folder, identifier=shooting_id:
+            self._remove_shotsync_folder_now(target, identifier, warn=True),
+            restart_consumers=False,
+            loading_text=_("Выполняется удаление"),
+        )
+
+    def _remove_shotsync_folder_now(self, folder: Path, shooting_id: int, *, warn: bool) -> None:
+        """Удаляет локальную папку ShotSync после освобождения всех её читателей."""
         if folder == self.current_dir:
-            fallback = folder.parent
-            self.load_directory(fallback)
+            self.load_directory(folder.parent)
         try:
             shutil.rmtree(folder)
         except OSError as exc:
-            QMessageBox.warning(self, "ShotSync", _("Не удалось удалить локальную папку:\n{error}").format(error=exc))
+            if warn:
+                QMessageBox.warning(self, "ShotSync", _("Не удалось удалить локальную папку:\n{error}").format(error=exc))
             return
         self._forget_shotsync_folder(shooting_id)
         self._forget_shotsync_selection(shooting_id)
@@ -7349,15 +7412,13 @@ class Workspace(QMainWindow):
         folder = self._local_shotsync_folder(shooting_id)
         if folder is None:
             return
-        if folder == self.current_dir:
-            self.load_directory(folder.parent)
-        try:
-            shutil.rmtree(folder)
-        except OSError:
-            return
-        self._forget_shotsync_folder(shooting_id)
-        self._forget_shotsync_selection(shooting_id)
-        self._refresh_shotsync_local_folders(self._shotsync_shootings)
+        self._run_after_file_consumers_release(
+            [folder],
+            lambda target=folder, identifier=shooting_id:
+            self._remove_shotsync_folder_now(target, identifier, warn=False),
+            restart_consumers=False,
+            loading_text=_("Выполняется удаление"),
+        )
 
     def _apply_external_selection(
         self, name: str, *, rating: int | None, color_label: str, comment: str
@@ -7770,14 +7831,20 @@ class Workspace(QMainWindow):
         self.pending_grid_full_request = None
         if switching_directory:
             self._abandon_preview_decode_work()
-        if self._ai_pipeline is not None and self._ai_pipeline.pending_count() > 0:
-            self._ai_pipeline.shutdown()
-            self._ai_pipeline = None
-            self._resume_ai_when_active = False
+        if self._ai_pipeline is not None:
+            if self._ai_pipeline.pending_count() > 0:
+                self._ai_pipeline.shutdown()
+                self._ai_pipeline = None
+                self._resume_ai_when_active = False
+            else:
+                # Последний Future может завершиться между тиками прогресса.
+                # В этом окне таймер ниже уже остановится, поэтому освобождаем
+                # процессы с ONNX-моделями прямо при смене папки.
+                self._ai_pipeline.release_analysis_workers()
         if self._metadata_pipeline is not None:
             self._metadata_pipeline.shutdown()
             self._metadata_pipeline = None
-        self.video_thumbnailer.cancel()
+        self._release_media_sources()
         self.decode_cache.clear()
         self.populate_timer.stop()
         self.thumb_timer.stop()
@@ -9408,6 +9475,10 @@ class Workspace(QMainWindow):
         ))
 
     def _set_taskbar_progress(self, value: int, total: int) -> None:
+        if self.transfer_manager is not None:
+            transfer_value, transfer_total = self.transfer_manager.progress()
+            if transfer_total:
+                value, total = transfer_value, transfer_total
         self._taskbar_progress.set_progress(int(self.window().winId()), value, total)
         self._dock_progress.set_progress(value, total)
 
@@ -11425,6 +11496,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = _application_settings()
         self.transfer_manager = TransferManager(self.settings, self)
+        self.transfer_manager.changed.connect(self._refresh_transfer_taskbar_progress)
         self.transfer_manager.taskFinished.connect(self._transfer_task_finished)
         self._card_import_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="card-import")
         self._card_import_backups: dict[str, tuple[list[TransferEntry], Path, Path, bool]] = {}
@@ -11839,6 +11911,14 @@ class MainWindow(QMainWindow):
                 _("Файловая операция"),
                 _("Не удалось обработать некоторые объекты:\n") + "\n".join(task.errors),
             )
+
+    def _refresh_transfer_taskbar_progress(self) -> None:
+        """Обновляет индикатор окна при изменении общей очереди файлов."""
+        if self._closing:
+            return
+        workspace = self.workspace_stack.currentWidget()
+        if isinstance(workspace, Workspace):
+            workspace._set_taskbar_progress(0, 0)
 
     def _show_card_import(self, sources: list[tuple[Path, str]], parent: QWidget) -> None:
         """Открывает единый диалог импорта для карт, выбранных во вкладке."""

@@ -185,6 +185,23 @@ class TransferManager(QObject):
             for entry in task.entries
         }
 
+    def progress(self) -> tuple[int, int]:
+        """Возвращает общий прогресс активных операций для индикатора приложения.
+
+        Панель задач одна на всё окно, тогда как операций может быть до трёх.
+        Байты точнее отражают копирование больших RAW; счётчик файлов остаётся
+        запасным вариантом для набора из файлов нулевого размера.
+        """
+        active = tuple(self.active.values())
+        completed_bytes = sum(task.transferred_bytes for task in active)
+        total_bytes = sum(task.total_bytes for task in active)
+        if total_bytes:
+            return completed_bytes, total_bytes
+        return (
+            sum(task.completed_files for task in active),
+            sum(task.total_files for task in active),
+        )
+
     def set_paused(self, paused: bool) -> None:
         """Приостанавливает активные задачи на ближайшей границе блока данных."""
         for task in self.active.values():

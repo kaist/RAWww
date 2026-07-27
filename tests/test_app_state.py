@@ -14,12 +14,12 @@ from unittest.mock import Mock, call, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt, QUrl
 from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMenu, QStackedWidget, QWidget
 
-from rawww.app import ChromeTabBar, FullView, MainWindow, Workspace, _application_settings, _drive_key, _format_remaining_time, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_xmp_task
+from rawww.app import ChromeTabBar, FullView, MainWindow, VideoThumbnailer, Workspace, _application_settings, _drive_key, _format_remaining_time, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_xmp_task
 from rawww.hotkeys import FIXED_HOTKEYS
 from rawww.theme import apply_theme
 
@@ -118,6 +118,37 @@ class AppStateTests(unittest.TestCase):
         self.assertEqual(requested, [True])
         view.deleteLater()
         parent.deleteLater()
+
+    def test_video_thumbnail_cancel_clears_media_source_and_timeout(self) -> None:
+        thumbnailer = VideoThumbnailer()
+        path = Path("/photos/preview.mp4")
+
+        thumbnailer.request(path)
+        self.assertEqual(thumbnailer._player.source(), QUrl.fromLocalFile(str(path)))
+        self.assertTrue(thumbnailer._timeout_timer.isActive())
+
+        thumbnailer.cancel()
+
+        self.assertTrue(thumbnailer._player.source().isEmpty())
+        self.assertFalse(thumbnailer._timeout_timer.isActive())
+        self.assertIsNone(thumbnailer._current)
+        thumbnailer.deleteLater()
+        self.app.processEvents()
+
+    def test_full_view_stop_media_clears_sources(self) -> None:
+        view = FullView()
+        video = Path("/photos/open.mp4")
+        audio = Path("/photos/comment.wav")
+        view.set_video(video)
+        view.audio_player.setSource(QUrl.fromLocalFile(str(audio)))
+
+        view.stop_video()
+        view.stop_audio()
+
+        self.assertTrue(view.video_player.source().isEmpty())
+        self.assertTrue(view.audio_player.source().isEmpty())
+        view.deleteLater()
+        self.app.processEvents()
 
     def test_portable_settings_use_an_ini_file_in_work_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -421,6 +452,46 @@ class AppStateTests(unittest.TestCase):
             self.assertTrue(workspace.grid_restore_loader.isHidden())
             workspace.close()
             workspace.deleteLater()
+
+    def test_folder_rename_is_deferred_until_file_consumers_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_path = root / "old"
+            old_path.mkdir()
+            workspace = Workspace(old_path, defer_initial_scan=True)
+            editor = Mock()
+            editor.property.return_value = str(old_path)
+            editor.text.return_value = "new"
+            workspace._folder_name_editor = editor
+            workspace._run_after_file_consumers_release = Mock()
+
+            workspace._commit_folder_name()
+
+            args, kwargs = workspace._run_after_file_consumers_release.call_args
+            self.assertEqual(args[0], [old_path])
+            self.assertFalse(kwargs["restart_consumers"])
+            self.assertTrue(old_path.is_dir())
+            args[1]()
+            self.assertTrue((root / "new").is_dir())
+            workspace.close()
+            workspace.deleteLater()
+            self.app.processEvents()
+
+    def test_directory_switch_releases_completed_ai_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            workspace = Workspace(target, defer_initial_scan=True)
+            pipeline = Mock()
+            pipeline.pending_count.return_value = 0
+            pipeline.progress.return_value = (0, 0, False)
+            workspace._ai_pipeline = pipeline
+
+            workspace.load_directory(target)
+
+            pipeline.release_analysis_workers.assert_called_once_with()
+            workspace.close()
+            workspace.deleteLater()
+            self.app.processEvents()
 
     def test_delete_waits_for_busy_photo_before_unlinking_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
