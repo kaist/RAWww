@@ -45,10 +45,31 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
+        if: runner.os != 'macOS'
         run: uv sync --locked
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        # rawpy на Intel собирается из исходников: цель должна быть задана уже
+        # здесь, иначе вложенный LibRaw наследует macOS runner-а.
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
+          CFLAGS: -mmacosx-version-min=${{ matrix.macos_min }}
+          LDFLAGS: -mmacosx-version-min=${{ matrix.macos_min }}
+        run: |
+          # uv не включает deployment target в ключ локально собранного wheel.
+          # Не переиспользуем rawpy, случайно собранный прежним запуском под 15.
+          uv cache clean rawpy
+          uv sync --locked
 
       - name: Install ExifTool packer for macOS
         if: runner.os == 'macOS'
+        # PAR::Packer компилирует загрузчик будущего ExifTool на этом шаге.
+        # Флаги после установки уже не смогут понизить его LC_BUILD_VERSION.
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
+          CFLAGS: -mmacosx-version-min=${{ matrix.macos_min }}
+          LDFLAGS: -mmacosx-version-min=${{ matrix.macos_min }}
         run: |
           brew install perl cpanminus
           perl_prefix="$(brew --prefix perl)"
