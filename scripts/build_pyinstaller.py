@@ -13,9 +13,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from build_exiftool import build_exiftool
-
-
 ROOT = Path(__file__).resolve().parents[1]
 BASE_VERSION_FILE = ROOT / "VERSION"
 DIST = ROOT / "dist" / "ctrlka"
@@ -183,7 +180,7 @@ def _localize_macos_bundle_name(app_directory: Path) -> None:
             )
 
 
-def _finalize_macos_app(bundled_exiftool: Path | None) -> None:
+def _finalize_macos_app() -> None:
     """Доводит нативный ``.app`` от PyInstaller до готового к раздаче состояния.
 
     PyInstaller уже собирает корректный бандл с правильным layout
@@ -191,7 +188,7 @@ def _finalize_macos_app(bundled_exiftool: Path | None) -> None:
     сборка выбрасывала его и вручную собирала бандл из onedir в Contents/MacOS,
     из-за чего загрузчик искал Python в Contents/Frameworks и падал ещё до окна —
     приложение «просто не запускалось». Здесь мы, наоборот, дорабатываем родной
-    бандл: докладываем ExifTool, чистим переводы и заново запечатываем подпись,
+    бандл: чистим переводы и заново запечатываем подпись,
     потому что любое изменение файлов инвалидирует ``_CodeSignature``.
     """
     if not MACOS_APP.is_dir():
@@ -200,26 +197,12 @@ def _finalize_macos_app(bundled_exiftool: Path | None) -> None:
     if not resources_data.is_dir():
         raise RuntimeError(f"macOS bundle is missing collected data at {resources_data}")
 
-    if bundled_exiftool is not None:
-        tools = resources_data / "tools"
-        tools.mkdir(parents=True, exist_ok=True)
-        target = tools / bundled_exiftool.name
-        shutil.copy2(bundled_exiftool, target)
-        target.chmod(target.stat().st_mode | 0o111)
-
     _prune_translations_in(MACOS_APP / "Contents" / "Frameworks" / "PySide6" / "translations")
     _localize_macos_bundle_name(MACOS_APP)
 
-    # Заново запечатываем бандл: добавление ExifTool и удаление лишних переводов
-    # инвалидируют исходный _CodeSignature. Сам ExifTool отдельно не переподписываем
-    # — PAR::Packer дописывает свой архив после Mach-O и ad-hoc подписывает файл, а
-    # codesign --force отвергает такой layout («main executable failed strict
-    # validation»). Готовый ExifTool уже запускается (build_exiftool проверяет -ver),
-    # поэтому просто печатаем его в ресурсы бандла как есть.
+    # Удаление лишних переводов инвалидирует исходный _CodeSignature, поэтому
+    # после изменения ресурсов запечатываем бандл заново.
     subprocess.run(["codesign", "--force", "--sign", "-", str(MACOS_APP)], check=True)
-    # Проверяем без --deep: строгая проверка вложенного PAR-ExifTool ложно падает на
-    # его дописанном архиве, тогда как печать самого бандла (главный exe + сумма
-    # ресурсов) должна быть целостной.
     subprocess.run(["codesign", "--verify", "--strict", str(MACOS_APP)], check=True)
     print(f"Finalized and re-signed macOS bundle: {MACOS_APP}")
 
@@ -310,10 +293,7 @@ def main() -> None:
     args = parser.parse_args()
     _clean_previous_build()
     _bake_build_version()
-    exiftool_runtime = ROOT / "build" / "exiftool-runtime"
-    bundled_exiftool: Path | None = None
     try:
-        bundled_exiftool = build_exiftool(exiftool_runtime)
         command = [
             sys.executable, "-m", "PyInstaller",
             "--noconfirm", "--clean", "--onedir", "--name", "ctrlka",
@@ -324,7 +304,6 @@ def main() -> None:
             "--workpath", str(ROOT / "build" / "pyinstaller"),
             "--specpath", str(ROOT / "build" / "pyinstaller"),
             "--add-data", f"{ROOT / 'src' / 'rawww' / 'models'}{os.pathsep}data/models",
-            "--add-data", f"{ROOT / 'src' / 'rawww' / 'tools'}{os.pathsep}data/tools",
             "--add-data", f"{ROOT / 'src' / 'rawww' / 'assets'}{os.pathsep}data/assets",
             "--add-data", f"{ROOT / 'src' / 'rawww' / 'locale'}{os.pathsep}data/locale",
             "--collect-binaries", "onnxruntime",
@@ -345,14 +324,10 @@ def main() -> None:
         if sys.platform == "darwin":
             # На macOS раздаётся нативный .app от PyInstaller, а не onedir:
             # у него правильный layout и цельная подпись. Доводим именно его.
-            _finalize_macos_app(bundled_exiftool)
+            _finalize_macos_app()
             _report_size(MACOS_APP)
         else:
             _move_application_data(DIST)
-            if bundled_exiftool is not None:
-                target = DIST / "data" / "tools" / bundled_exiftool.name
-                shutil.copy2(bundled_exiftool, target)
-                target.chmod(target.stat().st_mode | 0o111)
             _prune_known_unused_qt_files(DIST)
             _prune_qt_translations(DIST)
             if args.upx:
@@ -362,7 +337,6 @@ def main() -> None:
             _report_size(DIST)
     finally:
         BUILD_VERSION_MODULE.unlink(missing_ok=True)
-        shutil.rmtree(exiftool_runtime, ignore_errors=True)
 
 
 if __name__ == "__main__":

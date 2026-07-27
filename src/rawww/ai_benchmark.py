@@ -55,7 +55,7 @@ def main() -> None:
             face_count = sum(len(json.loads(row[0])) for row in db.execute("SELECT faces_json FROM face_analysis"))
         cache_size = sum(p.stat().st_size for p in cache.path.parent.glob(f"{cache.path.name}*") if p.is_file())
         cache.close(flush=False)
-    show("EXIF, stay-open ExifTool", len(exif), exif_s)
+    show("EXIF, pyexiv2", len(exif), exif_s)
     show(f"Preview decode {args.thumb_size}px", len(pixels), decode_s)
     show("Preview SQLite write", len(pixels), preview_write_s)
     show("Reusable 640px JPEG in memory", len(sources), source_s)

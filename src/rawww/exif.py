@@ -1,191 +1,121 @@
 ## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
 ## SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Получение и нормализация метаданных через долгоживущий ExifTool.
+"""Получение и нормализация метаданных через pyexiv2.
 
-Один процесс ExifTool обслуживает пакет запросов: запускать его на каждый
-кадр было бы надёжно, но слишком похоже на наказание за любовь к RAW.
+Библиотека работает в процессе Python без отдельного вспомогательного процесса.
+Здесь ключи Exiv2 приводятся к прежнему внутреннему контракту, чтобы кэш и
+остальные потребители метаданных не зависели от конкретной библиотеки.
 """
 
 from __future__ import annotations
 
-import atexit
 import json
-import shutil
-import subprocess
-import sys
 import threading
-from queue import Queue
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
-
 from concurrent.futures import Future, ProcessPoolExecutor
+
+import pyexiv2
 
 from .cache import FolderCache
 from .error_log import log_exception
-from .runtime_paths import data_path
-from .subprocess_utils import no_window_kwargs
 from .task_lifecycle import retire_executor
 
 from .worker_priority import lower_background_priority
 
 
-EXIFTOOL_TAGS = [
-    "-DateTimeOriginal", "-SubSecDateTimeOriginal", "-CreateDate", "-OffsetTimeOriginal",
-    "-Orientation", "-Rating", "-XMP:Rating", "-EXIF:Rating", "-ExposureTime",
-    "-ShutterSpeedValue", "-ISO", "-FNumber", "-ApertureValue", "-FocalLength",
-    "-Model", "-SerialNumber", "-InternalSerialNumber",
-]
-BUNDLED_WINDOWS_EXIFTOOL = data_path("tools") / "exiftool.exe"
-BUNDLED_UNIX_EXIFTOOL = data_path("tools") / "exiftool"
-BUNDLED_EXIFTOOL_SCRIPT = data_path("tools") / "exiftool_files" / "exiftool.pl"
 METADATA_BATCH_SIZE = 32
-EXIFTOOL_RESPONSE_TIMEOUT = 30.0
+def read_metadata(path: str) -> dict:
+    """Читает EXIF и XMP одного файла, всегда освобождая нативный дескриптор."""
+    image = pyexiv2.Image(path)
+    try:
+        exif = image.read_exif()
+        xmp = image.read_xmp()
+    finally:
+        image.close()
+    return _normalize_pyexiv2_metadata(exif, xmp)
 
 
-class ExifToolError(RuntimeError):
-    """Ошибка протокола или ответа фонового процесса ExifTool."""
-
-    pass
-
-
-def bundled_exiftool_command() -> list[str]:
-    """Возвращает команду ExifTool, которая поставляется вместе с приложением.
-
-    В Windows используем готовый EXE. В собранных macOS- и Linux-версиях это
-    sidecar с упакованным Perl runtime. Запуск из исходников сохраняет fallback
-    на Perl разработчика, чтобы не требовать локальную сборку для каждого теста.
-    """
-    executable = BUNDLED_WINDOWS_EXIFTOOL if sys.platform == "win32" else BUNDLED_UNIX_EXIFTOOL
-    if executable.is_file():
-        return [str(executable)]
-    if getattr(sys, "frozen", False):
-        raise ExifToolError(f"Bundled ExifTool is missing: {executable}")
-
-    if not BUNDLED_EXIFTOOL_SCRIPT.is_file():
-        raise ExifToolError(f"Bundled ExifTool is missing: {BUNDLED_EXIFTOOL_SCRIPT}")
-    perl = shutil.which("perl")
-    if perl:
-        return [perl, str(BUNDLED_EXIFTOOL_SCRIPT)]
-    raise ExifToolError("ExifTool source requires Perl when the application runs from sources")
-
-
-class ExifToolClient:
-    """Держит один долгоживущий процесс ExifTool для пакетных запросов.
-
-    Протокол ``-stay_open`` экономит запуск отдельного процесса на каждый
-    снимок. Доступ защищён блокировкой: перемешать ответы двух пакетов было бы
-    быстро, эффектно и совершенно бесполезно.
-    """
-
-    def __init__(self, command: Sequence[str] | None = None) -> None:
-        self.command = list(command) if command is not None else bundled_exiftool_command()
-        self.process: subprocess.Popen | None = None
-        self.lock = threading.Lock()
-
-    def read_metadata(self, path: str) -> dict:
-        payload = self.read_metadata_batch([path])
-        return payload[0] if payload else {}
-
-    def read_metadata_batch(self, paths: list[str]) -> list[dict]:
-        with self.lock:
-            self._ensure_process()
-            assert self.process and self.process.stdin and self.process.stdout
-            for argument in [*EXIFTOOL_TAGS, *paths]:
-                self.process.stdin.write(f"{argument}\n")
-            self.process.stdin.write("-execute\n")
-            self.process.stdin.flush()
-            lines = self._read_response()
+def read_metadata_batch(paths: list[str]) -> list[dict]:
+    """Читает пакет без общего нативного состояния, сохраняя порядок входных путей."""
+    results = []
+    for path in paths:
         try:
-            payload = json.loads("".join(lines) or "[]")
-        except json.JSONDecodeError as exc:
-            self.close()
-            raise ExifToolError("ExifTool returned invalid JSON") from exc
-        return payload if isinstance(payload, list) else []
+            results.append(read_metadata(path))
+        except (OSError, RuntimeError, ValueError):
+            results.append({})
+    return results
 
-    def _read_response(self) -> list[str]:
-        """Читает ответ с пределом ожидания, чтобы закрытие не зависло навсегда."""
-        assert self.process and self.process.stdout
-        process = self.process
-        result: Queue[list[str] | BaseException] = Queue(maxsize=1)
 
-        def read_lines() -> None:
-            lines = []
-            try:
-                while True:
-                    line = process.stdout.readline()
-                    if line == "":
-                        raise ExifToolError("ExifTool stopped before response was complete")
-                    if line.strip() == "{ready}":
-                        result.put(lines)
-                        return
-                    lines.append(line)
-            except BaseException as exc:  # noqa: BLE001 — исключение передаётся вызывающему потоку
-                result.put(exc)
+def _normalize_pyexiv2_metadata(exif: dict, xmp: dict) -> dict:
+    """Дополняет ключи Exiv2 совместимыми именами и численными значениями.
 
-        reader = threading.Thread(target=read_lines, name="exiftool-response", daemon=True)
-        reader.start()
-        reader.join(EXIFTOOL_RESPONSE_TIMEOUT)
-        if reader.is_alive():
-            self.process = None
-            process.kill()
-            process.wait(timeout=1)
-            reader.join(timeout=1)
-            raise ExifToolError("ExifTool response timeout")
-        value = result.get_nowait()
-        if isinstance(value, BaseException):
-            self.process = None
-            raise value
+    Exiv2 хранит рационали строками и не создаёт composite-время. Нормализация
+    здесь не даёт этим различиям протечь в SQLite-кэш и фильтры приложения.
+    """
+    result = {**exif, **xmp}
+    aliases = {
+        "Exif.Image.Orientation": "EXIF:Orientation",
+        "Xmp.xmp.Rating": "XMP:Rating",
+        "Exif.Photo.ExposureTime": "EXIF:ExposureTime",
+        "Exif.Photo.ShutterSpeedValue": "EXIF:ShutterSpeedValue",
+        "Exif.Photo.ISOSpeedRatings": "EXIF:ISO",
+        "Exif.Photo.FNumber": "EXIF:FNumber",
+        "Exif.Photo.ApertureValue": "EXIF:ApertureValue",
+        "Exif.Photo.FocalLength": "EXIF:FocalLength",
+        "Exif.Image.Model": "EXIF:Model",
+        "Exif.Photo.BodySerialNumber": "EXIF:SerialNumber",
+        "Exif.Photo.DateTimeOriginal": "EXIF:DateTimeOriginal",
+        "Exif.Photo.OffsetTimeOriginal": "EXIF:OffsetTimeOriginal",
+        "Exif.Photo.DateTimeDigitized": "EXIF:CreateDate",
+        "Exif.Image.DateTime": "EXIF:CreateDate",
+    }
+    numeric = {
+        "Exif.Image.Orientation", "Xmp.xmp.Rating", "Exif.Photo.ExposureTime",
+        "Exif.Photo.ShutterSpeedValue", "Exif.Photo.ISOSpeedRatings", "Exif.Photo.FNumber",
+        "Exif.Photo.ApertureValue", "Exif.Photo.FocalLength",
+    }
+    for source, target in aliases.items():
+        value = result.get(source)
+        if value not in (None, ""):
+            result[target] = _rational_to_float(value) if source in numeric else value
+    for key, value in exif.items():
+        if key.endswith(".InternalSerialNumber") and value not in (None, ""):
+            result["MakerNotes:InternalSerialNumber"] = value
+    datetime_original = result.get("Exif.Photo.DateTimeOriginal")
+    subseconds = result.get("Exif.Photo.SubSecTimeOriginal")
+    offset = result.get("Exif.Photo.OffsetTimeOriginal", "")
+    if datetime_original:
+        fraction = f".{subseconds}" if subseconds else ""
+        result["Composite:SubSecDateTimeOriginal"] = f"{datetime_original}{fraction}{offset}"
+    return result
+
+
+def _rational_to_float(value):
+    """Преобразует рациональ Exiv2 ``числитель/знаменатель`` в число."""
+    if isinstance(value, str) and "/" in value:
+        numerator, denominator = value.split("/", 1)
+        try:
+            return int(numerator) / int(denominator)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return value
+    try:
+        return float(value)
+    except (TypeError, ValueError):
         return value
-
-    def _ensure_process(self) -> None:
-        if self.process and self.process.poll() is None:
-            return
-        try:
-            self.process = subprocess.Popen(
-                [*self.command, "-stay_open", "True", "-@", "-", "-common_args", "-json", "-n", "-G1", "-fast2"],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, encoding="utf-8",
-                **no_window_kwargs(),
-            )
-        except OSError as exc:
-            raise ExifToolError(f"Cannot start ExifTool: {exc}") from exc
-
-    def close(self) -> None:
-        process, self.process = self.process, None
-        if not process or process.poll() is not None:
-            return
-        try:
-            assert process.stdin
-            process.stdin.write("-stay_open\nFalse\n")
-            process.stdin.flush()
-            process.wait(timeout=5)
-        except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
-            process.kill()
-
-
-_client: ExifToolClient | None = None
-
-
-def _get_client() -> ExifToolClient:
-    global _client
-    if _client is None:
-        _client = ExifToolClient()
-    return _client
 
 
 def extract_metadata_batch(paths: list[str]) -> list[tuple[str, str]]:
     lower_background_priority()
     results = []
     try:
-        payloads = _get_client().read_metadata_batch(paths)
-    except (ExifToolError, OSError):
+        payloads = read_metadata_batch(paths)
+    except OSError:
         return results
-    by_path = {str(item.get("SourceFile", "")): item for item in payloads if isinstance(item, dict)}
     for index, path in enumerate(paths):
         try:
-            raw = by_path.get(path, payloads[index] if index < len(payloads) else {})
+            raw = payloads[index] if index < len(payloads) else {}
             exif = sanitize_exif(raw)
             metadata = {
                 "exif": exif,
@@ -305,14 +235,6 @@ def original_datetime(exif: dict) -> str | None:
     return None
 
 
-def _close_client() -> None:
-    if _client is not None:
-        _client.close()
-
-
-atexit.register(_close_client)
-
-
 class MetadataPipeline:
     """Фоновая очередь EXIF, намеренно независимая от прогресса ИИ."""
 
@@ -363,7 +285,7 @@ class MetadataPipeline:
             if on_complete is not None:
                 on_complete(results)
         except Exception as exc:
-            log_exception("Не удалось обработать результаты ExifTool", exc)
+            log_exception("Не удалось обработать результаты pyexiv2", exc)
 
     def shutdown(self) -> None:
         with self._lock:
@@ -377,6 +299,6 @@ class MetadataPipeline:
             retire_executor(workers)
 
     def pending_futures(self) -> tuple[Future, ...]:
-        """Возвращает снимок пакетов ExifTool перед файловой операцией."""
+        """Возвращает снимок пакетов метаданных перед файловой операцией."""
         with self._lock:
             return tuple(self.futures)

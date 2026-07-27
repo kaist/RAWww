@@ -293,6 +293,28 @@ wheels = [
 ]
 
 [[package]]
+name = "pyexiv2"
+version = "2.15.5"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/98/d6/aefbe870b5ca45f5d98e46e3a8035c92e594b3ef33c4dea2eed67b971c49/pyexiv2-2.15.5-cp312-none-macosx_13_0_x86_64.whl", hash = "sha256:7011893adf4242b700e8605ecf8fcf42be483ccc04543597075dafbf428341b4", size = 1507952, upload-time = "2025-10-14T12:00:17.269Z" },
+    { url = "https://files.pythonhosted.org/packages/23/2c/87154e3d23602c1309e3aa10ff955a707cc311d82eac522c5b4d2e7fdba1/pyexiv2-2.15.5-cp312-none-macosx_14_0_arm64.whl", hash = "sha256:d1ef942a98923d24e9c52c08a50e2cb99a5d4701a0420d4fc6acaa64f7500aff", size = 1310020, upload-time = "2025-10-14T12:00:20.091Z" },
+    { url = "https://files.pythonhosted.org/packages/54/6b/e1dbfda571aa8e00f17f7fca7fd4f2908b8b43251678beb9daf8e0d95c0f/pyexiv2-2.15.5-cp312-none-manylinux2014_aarch64.whl", hash = "sha256:75494f3e7feba4131a165c82bc9d64768a3d62003ef01903dcd258b52dddaf1e", size = 1494921, upload-time = "2025-10-14T12:00:22.657Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/8b/09e6e5ea5358ceb62ba88ff4b9a4dc82bce5b8b77e44886702773c90761d/pyexiv2-2.15.5-cp312-none-manylinux2014_x86_64.whl", hash = "sha256:d2f6ae54c505d4be5e5ca2a6e0896380d369e6fd99d1f00019e755b23f6fb3f3", size = 1580560, upload-time = "2025-10-14T12:00:25.403Z" },
+    { url = "https://files.pythonhosted.org/packages/72/bb/0e40c08bff766686fb8e0ac9c10aade034f8074c22985f9a8f8b0a806779/pyexiv2-2.15.5-cp312-none-win_amd64.whl", hash = "sha256:ffb857e3c3d2a71894cf795c33909636b9be7af90b8a3855633ddee93b2047ee", size = 1206257, upload-time = "2025-10-14T12:00:27.718Z" },
+    { url = "https://files.pythonhosted.org/packages/01/01/1db32591269fa6bb18cb895b4f337630db660416b586ec7480377cc41d25/pyexiv2-2.15.5-cp313-none-macosx_13_0_x86_64.whl", hash = "sha256:9435fbcb5a1a73ba2249534e960ff8db3a9270098f6741250af9efa13b2b6e82", size = 1508875, upload-time = "2025-10-14T12:00:31.256Z" },
+    { url = "https://files.pythonhosted.org/packages/c4/d6/b55695fc67cf6b8f2e6dacf278c7447c3789efaac433d5a78d34725c9792/pyexiv2-2.15.5-cp313-none-macosx_14_0_arm64.whl", hash = "sha256:e6d4bde2902727e1f120c357e37e8310987d6150716ccbd4140286ff81313ff6", size = 1310554, upload-time = "2025-10-14T12:00:34.524Z" },
+    { url = "https://files.pythonhosted.org/packages/69/53/f40dcd77e382ed3c4875b0e42dafe690846eec782073c908d9aec61e79d9/pyexiv2-2.15.5-cp313-none-manylinux2014_aarch64.whl", hash = "sha256:f89e53dde734cd7416573755785382bb9d19e4177bad008d574a6a6fa5bba5f1", size = 1495323, upload-time = "2025-10-14T12:00:37.248Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/02/4e7247ab40c5bc6c2b0dff94359ef7044be62b25106d8cbc1f11be1fc8db/pyexiv2-2.15.5-cp313-none-manylinux2014_x86_64.whl", hash = "sha256:c536323e4d21994cf5c246998e1044062a4655069b1c97f2708ebfd22ff3c792", size = 1581006, upload-time = "2025-10-14T12:00:40.423Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/34/244fa9955a7950e93c32632ecb46ed55c22281982015ad268bc00b6d71ca/pyexiv2-2.15.5-cp313-none-win_amd64.whl", hash = "sha256:48e9b897b5f5b83c44c9700ef755c7b715a0bc781bfe4990fc7c4563cf9f2387", size = 1206350, upload-time = "2025-10-14T12:00:42.769Z" },
+    { url = "https://files.pythonhosted.org/packages/93/86/0683cbd5636231bdb43768f529b47b6f081bd57c0eed961f0866eeca054f/pyexiv2-2.15.5-cp314-none-macosx_13_0_x86_64.whl", hash = "sha256:9d102e85dc8e4c2ffd3fb272bfa9a66c304ebb8d951443c622a40f65737f521d", size = 1509209, upload-time = "2025-10-14T12:00:46.058Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/ff/99f5f1fa23938c75048ac2f88ee45d56cf6b4586fb15fee2b85bae29d26c/pyexiv2-2.15.5-cp314-none-macosx_14_0_arm64.whl", hash = "sha256:752a0603f5e40aebcba267e1c2a7b21e7db4a2598accc82f90f7775350623b4a", size = 1310585, upload-time = "2025-10-14T12:00:48.946Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/23/20aa87d0c9256476ed4be6c34e5c64e638b455275897c32ab660834ffb43/pyexiv2-2.15.5-cp314-none-manylinux2014_aarch64.whl", hash = "sha256:e0466daf0be73772b71bb48a160fa72c3f2d182b3143e404a6c636a854819f34", size = 1495636, upload-time = "2025-10-14T12:00:52.122Z" },
+    { url = "https://files.pythonhosted.org/packages/b6/bb/bc40f6999db912b6d2bd495d30f4da474506ed559b40a494ffd2e4bc6d53/pyexiv2-2.15.5-cp314-none-manylinux2014_x86_64.whl", hash = "sha256:2eed520d90046f29ad8981c645d833723d6d8dbaf211134a0e739c8b4cbd59ca", size = 1580991, upload-time = "2025-10-14T12:00:55.439Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/88/3830514cd98e4bea099f9388b73d2150e988f70a05bd62bf69ea55dd2eb4/pyexiv2-2.15.5-cp314-none-win_amd64.whl", hash = "sha256:f8363076cfccec15cdda748d9f117314d1bb4b0f2087dc1276b7059201295a44", size = 1206421, upload-time = "2025-10-14T12:00:58.258Z" },
+]
+
+[[package]]
 name = "pyinstaller"
 version = "6.21.0"
 source = { registry = "https://pypi.org/simple" }
@@ -477,6 +499,7 @@ dependencies = [
     { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "onnxruntime", version = "1.27.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'" },
     { name = "pillow" },
+    { name = "pyexiv2" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'" },
     { name = "pyside6-addons", version = "6.9.3", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
     { name = "pyside6-addons", version = "6.11.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'darwin'" },
@@ -497,6 +520,7 @@ requires-dist = [
     { name = "onnxruntime", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=1.23.0" },
     { name = "onnxruntime", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=1.23.0,<1.24" },
     { name = "pillow", specifier = ">=12.3.0" },
+    { name = "pyexiv2", specifier = ">=2.15.5" },
     { name = "pyobjc-framework-cocoa", marker = "sys_platform == 'darwin'", specifier = ">=12.2.1" },
     { name = "pyside6-addons", marker = "sys_platform != 'darwin'", specifier = ">=6.11.1" },
     { name = "pyside6-addons", marker = "sys_platform == 'darwin'", specifier = "==6.9.3" },

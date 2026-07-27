@@ -11,7 +11,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Callable
 
-from .exif import ExifToolClient, original_datetime
+from .exif import original_datetime, read_metadata
 from .i18n import gettext as _
 from .imaging import IMAGE_EXTENSIONS
 from .transfer_queue import TransferEntry
@@ -91,16 +91,11 @@ def _first_capture_date(files: list[Path]) -> date | None:
     photo = next((path for path in files if path.suffix.lower() in IMAGE_EXTENSIONS), None)
     if photo is None:
         return None
-    client: ExifToolClient | None = None
     try:
-        client = ExifToolClient()
-        value = original_datetime(client.read_metadata(str(photo)))
+        value = original_datetime(read_metadata(str(photo)))
         return datetime.fromisoformat(value).date() if value else None
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         return None
-    finally:
-        if client is not None:
-            client.close()
 
 
 def build_import_entries(

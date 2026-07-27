@@ -62,38 +62,12 @@ jobs:
           uv cache clean rawpy
           uv sync --locked
 
-      - name: Install ExifTool packer for macOS
-        if: runner.os == 'macOS'
-        # PAR::Packer компилирует загрузчик будущего ExifTool на этом шаге.
-        # Флаги после установки уже не смогут понизить его LC_BUILD_VERSION.
-        env:
-          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
-          CFLAGS: -mmacosx-version-min=${{ matrix.macos_min }}
-          LDFLAGS: -mmacosx-version-min=${{ matrix.macos_min }}
-        run: |
-          brew install perl cpanminus
-          perl_prefix="$(brew --prefix perl)"
-          cpanm="$(brew --prefix cpanminus)/bin/cpanm"
-          perl_lib="$RUNNER_TEMP/exiftool-perl"
-          "$perl_prefix/bin/perl" "$cpanm" --notest --local-lib-contained "$perl_lib" PAR::Packer
-          PERL5LIB="$perl_lib/lib/perl5" "$perl_prefix/bin/perl" "$perl_lib/bin/pp" --version
-          echo "$perl_prefix/bin" >> "$GITHUB_PATH"
-          echo "EXIFTOOL_PP=$perl_lib/bin/pp" >> "$GITHUB_ENV"
-          echo "PERL5LIB=$perl_lib/lib/perl5" >> "$GITHUB_ENV"
-
-      - name: Install ExifTool packer for Linux
+      - name: Install Linux runtime libraries
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes build-essential cpanminus libegl1 libperl-dev libpulse0 zlib1g-dev
-          perl_lib="$RUNNER_TEMP/exiftool-perl"
-          if ! cpanm --notest --local-lib-contained "$perl_lib" PAR::Packer; then
-            find "$HOME/.cpanm/work" -name build.log -type f -exec sh -c 'echo "--- $1"; cat "$1"' _ {} \;
-            exit 1
-          fi
-          PERL5LIB="$perl_lib/lib/perl5" "$perl_lib/bin/pp" --version
-          echo "EXIFTOOL_PP=$perl_lib/bin/pp" >> "$GITHUB_ENV"
-          echo "PERL5LIB=$perl_lib/lib/perl5" >> "$GITHUB_ENV"
+        run: sudo apt-get update && sudo apt-get install --yes libegl1 libpulse0
+
+      - name: Run test suite
+        run: uv run python -m unittest discover -s tests -v
 
       - name: Build portable Windows application
         if: runner.os == 'Windows'
@@ -131,9 +105,6 @@ jobs:
 
       - name: Build macOS application
         if: runner.os == 'macOS'
-        # PAR::Packer создаёт вложенный загрузчик и требует управляющий терминал.
-        # Цель влияет на собираемый здесь PAR-ExifTool, но не может исправить
-        # минимальную версию уже готовых бинарных колёс.
         env:
           MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_min }}
         run: script -q /dev/null uv run python scripts/build_pyinstaller.py
@@ -215,7 +186,6 @@ jobs:
 
       - name: Build Linux application
         if: runner.os == 'Linux'
-        # Как и на macOS, запускаем упаковщик ExifTool через pseudo-TTY.
         run: script --quiet --return --command 'uv run python scripts/build_pyinstaller.py' /dev/null
 
       - name: Smoke-test Linux application

@@ -4,17 +4,18 @@
 from __future__ import annotations
 
 import json
-import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
-import rawww.exif as exif
 from rawww.cache import FolderCache
 from rawww.app import Workspace
-from rawww.exif import ExifToolClient, ExifToolError, MetadataPipeline, bundled_exiftool_command, camera_details, extract_metadata_batch
+from rawww.exif import MetadataPipeline, camera_details, extract_metadata_batch, read_metadata
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "metadata" / "canon_eos_r"
 
 
 class ExifTests(unittest.TestCase):
@@ -29,8 +30,7 @@ class ExifTests(unittest.TestCase):
             "EXIF:FNumber": 2.0,
             "EXIF:FocalLength": 85,
         }]
-        with patch("rawww.exif._get_client") as get_client:
-            get_client.return_value.read_metadata_batch.return_value = payload
+        with patch("rawww.exif.read_metadata_batch", return_value=payload):
             results = extract_metadata_batch(["photo.raw"])
 
         metadata = json.loads(results[0][1])
@@ -53,20 +53,25 @@ class ExifTests(unittest.TestCase):
             "model:Camera X",
         )
 
-    def test_windows_uses_bundled_exiftool_executable(self) -> None:
-        with patch("rawww.exif.sys.platform", "win32"):
-            command = bundled_exiftool_command()
+    def test_canon_cr3_fixture_has_complete_normalized_metadata(self) -> None:
+        path = FIXTURES / "IMG_0639.CR3"
+        metadata = json.loads(extract_metadata_batch([str(path)])[0][1])
 
-        self.assertEqual(Path(command[-1]).name, "exiftool.exe")
+        self.assertEqual(metadata["orientation"], 1)
+        self.assertEqual(metadata["rating"], 5)
+        self.assertEqual(metadata["capture_settings"]["exposure_time"], 0.01)
+        self.assertEqual(metadata["capture_settings"]["iso"], 1250)
+        self.assertEqual(metadata["camera"], {
+            "model": "Canon EOS R", "serial_number": "543024004007",
+        })
+        self.assertEqual(metadata["original_datetime"], "2026-07-27T14:04:28.830000+03:00")
 
-    def test_frozen_unix_requires_its_own_exiftool(self) -> None:
-        with (
-            patch("rawww.exif.sys.platform", "darwin"),
-            patch("rawww.exif.BUNDLED_UNIX_EXIFTOOL", Path("missing-exiftool")),
-            patch.object(exif.sys, "frozen", True, create=True),
-        ):
-            with self.assertRaisesRegex(ExifToolError, "Bundled ExifTool"):
-                bundled_exiftool_command()
+    def test_canon_jpeg_fixture_and_makernote_are_read(self) -> None:
+        raw = read_metadata(str(FIXTURES / "IMG_0642.JPG"))
+
+        self.assertEqual(raw["XMP:Rating"], 3.0)
+        self.assertEqual(raw["MakerNotes:InternalSerialNumber"], "SK0439232")
+        self.assertEqual(raw["Composite:SubSecDateTimeOriginal"], "2026:07:27 14:05:03.91+03:00")
 
     def test_metadata_pipeline_is_independent_and_stores_results(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -88,17 +93,3 @@ class ExifTests(unittest.TestCase):
             self.assertEqual(pipeline.futures, set())
             pipeline.shutdown()
             cache.close(flush=False)
-
-    def test_exiftool_response_timeout_stops_stuck_process(self) -> None:
-        released = threading.Event()
-        process = Mock()
-        process.stdout.readline.side_effect = lambda: (released.wait(), "")[1]
-        process.kill.side_effect = released.set
-        client = ExifToolClient(command=["exiftool"])
-        client.process = process
-
-        with patch("rawww.exif.EXIFTOOL_RESPONSE_TIMEOUT", 0.01):
-            with self.assertRaisesRegex(ExifToolError, "timeout"):
-                client._read_response()
-
-        process.kill.assert_called_once_with()

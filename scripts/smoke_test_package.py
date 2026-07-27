@@ -1,23 +1,18 @@
 ## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
 ## SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Проверяет собранное приложение и вложенный в него ExifTool без GUI-сервера."""
+"""Проверяет запуск собранного приложения без GUI-сервера."""
 
 from __future__ import annotations
 
 import argparse
-import base64
-import json
 import os
 import plistlib
 import subprocess
-import sys
-import tempfile
 import time
 from pathlib import Path
 
 
-JPEG_SAMPLE = b"/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDy2iiivZOE/9k="
 MACOS_DISPLAY_NAMES = {
     "en": "Controlka",
     "de": "Controlka",
@@ -44,61 +39,15 @@ def _check_macos_bundle_names(app_directory: Path) -> None:
     print("macOS localized bundle names passed")
 
 
-def _bundled_paths(app_directory: Path) -> tuple[Path, Path]:
-    """Находит исполняемый файл приложения и его ExifTool в готовом каталоге.
-
-    Поддерживает и onedir-каталог (Windows/Linux), и macOS-бандл ``.app``, где
-    исполняемый файл лежит в ``Contents/MacOS``, а собранные ресурсы — в
-    ``Contents/Resources/data``.
-    """
+def _application_path(app_directory: Path) -> Path:
+    """Находит исполняемый файл приложения в onedir-каталоге или .app."""
     if app_directory.suffix == ".app":
         app = app_directory / "Contents" / "MacOS" / "ctrlka"
-        exiftool = app_directory / "Contents" / "Resources" / "data" / "tools" / "exiftool"
-        if not app.is_file():
-            raise RuntimeError(f"Application executable is missing: {app}")
-        if not exiftool.is_file():
-            raise RuntimeError(f"Bundled ExifTool is missing: {exiftool}")
-        return app, exiftool
-    app = app_directory / ("ctrlka.exe" if os.name == "nt" else "ctrlka")
-    exiftool = app_directory / "data" / "tools" / ("exiftool.exe" if os.name == "nt" else "exiftool")
+    else:
+        app = app_directory / ("ctrlka.exe" if os.name == "nt" else "ctrlka")
     if not app.is_file():
         raise RuntimeError(f"Application executable is missing: {app}")
-    if not exiftool.is_file():
-        raise RuntimeError(f"Bundled ExifTool is missing: {exiftool}")
-    return app, exiftool
-
-
-def _check_exiftool(executable: Path) -> None:
-    """Проверяет запуск sidecar и чтение им корректного JPEG без внешних утилит."""
-    version = subprocess.run(
-        [str(executable), "-ver"], capture_output=True, check=True, text=True, timeout=20
-    ).stdout.strip()
-    if not version:
-        raise RuntimeError("Bundled ExifTool did not report its version")
-    with tempfile.TemporaryDirectory() as directory:
-        sample = Path(directory) / "sample.jpg"
-        sample.write_bytes(base64.b64decode(JPEG_SAMPLE))
-        subprocess.run(
-            [
-                str(executable), "-overwrite_original", "-DateTimeOriginal=2024:01:02 03:04:05",
-                str(sample),
-            ],
-            capture_output=True,
-            check=True,
-            text=True,
-            timeout=20,
-        )
-        result = subprocess.run(
-            [str(executable), "-j", "-n", "-DateTimeOriginal", str(sample)],
-            capture_output=True,
-            check=True,
-            text=True,
-            timeout=20,
-        )
-    payload = json.loads(result.stdout)
-    if not isinstance(payload, list) or not payload or payload[0].get("DateTimeOriginal") != "2024:01:02 03:04:05":
-        raise RuntimeError("Bundled ExifTool could not write and read EXIF in the JPEG sample")
-    print(f"ExifTool smoke test passed: {version}")
+    return app
 
 
 def _check_application(executable: Path, screenshot_path: Path | None = None) -> None:
@@ -145,9 +94,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.app_dir.suffix == ".app":
         _check_macos_bundle_names(args.app_dir.resolve())
-    application, exiftool = _bundled_paths(args.app_dir.resolve())
-    _check_exiftool(exiftool)
-    _check_application(application, args.screenshot.resolve() if args.screenshot else None)
+    _check_application(
+        _application_path(args.app_dir.resolve()),
+        args.screenshot.resolve() if args.screenshot else None,
+    )
 
 
 if __name__ == "__main__":
