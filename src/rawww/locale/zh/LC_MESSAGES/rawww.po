@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-27 13:19+0300\n"
+"POT-Creation-Date: 2026-07-27 16:44+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -86,6 +86,12 @@ msgstr "播放 / 暂停（空格）"
 
 msgid "Развернуть ленту превью"
 msgstr "展开预览条"
+
+msgid "Удалить извлечённый кадр RAW Burst (X)"
+msgstr "删除已提取的 RAW 连拍帧 (X)"
+
+msgid "Извлечь кадр RAW Burst (X)"
+msgstr "提取 RAW 连拍帧 (X)"
 
 msgid "Показать фото с этим лицом"
 msgstr "显示含此人脸的照片"
@@ -348,6 +354,12 @@ msgstr "在新标签页中打开"
 
 msgid "Удалить"
 msgstr "删除"
+
+msgid "Кадр RAW Burst уже извлечён"
+msgstr "RAW 连拍帧已提取"
+
+msgid "Извлечь кадр RAW Burst"
+msgstr "提取 RAW 连拍帧"
 
 msgid "Открыть"
 msgstr "打开"
@@ -617,6 +629,9 @@ msgstr "已启用按连拍分组"
 
 msgid "Группировка по сериям выключена"
 msgstr "已关闭按连拍分组"
+
+msgid "Извлечение RAW Burst"
+msgstr "RAW 连拍提取"
 
 msgid "AI-анализ поставлен в очередь"
 msgstr "AI 分析已加入队列"
@@ -1581,6 +1596,9 @@ msgstr "Left 或 Backspace"
 
 msgid "Включить или выключить масштаб (полный просмотр)"
 msgstr "切换缩放（全屏查看）"
+
+msgid "Извлечь виртуальный кадр RAW Burst (полный просмотр)"
+msgstr "提取虚拟 RAW 连拍帧（全屏查看）"
 
 msgid "Воспроизведение видео или аудио (полный просмотр)"
 msgstr "播放视频或音频（全屏查看）"

@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-27 13:19+0300\n"
+"POT-Creation-Date: 2026-07-27 16:44+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -86,6 +86,12 @@ msgstr "Play / pause (Space)"
 
 msgid "Развернуть ленту превью"
 msgstr "Expand preview strip"
+
+msgid "Удалить извлечённый кадр RAW Burst (X)"
+msgstr "Delete extracted RAW Burst frame (X)"
+
+msgid "Извлечь кадр RAW Burst (X)"
+msgstr "Extract RAW Burst frame (X)"
 
 msgid "Показать фото с этим лицом"
 msgstr "Show photos with this face"
@@ -348,6 +354,12 @@ msgstr "Open in new tab"
 
 msgid "Удалить"
 msgstr "Delete"
+
+msgid "Кадр RAW Burst уже извлечён"
+msgstr "The RAW Burst frame has already been extracted"
+
+msgid "Извлечь кадр RAW Burst"
+msgstr "Extract RAW Burst frame"
 
 msgid "Открыть"
 msgstr "Open"
@@ -622,6 +634,9 @@ msgstr "Grouping by series enabled"
 
 msgid "Группировка по сериям выключена"
 msgstr "Grouping by series disabled"
+
+msgid "Извлечение RAW Burst"
+msgstr "RAW Burst extraction"
 
 msgid "AI-анализ поставлен в очередь"
 msgstr "AI analysis queued"
@@ -1622,6 +1637,9 @@ msgstr "Left or Backspace"
 
 msgid "Включить или выключить масштаб (полный просмотр)"
 msgstr "Toggle zoom (full view)"
+
+msgid "Извлечь виртуальный кадр RAW Burst (полный просмотр)"
+msgstr "Extract virtual RAW Burst frame (Full View)"
 
 msgid "Воспроизведение видео или аудио (полный просмотр)"
 msgstr "Play video or audio (full view)"

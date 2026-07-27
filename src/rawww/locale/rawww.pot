@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-27 13:19+0300\n"
+"POT-Creation-Date: 2026-07-27 16:44+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -84,6 +84,12 @@ msgid "Воспроизвести / пауза (Пробел)"
 msgstr ""
 
 msgid "Развернуть ленту превью"
+msgstr ""
+
+msgid "Удалить извлечённый кадр RAW Burst (X)"
+msgstr ""
+
+msgid "Извлечь кадр RAW Burst (X)"
 msgstr ""
 
 msgid "Показать фото с этим лицом"
@@ -346,6 +352,12 @@ msgstr ""
 msgid "Удалить"
 msgstr ""
 
+msgid "Кадр RAW Burst уже извлечён"
+msgstr ""
+
+msgid "Извлечь кадр RAW Burst"
+msgstr ""
+
 msgid "Открыть"
 msgstr ""
 
@@ -594,6 +606,9 @@ msgid "Группировка по сериям включена"
 msgstr ""
 
 msgid "Группировка по сериям выключена"
+msgstr ""
+
+msgid "Извлечение RAW Burst"
 msgstr ""
 
 msgid "AI-анализ поставлен в очередь"
@@ -1542,6 +1557,9 @@ msgid "Left или Backspace"
 msgstr ""
 
 msgid "Включить или выключить масштаб (полный просмотр)"
+msgstr ""
+
+msgid "Извлечь виртуальный кадр RAW Burst (полный просмотр)"
 msgstr ""
 
 msgid "Воспроизведение видео или аудио (полный просмотр)"

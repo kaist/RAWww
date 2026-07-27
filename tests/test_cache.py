@@ -18,8 +18,9 @@ from unittest.mock import patch
 from PIL import Image
 
 import rawww.cache as cache_module
-from rawww.cache import FolderCache
-from rawww.imaging import decode_pixels
+from rawww.cache import FolderCache, persist_burst_materialization
+from rawww.canon_burst import BurstFrame
+from rawww.imaging import PixelImage, decode_pixels
 from rawww.ai import AiPipeline, prepare_analysis_batch
 
 
@@ -30,6 +31,62 @@ def _worker_process_id() -> int:
 
 class CacheTests(unittest.TestCase):
     """Проверяет дисковый кэш папки, его очистку и перенос."""
+
+    def test_virtual_burst_preview_survives_cache_reopen(self) -> None:
+        with TemporaryDirectory() as temporary, TemporaryDirectory() as cache_temporary:
+            folder = Path(temporary)
+            source = folder / "roll.cr3"
+            source.write_bytes(b"roll")
+            frame = BurstFrame(source, 0, 2)
+            cache = FolderCache(folder, {source.name}, cache_root=Path(cache_temporary))
+            cache.load_from_disk()
+            cache.store_pixels(
+                PixelImage(path=frame, pixels=b"\xff\0\0\xff" * 4, width=2, height=2),
+                256,
+            )
+            cache.close(flush=True)
+
+            reopened = FolderCache(folder, {source.name}, cache_root=Path(cache_temporary))
+            reopened.load_from_disk()
+            try:
+                decoded = reopened.load(frame, 256)
+                self.assertIsNotNone(decoded)
+                assert decoded is not None
+                self.assertEqual(decoded.path, frame)
+            finally:
+                reopened.close(flush=False)
+
+    def test_burst_ownership_can_be_persisted_after_workspace_switch(self) -> None:
+        with TemporaryDirectory() as temporary, TemporaryDirectory() as cache_temporary:
+            folder = Path(temporary)
+            source = folder / "roll.cr3"
+            target = folder / "roll_001.CR3"
+            source.write_bytes(b"roll")
+            target.write_bytes(b"frame")
+            with patch("rawww.cache.cache_path", return_value=Path(cache_temporary) / "folder.sqlite3"):
+                persist_burst_materialization(
+                    folder,
+                    source.name,
+                    0,
+                    target.name,
+                    {"rating": 3, "comment": "keep"},
+                )
+                cache = FolderCache(
+                    folder,
+                    {source.name, target.name},
+                    cache_root=Path(cache_temporary),
+                )
+                # Используем тот же явно подменённый путь, что и фоновый callback.
+                cache.path = Path(cache_temporary) / "folder.sqlite3"
+                cache.load_from_disk()
+                try:
+                    self.assertEqual(
+                        cache.burst_materializations()[(source.name, 0)],
+                        target.name,
+                    )
+                    self.assertEqual(cache.load_photo_details()[target.name]["rating"], 3)
+                finally:
+                    cache.close(flush=False)
 
     def test_ai_model_workers_are_lazy_and_releasable(self) -> None:
         pipeline = AiPipeline()

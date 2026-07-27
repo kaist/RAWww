@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from concurrent.futures import Future
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
@@ -17,9 +18,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt, QUrl
 from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMenu, QStackedWidget, QWidget
+from PySide6.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMenu, QStackedWidget, QVBoxLayout, QWidget
 
-from rawww.app import ChromeTabBar, FullView, MainWindow, VideoThumbnailer, Workspace, _application_settings, _drive_key, _format_remaining_time, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_xmp_task
+from rawww.app import ChromeTabBar, FullView, MainWindow, VideoThumbnailer, Workspace, _application_settings, _delete_materialized_burst_files, _drive_key, _format_remaining_time, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_xmp_task
+from rawww.canon_burst import BurstFrame
 from rawww.hotkeys import FIXED_HOTKEYS
 from rawww.theme import apply_theme
 
@@ -118,6 +120,174 @@ class AppStateTests(unittest.TestCase):
         self.assertEqual(requested, [True])
         view.deleteLater()
         parent.deleteLater()
+
+    def test_full_view_burst_extract_shortcut(self) -> None:
+        parent = QWidget()
+        view = FullView(parent)
+        requested = []
+        view.burstExtractRequested.connect(lambda: requested.append(True))
+        layout = QVBoxLayout(parent)
+        layout.addWidget(view)
+        parent.resize(800, 600)
+        parent.show()
+        view.show()
+        view.set_burst_extract_state(visible=True, extracted=False)
+        view.image_view.setFocus()
+        QApplication.processEvents()
+
+        QTest.keyClick(view.image_view, Qt.Key.Key_X)
+
+        self.assertEqual(requested, [True])
+        view.set_burst_extract_state(visible=True, extracted=True)
+        self.assertTrue(view.burst_extract_button.isEnabled())
+        QTest.keyClick(view.image_view, Qt.Key.Key_X)
+        self.assertEqual(requested, [True, True])
+        QTest.mouseClick(view.burst_extract_button, Qt.MouseButton.LeftButton)
+        self.assertEqual(requested, [True, True, True])
+        view.deleteLater()
+        parent.deleteLater()
+
+    def test_repeated_burst_extract_removes_owned_file(self) -> None:
+        frame = BurstFrame(Path("/photos/roll.cr3"), 0, 3)
+        target = Path("/photos/roll_001.cr3")
+        host = SimpleNamespace(
+            current_path=frame,
+            burst_materialized={frame: target},
+            _burst_removing=set(),
+            full_view=SimpleNamespace(
+                burst_extract_button=Mock(),
+                burst_extract_action=Mock(),
+            ),
+            _remove_materialized_burst=Mock(),
+        )
+
+        Workspace._extract_current_burst(host)
+
+        host._remove_materialized_burst.assert_called_once_with(
+            frame, target, preserve_selection=True,
+        )
+        host.full_view.burst_extract_button.setEnabled.assert_called_once_with(False)
+        host.full_view.burst_extract_action.setEnabled.assert_called_once_with(False)
+
+    def test_active_burst_mutation_does_not_reload_folder_from_watcher(self) -> None:
+        frame = BurstFrame(Path("/photos/roll.cr3"), 0, 3)
+        host = SimpleNamespace(
+            _selection_progress=None,
+            _upload_progress=None,
+            _file_mutation_waiting=False,
+            _burst_pending_changes={frame: {}},
+            _burst_removing=set(),
+            _ignore_folder_changes_until=0.0,
+            closing=False,
+            current_dir=frame.source.parent,
+            folder_change_timer=Mock(),
+        )
+
+        Workspace._folder_changed(host, str(frame.source.parent))
+
+        host.folder_change_timer.start.assert_not_called()
+
+    def test_explicit_burst_removal_preserves_virtual_selection(self) -> None:
+        frame = BurstFrame(Path("/photos/roll.cr3"), 0, 3)
+        target = Path("/photos/roll_001.cr3")
+        future = Future()
+        future.set_result(target)
+        host = SimpleNamespace(
+            _burst_removing={frame},
+            _burst_removal_preserves_selection={frame},
+            closing=False,
+            current_dir=frame.source.parent,
+            current_path=frame,
+            burst_materialized={frame: target},
+            all_paths=[frame.source, target],
+            _cache_ai_paths={target},
+            preview_finished_paths={target},
+            decode_cache=SimpleNamespace(remove_path=Mock()),
+            photo_details={frame.name: {"rating": 4}, target.name: {"rating": 4}},
+            folder_cache=None,
+            cache_ready=False,
+            full_view=SimpleNamespace(set_burst_extract_state=Mock()),
+            workspace_state=SimpleNamespace(current_photo=None),
+            _suppress_own_folder_refresh=Mock(),
+            _refresh_full_view_navigation=Mock(),
+            _apply_view=Mock(),
+        )
+
+        Workspace._on_burst_removed(host, frame, target, future)
+
+        self.assertEqual(host.photo_details[frame.name], {"rating": 4})
+        self.assertNotIn(target.name, host.photo_details)
+        self.assertNotIn(frame, host.burst_materialized)
+        self.assertEqual(host.current_path, frame)
+        self.assertEqual(host.workspace_state.current_photo, frame)
+        host._refresh_full_view_navigation.assert_called_once_with(frame)
+        host.full_view.set_burst_extract_state.assert_called_once_with(
+            visible=True, extracted=False,
+        )
+
+    def test_burst_toggle_deletes_raw_and_sidecar_permanently(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "roll_001.cr3"
+            sidecar = target.with_suffix(".xmp")
+            target.write_bytes(b"raw")
+            sidecar.write_bytes(b"xmp")
+
+            _delete_materialized_burst_files(target)
+
+            self.assertFalse(target.exists())
+            self.assertFalse(sidecar.exists())
+
+    def test_vertical_series_panel_follows_portrait_strip_width(self) -> None:
+        parent = QWidget()
+        view = FullView(parent)
+
+        landscape_width = view.series_panel.width()
+        view.set_vertical(True)
+
+        self.assertEqual(view.series_panel.width(), view.series_strip.width() + 2)
+        self.assertLess(view.series_panel.width(), landscape_width)
+        view.deleteLater()
+        parent.deleteLater()
+
+    def test_long_vertical_series_grid_fits_viewport_without_side_gap(self) -> None:
+        parent = QWidget()
+        view = FullView(parent)
+        layout = QVBoxLayout(parent)
+        layout.addWidget(view)
+        parent.resize(900, 600)
+        view.set_vertical(True)
+        paths = [Path(f"/photos/frame-{index:03d}.cr3") for index in range(64)]
+        view.set_navigation(paths, paths[0], {}, {}, paths, 1)
+        parent.show()
+        QApplication.processEvents()
+
+        self.assertTrue(view.series_strip.verticalScrollBar().isVisible())
+        self.assertEqual(
+            view.series_strip.viewport().width(),
+            view.series_strip.gridSize().width(),
+        )
+        self.assertLess(view.series_up.width(), view.series_strip.width())
+        self.assertEqual(view.series_up.width(), view.series_down.width())
+        self.assertEqual(view.series_up.geometry().center().x(), view.series_panel.rect().center().x())
+        self.assertEqual(view.series_down.geometry().center().x(), view.series_panel.rect().center().x())
+        view.deleteLater()
+        parent.deleteLater()
+
+    def test_burst_series_keeps_virtual_objects_in_grid_items(self) -> None:
+        source = Path("/photos/roll.cr3")
+        frames = tuple(BurstFrame(source, index, 3) for index in range(3))
+        host = SimpleNamespace(
+            series_toggle=SimpleNamespace(isChecked=lambda: True),
+            burst_frames={source: frames},
+            expanded_series={source},
+            burst_materialized={},
+            series_cards={},
+            _embedding_similarity=lambda _left, _right: -1.0,
+        )
+
+        paths = Workspace._grid_paths_with_series(host, [source])
+        self.assertEqual(paths, [source, *frames])
+        self.assertTrue(host.series_cards[frames[1]]["member"])
 
     def test_video_thumbnail_cancel_clears_media_source_and_timeout(self) -> None:
         thumbnailer = VideoThumbnailer()
@@ -507,15 +677,49 @@ class AppStateTests(unittest.TestCase):
             self.app.processEvents()
 
             self.assertTrue(path.exists())
-            self.assertEqual(
-                workspace.grid_restore_loader_label.text(),
-                "Выполняется удаление",
-            )
+            self.assertTrue(workspace.grid_restore_loader.isHidden())
 
             running.set_result(None)
             QTest.qWait(60)
 
             self.assertFalse(path.exists())
+            self.assertTrue(workspace.grid_restore_loader.isHidden())
+            workspace.close()
+            workspace.deleteLater()
+
+    def test_mass_delete_shows_determinate_grid_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(Path(directory), defer_initial_scan=True)
+            workspace.settings.setValue("behavior/delete_without_confirmation", True)
+            paths = [Path(directory) / f"photo-{index}.raw" for index in range(3)]
+            for path in paths:
+                path.touch()
+            started = Event()
+            release = Event()
+
+            def slow_delete(targets, permanent, progress):
+                progress(1, len(targets))
+                started.set()
+                release.wait(2)
+                return [], [], []
+
+            with patch("rawww.app._delete_paths_task", side_effect=slow_delete):
+                workspace._delete_paths(paths, permanent=True)
+                for _attempt in range(20):
+                    self.app.processEvents()
+                    if started.wait(0.01):
+                        break
+                self.app.processEvents()
+
+                self.assertTrue(started.is_set())
+                self.assertFalse(workspace.grid_restore_loader.isHidden())
+                self.assertEqual(workspace.grid_restore_loader_label.text(), "Выполняется удаление")
+                self.assertEqual(workspace.grid_restore_loader_progress.maximum(), 3)
+                self.assertEqual(workspace.grid_restore_loader_progress.value(), 1)
+
+                release.set()
+                QTest.qWait(60)
+
             self.assertTrue(workspace.grid_restore_loader.isHidden())
             workspace.close()
             workspace.deleteLater()
@@ -834,6 +1038,35 @@ class AppStateTests(unittest.TestCase):
             _drive_key(Path("/media/user/A")),
             _drive_key(Path("/media/user/B")),
         )
+
+    def test_repeated_active_drive_click_opens_volume_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            volume_a = base / "volume-a"
+            volume_b = base / "volume-b"
+            current = volume_a / "shoot"
+            remembered = volume_b / "remembered"
+            current.mkdir(parents=True)
+            remembered.mkdir(parents=True)
+            host = SimpleNamespace(
+                current_dir=current,
+                _deactivate_shotsync=Mock(),
+                _set_tree_root_for_path=Mock(),
+                _last_directory_for_volume=Mock(return_value=remembered),
+                load_directory=Mock(),
+            )
+            volume_key = lambda path: str(path).casefold()
+
+            with (
+                patch("rawww.app._mounted_volume_paths", return_value=[volume_a, volume_b]),
+                patch("rawww.app._drive_key", side_effect=volume_key),
+            ):
+                Workspace._drive_selected(host, volume_a)
+                host.load_directory.assert_called_once_with(volume_a)
+
+                host.load_directory.reset_mock()
+                Workspace._drive_selected(host, volume_b)
+                host.load_directory.assert_called_once_with(remembered)
 
     @unittest.skipUnless(os.name == "nt", "Системное меню Проводника есть только в Windows")
     def test_photo_context_menu_uses_windows_shell(self) -> None:

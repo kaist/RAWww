@@ -96,6 +96,12 @@ CREATE TABLE IF NOT EXISTS shotsync_photos (
     photo_id INTEGER NOT NULL,
     shooting_id INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS burst_materializations (
+    source_name TEXT NOT NULL,
+    frame_index INTEGER NOT NULL,
+    target_name TEXT NOT NULL UNIQUE,
+    PRIMARY KEY (source_name, frame_index)
+);
 -- Durable offline queue of marks awaiting delivery to the server. Coalesced
 -- per (photo_id, kind) so the latest value wins; drained once the socket is up.
 CREATE TABLE IF NOT EXISTS shotsync_pending (
@@ -107,6 +113,58 @@ CREATE TABLE IF NOT EXISTS shotsync_pending (
     PRIMARY KEY (photo_id, kind)
 );
 """
+
+
+def _cache_name(path: Path) -> str:
+    """Даёт виртуальному burst-кадру устойчивый ключ, привязанный к имени roll-файла."""
+    value = getattr(path, "cache_name", None)
+    return str(value) if value else path.name
+
+
+def persist_burst_materialization(
+    folder: Path,
+    source_name: str,
+    frame_index: int,
+    target_name: str,
+    selection: dict | None = None,
+) -> None:
+    """Фиксирует созданный burst-кадр даже после ухода Workspace в другую папку."""
+    database_path = cache_path(folder)
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(database_path, timeout=30)
+    try:
+        _configure_database(db)
+        db.executescript(SCHEMA)
+        db.execute(
+            "INSERT OR REPLACE INTO burst_materializations VALUES (?, ?, ?)",
+            (source_name, frame_index, target_name),
+        )
+        if selection is not None:
+            keywords_json = json.dumps(
+                list(dict.fromkeys(
+                    str(item).strip()
+                    for item in selection.get("keywords", [])
+                    if str(item).strip()
+                )),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            db.execute(
+                """INSERT OR REPLACE INTO photo_selection
+                   (name, rating, color_label, comment, keywords_json, updated_ns)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    target_name,
+                    selection.get("rating"),
+                    str(selection.get("color_label") or ""),
+                    str(selection.get("comment") or ""),
+                    keywords_json,
+                    time.time_ns(),
+                ),
+            )
+        db.commit()
+    finally:
+        db.close()
 
 
 @dataclass(frozen=True)
@@ -169,7 +227,7 @@ class FolderCache:
                 FROM previews
                 WHERE name = ? AND variant = ? AND file_size = ? AND mtime_ns = ?
                 """,
-                (path.name, max_size, stamp.size, stamp.mtime_ns),
+                (_cache_name(path), max_size, stamp.size, stamp.mtime_ns),
             ).fetchone()
         if row is None:
             return None
@@ -202,12 +260,12 @@ class FolderCache:
                 FROM previews
                 WHERE variant = ? AND name IN ({placeholders})
                 """,
-                (max_size, *(path.name for path in stamps)),
+                (max_size, *(_cache_name(path) for path in stamps)),
             ).fetchall()
         rows_by_name = {str(row[0]): row[1:] for row in rows}
         decoded: dict[Path, DecodedImage] = {}
         for path, stamp in stamps.items():
-            row = rows_by_name.get(path.name)
+            row = rows_by_name.get(_cache_name(path))
             if row is None:
                 continue
             file_size, mtime_ns, width, height, fmt, data = row
@@ -247,7 +305,7 @@ class FolderCache:
                 continue
             rows.append(
                 (
-                    pixel.path.name, max_size, stamp.size, stamp.mtime_ns,
+                    _cache_name(pixel.path), max_size, stamp.size, stamp.mtime_ns,
                     pixel.width, pixel.height, encoded, time.time_ns(),
                 )
             )
@@ -305,6 +363,11 @@ class FolderCache:
                         UNION SELECT name FROM shotsync_photos
                     ) AS cached
                     WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = cached.name)
+                      AND NOT (
+                          instr(cached.name, '#burst-') > 0
+                          AND substr(cached.name, 1, instr(cached.name, '#burst-') - 1)
+                              IN (SELECT name FROM live_names)
+                      )
                     LIMIT 1
                     """
                 ).fetchone()
@@ -437,6 +500,35 @@ class FolderCache:
                    (name, rating, color_label, comment, keywords_json, updated_ns)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (name, rating, color_label, comment, keywords_json, time.time_ns()),
+            )
+            db.commit()
+
+    def register_burst_materialization(self, source_name: str, frame_index: int, target_name: str) -> None:
+        """Запоминает, что физический CR3 создан приложением из виртуального кадра."""
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute(
+                "INSERT OR REPLACE INTO burst_materializations VALUES (?, ?, ?)",
+                (source_name, frame_index, target_name),
+            )
+            db.commit()
+
+    def burst_materializations(self) -> dict[tuple[str, int], str]:
+        """Возвращает устойчивые соответствия roll/кадр → физический файл."""
+        with self._lock:
+            return {
+                (str(source), int(index)): str(target)
+                for source, index, target in self._db_or_raise().execute(
+                    "SELECT source_name, frame_index, target_name FROM burst_materializations"
+                )
+            }
+
+    def remove_burst_materialization(self, source_name: str, frame_index: int) -> None:
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute(
+                "DELETE FROM burst_materializations WHERE source_name=? AND frame_index=?",
+                (source_name, frame_index),
             )
             db.commit()
 
@@ -803,12 +895,25 @@ class FolderCache:
                 "INSERT OR IGNORE INTO live_sidecars VALUES (?)",
                 ((Path(name).with_suffix(".xmp").name,) for name in self.live_names),
             )
-            db.execute("DELETE FROM previews WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = previews.name)")
+            db.execute(
+                """DELETE FROM previews
+                   WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = previews.name)
+                     AND NOT (
+                         instr(previews.name, '#burst-') > 0
+                         AND substr(previews.name, 1, instr(previews.name, '#burst-') - 1)
+                             IN (SELECT name FROM live_names)
+                     )"""
+            )
             db.execute("DELETE FROM image_embeddings WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = image_embeddings.name)")
             db.execute("DELETE FROM face_analysis WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = face_analysis.name)")
             db.execute("DELETE FROM photo_metadata WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_metadata.name)")
             db.execute("DELETE FROM photo_selection WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = photo_selection.name)")
             db.execute("DELETE FROM shotsync_photos WHERE NOT EXISTS (SELECT 1 FROM live_names WHERE live_names.name = shotsync_photos.name)")
+            db.execute(
+                """DELETE FROM burst_materializations
+                   WHERE source_name NOT IN (SELECT name FROM live_names)
+                      OR target_name NOT IN (SELECT name FROM live_names)"""
+            )
             db.execute("DELETE FROM shotsync_pending WHERE photo_id NOT IN (SELECT photo_id FROM shotsync_photos)")
             db.execute("DELETE FROM xmp_state WHERE NOT EXISTS (SELECT 1 FROM live_sidecars WHERE live_sidecars.name = xmp_state.sidecar_name)")
         finally:

@@ -78,7 +78,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 
-from .cache import FolderCache, cache_size, clear_cache, maintain_folder_caches, prune_folder_cache, relocate_folder_caches, remove_folder_cache
+from .cache import FolderCache, cache_size, clear_cache, maintain_folder_caches, persist_burst_materialization, prune_folder_cache, relocate_folder_caches, remove_folder_cache
 from .color_management import (
     ColorManagementConfig,
     INTENT_RELATIVE,
@@ -121,6 +121,10 @@ from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence
 from .widgets import SettingsCheckBox
 from .transfer_queue import TransferEntry, TransferManager, TransferQueuePanel, TransferTask
 from .card_import import CardImportScan, build_backup_entries, build_import_entries, merge_scans, scan_card
+from .canon_burst import (
+    BurstFrame, BurstIndex, CanonBurstError, materialize_frame, materialized_path,
+    read_burst_index,
+)
 from .dialogs import (
     BatchRenameDialog,
     BatchResizeDialog,
@@ -172,6 +176,13 @@ SERIES_ROLE = DETAIL_ROLE + 1
 CURRENT_DECODE_WORKERS = 2
 BACKGROUND_DECODE_WORKERS = 3
 VISIBLE_THUMB_DECODE_WORKERS = 1
+
+
+def _media_value(value: object):
+    """Возвращает реальный путь или виртуальный burst-кадр из данных Qt."""
+    if isinstance(value, (Path, BurstFrame)):
+        return value
+    return Path(value) if value else None
 MAX_PENDING_THUMBS = 8
 VISIBLE_THUMB_LOOKUP_WORKERS = 2
 MAX_VISIBLE_THUMB_PENDING = 1
@@ -314,14 +325,78 @@ def _recompress_jpeg_worker(job: tuple[str, int, bool]) -> tuple[str, int, int, 
         return source_text, 0, 0, str(exc)
 
 
+def _delete_materialized_burst_files(target: Path) -> Path:
+    """Безвозвратно удаляет созданный приложением CR3 и его sidecar вне Qt-потока."""
+    sidecar_path(target).unlink(missing_ok=True)
+    target.unlink(missing_ok=True)
+    return target
+
+
+def _delete_paths_task(
+    targets: list[Path],
+    permanent: bool,
+    progress: Callable[[int, int], None],
+) -> tuple[list[Path], list[Path], list[str]]:
+    """Удаляет пути в worker-потоке и сообщает прогресс по верхнеуровневым объектам."""
+    deleted_files: list[Path] = []
+    deleted_folders: list[Path] = []
+    errors: list[str] = []
+    total = len(targets)
+    for completed, path in enumerate(targets, start=1):
+        is_folder = path.is_dir()
+        try:
+            if permanent:
+                if is_folder:
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            else:
+                send2trash(str(path))
+        except OSError as exc:
+            errors.append(f"{path.name}: {exc}")
+        else:
+            (deleted_folders if is_folder else deleted_files).append(path)
+        progress(completed, total)
+
+    for folder in deleted_folders:
+        try:
+            remove_folder_cache(folder)
+        except OSError as exc:
+            errors.append(_("кэш {name}: {error}").format(name=folder.name, error=exc))
+    return deleted_files, deleted_folders, errors
+
+
+def _materialize_burst_job(frame: BurstFrame, selection: dict) -> Path:
+    """Извлекает кадр и сразу закрепляет владение им в кэше исходной папки."""
+    target = materialize_frame(frame)
+    try:
+        persist_burst_materialization(
+            frame.source.parent,
+            frame.source.name,
+            frame.index,
+            target.name,
+            selection,
+        )
+    except Exception:
+        # Без записи о владении приложение не сможет отличить этот файл от
+        # пользовательского и безопасно выполнить последующее автоудаление.
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
 class DecodeBridge(QObject):
     """Переносит результаты фоновых задач обратно в главный поток Qt."""
 
     decoded = Signal(object)
-    failed = Signal(str, str)
+    failed = Signal(object, str)
     cacheLoaded = Signal(int, object)
     aiCacheChecked = Signal(int, object)
     directoryScanned = Signal(object, Path, object)
+    burstsScanned = Signal(object, Path, object)
+    burstMaterialized = Signal(object, object, object)
+    burstRemoved = Signal(object, object, object)
+    deleteProgress = Signal(int, int)
     renameProgress = Signal(object, int, int)
     renameCacheUpdating = Signal(object)
     renameFinished = Signal(object, object, object)
@@ -896,10 +971,10 @@ class PhotoGrid(QListWidget):
     мог бы превратить виджет в маленький, но очень деятельный файловый менеджер.
     """
 
-    openRequested = Signal(Path)
+    openRequested = Signal(object)
     viewportChanged = Signal()
     cardSizeChanged = Signal(int)
-    seriesToggleRequested = Signal(Path)
+    seriesToggleRequested = Signal(object)
     audioRequested = Signal(Path)
     audioHoverChanged = Signal(object)
     deleteRequested = Signal(bool)   # нажат ли Shift
@@ -984,7 +1059,7 @@ class PhotoGrid(QListWidget):
     def _emit_open(self, item: QListWidgetItem) -> None:
         path = item.data(Qt.ItemDataRole.UserRole)
         if path:
-            self.openRequested.emit(Path(path))
+            self.openRequested.emit(_media_value(path))
 
     def _emit_context_request(self, position: QPoint) -> None:
         """Выбирает карточку под курсором и передаёт построение меню владельцу."""
@@ -998,7 +1073,7 @@ class PhotoGrid(QListWidget):
         value = item.data(Qt.ItemDataRole.UserRole)
         if value:
             self.contextRequested.emit(
-                Path(value),
+                _media_value(value),
                 self.viewport().mapToGlobal(position),
             )
 
@@ -1014,14 +1089,16 @@ class PhotoGrid(QListWidget):
                 if detail.get("audio_comment_path") and audio_badge.contains(event.position().toPoint()):
                     value = item.data(Qt.ItemDataRole.UserRole)
                     if value:
-                        self.audioRequested.emit(Path(value))
+                        media = _media_value(value)
+                        if isinstance(media, Path):
+                            self.audioRequested.emit(media)
                         event.accept()
                         return
                 badge = QRect(rect.left() + 6, rect.top() + 6, 32, 12)
                 if series.get("count", 0) > 1 and badge.contains(event.position().toPoint()):
                     value = item.data(Qt.ItemDataRole.UserRole)
                     if value:
-                        self.seriesToggleRequested.emit(Path(value))
+                        self.seriesToggleRequested.emit(_media_value(value))
                         event.accept()
                         return
         super().mouseReleaseEvent(event)
@@ -1048,8 +1125,8 @@ class PhotoGrid(QListWidget):
 
     def startDrag(self, supported_actions) -> None:  # noqa: N802
         """Упаковывает выбранные пути в стандартный MIME-набор для приложения и Проводника."""
-        paths = [Path(item.data(Qt.ItemDataRole.UserRole)) for item in self.selectedItems()
-                 if item.data(Qt.ItemDataRole.UserRole)]
+        paths = [value for item in self.selectedItems()
+                 if isinstance((value := _media_value(item.data(Qt.ItemDataRole.UserRole))), Path)]
         if not paths:
             return
         mime = QMimeData()
@@ -1103,7 +1180,7 @@ class PhotoGrid(QListWidget):
         item = self.itemAt(event.position().toPoint())
         internal_reorder = event.mimeData().hasFormat("application/x-rawww-drag") and item is not None
         if internal_reorder:
-            before = Path(item.data(Qt.ItemDataRole.UserRole))
+            before = _media_value(item.data(Qt.ItemDataRole.UserRole))
             dragged = set(paths)
             if before not in dragged:
                 self.orderDropped.emit(paths, before)
@@ -1111,9 +1188,9 @@ class PhotoGrid(QListWidget):
             return
         destination = None
         if item is not None:
-            candidate = item.data(Qt.ItemDataRole.UserRole)
-            if candidate and Path(candidate).is_dir():
-                destination = Path(candidate)
+            candidate = _media_value(item.data(Qt.ItemDataRole.UserRole))
+            if isinstance(candidate, Path) and candidate.is_dir():
+                destination = candidate
         action = event.proposedAction() if event.mimeData().hasFormat("application/x-rawww-drag") else Qt.DropAction.CopyAction
         self.pathsDropped.emit(paths, destination, action)
         event.acceptProposedAction()
@@ -1128,7 +1205,7 @@ class PhotoGrid(QListWidget):
         path = None
         if item is not None and (item.data(DETAIL_ROLE) or {}).get("audio_comment_path"):
             if self._audio_badge_rect(self.visualItemRect(item)).contains(position):
-                path = Path(item.data(Qt.ItemDataRole.UserRole))
+                path = _media_value(item.data(Qt.ItemDataRole.UserRole))
         if path != self._hovered_audio_path:
             self._hovered_audio_path = path
             self.audioHoverChanged.emit(path)
@@ -1408,7 +1485,7 @@ class PhotoCardDelegate(QStyledItemDelegate):
         top, side, bottom = (14, 4, 15) if self.compact else (20, 4, 16)
         image_rect = rect.adjusted(side, top, -side, -bottom)
         path = index.data(Qt.ItemDataRole.UserRole)
-        path_obj = Path(path) if path else None
+        path_obj = _media_value(path)
         if path_obj and path_obj.is_dir():
             text_height = 22 if self.compact else 28
             text_rect = QRect(rect.left() + 8, rect.bottom() - text_height - 5, rect.width() - 16, text_height)
@@ -1534,6 +1611,21 @@ class PhotoCardDelegate(QStyledItemDelegate):
                 rating_rect = QRect(badge_left, badge_top, rating_width + 2, badge_height)
                 painter.setPen(QColor("#3a3123"))
                 painter.drawText(rating_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, rating_text)
+            if series.get("materialized"):
+                size = 13 if self.compact else 16
+                extracted_rect = QRect(rect.right() - size - 5, badge_top, size, size)
+                painter.setBrush(QColor(72, 91, 118, 225))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(extracted_rect)
+                painter.setPen(QColor("#ffffff"))
+                icon_font = QFont(theme.FOMANTIC_ICON_FAMILY or option.font.family())
+                icon_font.setPixelSize(7 if self.compact else 9)
+                painter.setFont(icon_font)
+                painter.drawText(
+                    extracted_rect,
+                    Qt.AlignmentFlag.AlignCenter,
+                    theme.FOMANTIC_ICON_CODES.get("link", "↗") if theme.FOMANTIC_ICON_FAMILY else "↗",
+                )
         painter.restore()
 
     def sizeHint(self, option, index) -> QSize:
@@ -1553,8 +1645,8 @@ class ViewerStrip(QListWidget):
     принимает ``Workspace``. Виджет знает своё место и не рвётся руководить.
     """
 
-    pathActivated = Signal(Path)
-    seriesToggleRequested = Signal(Path)
+    pathActivated = Signal(object)
+    seriesToggleRequested = Signal(object)
     viewportChanged = Signal()
 
     def __init__(self, *, vertical: bool = False, portrait: bool = False) -> None:
@@ -1573,6 +1665,7 @@ class ViewerStrip(QListWidget):
         self.setUniformItemSizes(True)
         self.setWordWrap(False)
         self.setSpacing(3)
+        self.setFrameShape(QFrame.Shape.NoFrame)
         self.setItemDelegate(PhotoCardDelegate(self, compact=True))
         # Инерционная прокрутка колесом; ось (верт./гориз.) выбирается в wheelEvent
         # под текущую ориентацию ленты.
@@ -1617,18 +1710,20 @@ class ViewerStrip(QListWidget):
             self.setFlow(QListWidget.Flow.TopToBottom)
             self.setMinimumHeight(0)
             self.setMaximumHeight(QT_WIDGET_SIZE_MAX)
-            self.setFixedWidth(grid.width() + 18)
             self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+            scrollbar_width = self.verticalScrollBar().sizeHint().width()
+            self.setFixedWidth(grid.width() + scrollbar_width + self.frameWidth() * 2)
         else:
             self.setFlow(QListWidget.Flow.LeftToRight)
             self.setMinimumWidth(0)
             self.setMaximumWidth(QT_WIDGET_SIZE_MAX)
-            self.setFixedHeight(grid.height() + 4)
             self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.setHorizontalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+            scrollbar_height = self.horizontalScrollBar().sizeHint().height()
+            self.setFixedHeight(grid.height() + scrollbar_height + self.frameWidth() * 2)
 
     def set_orientation(self, *, vertical: bool | None = None, portrait: bool | None = None) -> None:
         """Переносит ленту между нижним и боковым положением и меняет форму карточек."""
@@ -1654,7 +1749,7 @@ class ViewerStrip(QListWidget):
         value = item.data(Qt.ItemDataRole.UserRole)
         if value:
             self.setCurrentItem(item)
-            self.pathActivated.emit(Path(value))
+            self.pathActivated.emit(_media_value(value))
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
@@ -1666,7 +1761,7 @@ class ViewerStrip(QListWidget):
                 if int(series.get("count", 0) or 0) > 1 and badge.contains(event.position().toPoint()):
                     value = item.data(Qt.ItemDataRole.UserRole)
                     if value:
-                        self.seriesToggleRequested.emit(Path(value))
+                        self.seriesToggleRequested.emit(_media_value(value))
                         event.accept()
                         return
         super().mousePressEvent(event)
@@ -1715,7 +1810,7 @@ class ViewerStrip(QListWidget):
     ) -> QListWidgetItem:
         """Собирает карточку ленты с метаданными и готовым превью, если оно есть."""
         item = QListWidgetItem(path.name)
-        item.setData(Qt.ItemDataRole.UserRole, str(path))
+        item.setData(Qt.ItemDataRole.UserRole, path)
         item.setData(DETAIL_ROLE, details.get(path.name, {}))
         item.setData(SERIES_ROLE, (series_cards or {}).get(path, {}))
         preview = previews.get(path)
@@ -2390,13 +2485,14 @@ class FullView(QFrame):
     exitRequested = Signal()
     nextRequested = Signal()
     previousRequested = Signal()
-    pathRequested = Signal(Path)
+    pathRequested = Signal(object)
     ratingRequested = Signal(object)
     colorRequested = Signal(str)
     faceShowRequested = Signal(object)
     faceAddRequested = Signal(object)
     faceFilterClearRequested = Signal()
-    seriesToggleRequested = Signal(Path)
+    seriesToggleRequested = Signal(object)
+    burstExtractRequested = Signal()
     quickMarkRequested = Signal()
     quickMarkConfigured = Signal(str, object)
     autoAdvanceChanged = Signal(bool)
@@ -2466,17 +2562,18 @@ class FullView(QFrame):
         series_layout.setSpacing(4)
         self.series_up = QToolButton()
         self.series_up.setObjectName("seriesNav")
-        self.series_up.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.series_up.setFixedSize(48, 26)
         self.series_up.setIcon(_fomantic_icon("chevron-up", 13))
         self.series_up.clicked.connect(lambda: self._move_series(-1))
         self.series_down = QToolButton()
         self.series_down.setObjectName("seriesNav")
-        self.series_down.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.series_down.setFixedSize(48, 26)
         self.series_down.setIcon(_fomantic_icon("chevron-down", 13))
         self.series_down.clicked.connect(lambda: self._move_series(1))
-        series_layout.addWidget(self.series_up)
+        series_layout.addWidget(self.series_up, 0, Qt.AlignmentFlag.AlignHCenter)
         series_layout.addWidget(self.series_strip, 1)
-        series_layout.addWidget(self.series_down)
+        series_layout.addWidget(self.series_down, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._sync_series_panel_width()
         self.series_panel.hide()
 
         stage = QWidget()
@@ -2567,6 +2664,13 @@ class FullView(QFrame):
         self.strip_toggle.setToolTip(_("Свернуть ленту превью"))
         self.strip_toggle.clicked.connect(self.toggle_strip)
         strip_header_layout.addWidget(self.strip_toggle)
+        self.burst_extract_button = QToolButton()
+        self.burst_extract_button.setObjectName("burstExtract")
+        self.burst_extract_button.setIcon(_fomantic_icon("download", 13))
+        self.burst_extract_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.burst_extract_button.clicked.connect(self._request_burst_extract)
+        self.burst_extract_button.hide()
+        strip_header_layout.addWidget(self.burst_extract_button)
         self.video_play_button = QToolButton()
         self.video_play_button.setObjectName("videoPlay")
         self.video_play_button.setIcon(_fomantic_icon("play", 12))
@@ -2640,6 +2744,12 @@ class FullView(QFrame):
         self.zoom_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.zoom_action.triggered.connect(self._toggle_zoom)
         self.addAction(self.zoom_action)
+        self.burst_extract_action = QAction(self)
+        self.burst_extract_action.setShortcut(QKeySequence("X"))
+        self.burst_extract_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.burst_extract_action.setEnabled(False)
+        self.burst_extract_action.triggered.connect(self._request_burst_extract)
+        self.addAction(self.burst_extract_action)
 
         self.apply_color_management()
 
@@ -2679,8 +2789,13 @@ class FullView(QFrame):
             self.photo_strip.set_orientation(vertical=False, portrait=False)
             self._strip_layout.addWidget(self.photo_strip)
         self.series_strip.set_orientation(portrait=vertical)
+        self._sync_series_panel_width()
         self._apply_strip_level()
         QTimer.singleShot(0, self._position_video_controls)
+
+    def _sync_series_panel_width(self) -> None:
+        """Подгоняет рамку серии под фактическую ширину карточек текущей ориентации."""
+        self.series_panel.setFixedWidth(self.series_strip.width() + 2)
 
     def set_strip_level(self, level: int) -> None:
         level = max(self.STRIP_FULL, min(self.STRIP_HIDDEN, level))
@@ -2768,6 +2883,25 @@ class FullView(QFrame):
         self.series_panel.setVisible(show_series_strip and len(series) > 1)
         self._update_series_navigation(series_current)
 
+    def set_burst_extract_state(self, *, visible: bool, extracted: bool = False) -> None:
+        """Показывает извлечение только для виртуального кадра и отражает готовый CR3."""
+        self.burst_extract_button.setVisible(visible)
+        self.burst_extract_button.setEnabled(visible)
+        self.burst_extract_action.setEnabled(visible)
+        if not visible:
+            return
+        if extracted:
+            self.burst_extract_button.setIcon(_fomantic_icon("trash", 13))
+            self.burst_extract_button.setToolTip(_("Удалить извлечённый кадр RAW Burst (X)"))
+        else:
+            self.burst_extract_button.setIcon(_fomantic_icon("download", 13))
+            self.burst_extract_button.setToolTip(_("Извлечь кадр RAW Burst (X)"))
+
+    def _request_burst_extract(self) -> None:
+        """Передаёт явное извлечение координатору только для доступного виртуального кадра."""
+        if self.burst_extract_button.isEnabled() and not self.burst_extract_button.isHidden():
+            self.burstExtractRequested.emit()
+
     def update_preview(self, path: Path, preview: QImage) -> None:
         self.photo_strip.update_preview(path, preview)
         self.series_strip.update_preview(path, preview)
@@ -2841,7 +2975,7 @@ class FullView(QFrame):
         if not self._series_paths:
             return
         current = self.series_strip.currentItem()
-        current_path = Path(current.data(Qt.ItemDataRole.UserRole)) if current is not None else None
+        current_path = _media_value(current.data(Qt.ItemDataRole.UserRole)) if current is not None else None
         try:
             row = self._series_paths.index(current_path) + delta
         except ValueError:
@@ -4314,6 +4448,8 @@ class Workspace(QMainWindow):
         self.cache_load_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_flush_executor = ThreadPoolExecutor(max_workers=1)
         self.rename_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch-rename")
+        self.file_mutation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="file-mutation")
+        self.burst_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-materialize")
         self.face_search_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="face-search")
         self._preview_cache_write_buffer: dict[
             tuple[int, Path, int], tuple[FolderCache, PixelImage, int]
@@ -4339,6 +4475,10 @@ class Workspace(QMainWindow):
         self.bridge.cacheLoaded.connect(self._on_cache_loaded)
         self.bridge.aiCacheChecked.connect(self._on_ai_cache_checked)
         self.bridge.directoryScanned.connect(self._on_directory_scanned)
+        self.bridge.burstsScanned.connect(self._on_bursts_scanned)
+        self.bridge.burstMaterialized.connect(self._on_burst_materialized)
+        self.bridge.burstRemoved.connect(self._on_burst_removed)
+        self.bridge.deleteProgress.connect(self._on_delete_progress)
         self.bridge.renameProgress.connect(self._on_rename_progress)
         self.bridge.renameCacheUpdating.connect(self._on_rename_cache_updating)
         self.bridge.renameFinished.connect(self._on_rename_finished)
@@ -4407,6 +4547,12 @@ class Workspace(QMainWindow):
         self.paths: list[Path] = []
         self.series_cards: dict[Path, dict] = {}
         self.expanded_series: set[Path] = set()
+        self.burst_indices: dict[Path, BurstIndex] = {}
+        self.burst_frames: dict[Path, tuple[BurstFrame, ...]] = {}
+        self.burst_materialized: dict[BurstFrame, Path] = {}
+        self._burst_pending_changes: dict[BurstFrame, dict] = {}
+        self._burst_removing: set[BurstFrame] = set()
+        self._burst_removal_preserves_selection: set[BurstFrame] = set()
         self.photo_details: dict[str, dict] = {}
         self.image_embeddings: dict[str, bytes] = {}
         self._status_visible_count = 0
@@ -4549,6 +4695,7 @@ class Workspace(QMainWindow):
         self.full_view.faceAddRequested.connect(self._add_face_to_set)
         self.full_view.faceFilterClearRequested.connect(self._clear_face_search)
         self.full_view.seriesToggleRequested.connect(self._toggle_grid_series)
+        self.full_view.burstExtractRequested.connect(self._extract_current_burst)
         self.full_view.quickMarkRequested.connect(self._apply_quick_mark)
         self.full_view.markIndicatorRequested.connect(self._toggle_full_view_mark_indicator)
         self.full_view.quickMarkConfigured.connect(self._configure_quick_mark)
@@ -4655,6 +4802,8 @@ class Workspace(QMainWindow):
         retire_executor(self.cache_load_executor)
         retire_executor(self.cache_flush_executor, cancel_futures=False)
         retire_executor(self.rename_executor, cancel_futures=False)
+        retire_executor(self.file_mutation_executor, cancel_futures=False)
+        retire_executor(self.burst_executor, cancel_futures=False)
         retire_executor(self.face_search_executor)
         retire_executor(self.cache_maintenance_executor)
         # XMP отражает явные пользовательские изменения и не является
@@ -4729,28 +4878,34 @@ class Workspace(QMainWindow):
     def _run_after_file_consumers_release(
         self,
         paths: list[Path],
-        operation: Callable[[], None],
+        operation: Callable[[], object],
         *,
         restart_consumers: bool = True,
         loading_text: str = _("Выполняется файловая операция"),
+        operation_finished: Callable[[Future], None] | None = None,
+        show_loading: bool = True,
     ) -> None:
         """Откладывает файловую операцию до освобождения исходников воркерами.
 
         Отмена Future не останавливает уже начатый RAW/AI/EXIF. Мы запрещаем
         новые задания, но ждём работающие асинхронно через event loop, чтобы Qt
-        не зависал и Windows получил закрытые файловые дескрипторы.
+        не зависал и Windows получил закрытые файловые дескрипторы. Если операция
+        возвращает Future, оверлей остаётся до её фактического завершения.
         """
         if self.closing:
             return
         if getattr(self, "_file_mutation_waiting", False):
             QTimer.singleShot(
                 50,
-                lambda targets=list(paths), callback=operation, restart=restart_consumers, text=loading_text:
+                lambda targets=list(paths), callback=operation, restart=restart_consumers, text=loading_text,
+                finished=operation_finished, visible=show_loading:
                 self._run_after_file_consumers_release(
                     targets,
                     callback,
                     restart_consumers=restart,
                     loading_text=text,
+                    operation_finished=finished,
+                    show_loading=visible,
                 ),
             )
             return
@@ -4801,21 +4956,16 @@ class Workspace(QMainWindow):
                 future.cancel()
             self._xmp_pending.clear()
 
-        self.grid_restore_loader_label.setText(loading_text)
-        self._set_grid_restore_loader_visible(True)
-        self.full_view.set_busy_loading(loading_text)
+        if show_loading:
+            self.grid_restore_loader_label.setText(loading_text)
+            self.grid_restore_loader_progress.setRange(0, 0)
+            self.grid_restore_loader_progress.setTextVisible(False)
+            self._set_grid_restore_loader_visible(True)
+            self.full_view.set_busy_loading(loading_text)
 
-        def finish_when_released() -> None:
-            if self.closing:
-                self._file_mutation_waiting = False
-                return
-            if any(not future.done() for future in futures):
-                QTimer.singleShot(10, finish_when_released)
-                return
+        def finish_operation() -> None:
             self._file_mutation_waiting = False
-            try:
-                operation()
-            finally:
+            if show_loading:
                 self.full_view.set_busy_loading(None)
                 if self._restoring_folder_grid_context:
                     self.grid_restore_loader_label.setText(_("Папка открывается"))
@@ -4842,6 +4992,38 @@ class Workspace(QMainWindow):
                     )
                 if had_ai:
                     self._start_ai_analysis()
+
+        def finish_when_released() -> None:
+            if self.closing:
+                self._file_mutation_waiting = False
+                return
+            if any(not future.done() for future in futures):
+                QTimer.singleShot(10, finish_when_released)
+                return
+            try:
+                result = operation()
+            except Exception:
+                finish_operation()
+                raise
+            if isinstance(result, Future):
+                def finish_background_operation() -> None:
+                    if self.closing:
+                        self._file_mutation_waiting = False
+                        return
+                    if not result.done():
+                        QTimer.singleShot(10, finish_background_operation)
+                        return
+                    try:
+                        if operation_finished is not None:
+                            operation_finished(result)
+                        else:
+                            result.result()
+                    finally:
+                        finish_operation()
+
+                finish_background_operation()
+                return
+            finish_operation()
 
         # Qt Multimedia освобождает backend асинхронно даже после пустого source.
         # Один короткий проход event loop убирает редкую гонку rename/rmtree на Windows.
@@ -5421,11 +5603,11 @@ class Workspace(QMainWindow):
         self.grid_restore_loader_label.setObjectName("gridRestoreLoaderText")
         self.grid_restore_loader_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         loader_layout.addWidget(self.grid_restore_loader_label)
-        loader_progress = QProgressBar()
-        loader_progress.setObjectName("gridRestoreLoaderProgress")
-        loader_progress.setRange(0, 0)
-        loader_progress.setTextVisible(False)
-        loader_layout.addWidget(loader_progress)
+        self.grid_restore_loader_progress = QProgressBar()
+        self.grid_restore_loader_progress.setObjectName("gridRestoreLoaderProgress")
+        self.grid_restore_loader_progress.setRange(0, 0)
+        self.grid_restore_loader_progress.setTextVisible(False)
+        loader_layout.addWidget(self.grid_restore_loader_progress)
         self.grid_restore_loader.setFixedSize(220, 76)
         self.grid_restore_loader.hide()
         self.grid_restore_loader_timer = QTimer(self)
@@ -6129,6 +6311,21 @@ class Workspace(QMainWindow):
 
     def _show_grid_context_menu(self, path: Path, global_position: QPoint) -> None:
         """Показывает меню папки или нативное меню файла для карточки сетки."""
+        if isinstance(path, BurstFrame):
+            menu = QMenu(self.grid)
+            if path in self.burst_materialized:
+                action = menu.addAction(_("Кадр RAW Burst уже извлечён"))
+                action.setEnabled(False)
+            else:
+                action = menu.addAction(_("Извлечь кадр RAW Burst"))
+                action.setIcon(_fomantic_icon("download", 13))
+                action.triggered.connect(
+                    lambda _checked=False, frame=path: self._request_burst_materialization(
+                        frame, {}, keep_without_selection=True,
+                    )
+                )
+            menu.exec(global_position)
+            return
         path = Path(path)
         if path.is_dir():
             menu = QMenu(self.grid)
@@ -6187,13 +6384,13 @@ class Workspace(QMainWindow):
 
     def _delete_grid_selection(self, shift_pressed: bool) -> None:
         self._delete_paths(
-            self._selected_paths(),
+            [path for path in self._selected_paths() if isinstance(path, Path)],
             permanent=self._delete_permanently_for_shortcut(shift_pressed),
         )
 
     def _delete_full_view_photo(self, shift_pressed: bool) -> None:
         """Удаляет открытый кадр, не полагаясь на оставшееся в гриде выделение."""
-        if self.current_path is None:
+        if self.current_path is None or isinstance(self.current_path, BurstFrame):
             return
         self._delete_paths(
             [self.current_path],
@@ -6203,7 +6400,7 @@ class Workspace(QMainWindow):
     def _file_panel_paths(self) -> list[Path]:
         """Возвращает пути, выбранные в активной файловой панели."""
         if self.stack.currentWidget() is self.full_view and self.current_path is not None:
-            return [self.current_path]
+            return [self.current_path] if isinstance(self.current_path, Path) else []
         focus = QApplication.focusWidget()
         if self._is_directory_focus_widget(focus):
             selection = self.dir_tree.selectionModel()
@@ -6214,7 +6411,7 @@ class Workspace(QMainWindow):
                 for index in selection.selectedRows(0)
                 if index.isValid()
             ]
-        return self._selected_paths()
+        return [path for path in self._selected_paths() if isinstance(path, Path)]
 
     def _paste_destination(self) -> Path:
         focus = QApplication.focusWidget()
@@ -6542,12 +6739,15 @@ class Workspace(QMainWindow):
             lambda selected=list(targets), remove_permanently=permanent:
             self._delete_paths_now(selected, permanent=remove_permanently),
             loading_text=_("Выполняется удаление"),
+            operation_finished=self._finish_delete_paths,
+            show_loading=len(targets) > 1,
         )
 
-    def _delete_paths_now(self, targets: list[Path], *, permanent: bool) -> None:
-        """Удаляет подтверждённые пути после освобождения фоновых читателей."""
+    def _delete_paths_now(self, targets: list[Path], *, permanent: bool) -> Future:
+        """После освобождения читателей запускает удаление вне главного Qt-потока."""
 
         deleting_current_folder = self.current_dir in targets
+        cache_directory = self.current_dir
         if deleting_current_folder:
             self.load_directory(self.current_dir.parent)
 
@@ -6557,38 +6757,42 @@ class Workspace(QMainWindow):
             monotonic() + FOLDER_CHANGE_DEBOUNCE_MS / 1_000 + 0.5,
         )
 
-        deleted_files: list[Path] = []
-        deleted_folders: list[Path] = []
-        errors: list[str] = []
-        for path in targets:
-            is_folder = path.is_dir()
-            try:
-                if permanent:
-                    if is_folder:
-                        shutil.rmtree(path)
-                    else:
-                        path.unlink()
-                else:
-                    send2trash(str(path))
-            except OSError as exc:
-                errors.append(f"{path.name}: {exc}")
-                continue
-            if is_folder:
-                deleted_folders.append(path)
-            else:
-                deleted_files.append(path)
+        if len(targets) > 1:
+            self.grid_restore_loader_progress.setRange(0, len(targets))
+            self.grid_restore_loader_progress.setValue(0)
+            self.grid_restore_loader_progress.setFormat("%v / %m")
+            self.grid_restore_loader_progress.setTextVisible(True)
+        future = self.file_mutation_executor.submit(
+            _delete_paths_task,
+            targets,
+            permanent,
+            self.bridge.deleteProgress.emit,
+        )
+        future.rawww_deleting_current_folder = deleting_current_folder
+        future.rawww_cache_directory = cache_directory
+        return future
 
-        for folder in deleted_folders:
-            try:
-                remove_folder_cache(folder)
-            except OSError as exc:
-                errors.append(_("кэш {name}: {error}").format(name=folder.name, error=exc))
+    def _on_delete_progress(self, completed: int, total: int) -> None:
+        """Обновляет определяемый прогресс массового удаления в главном потоке."""
+        if not self._file_mutation_waiting:
+            return
+        self.grid_restore_loader_progress.setRange(0, total)
+        self.grid_restore_loader_progress.setValue(completed)
+
+    def _finish_delete_paths(self, future: Future) -> None:
+        """Применяет результат фонового удаления к модели сетки."""
+        try:
+            deleted_files, deleted_folders, errors = future.result()
+        except Exception as exc:
+            deleted_files, deleted_folders = [], []
+            errors = [str(exc)]
 
         if deleted_files:
-            self.cache_flush_executor.submit(prune_folder_cache, self.current_dir)
+            cache_directory = getattr(future, "rawww_cache_directory", self.current_dir)
+            self.cache_flush_executor.submit(prune_folder_cache, cache_directory)
 
         deleted = [*deleted_files, *deleted_folders]
-        if deleted and not deleting_current_folder:
+        if deleted and not getattr(future, "rawww_deleting_current_folder", False):
             self._remove_paths_from_grid(deleted)
         if errors:
             QMessageBox.warning(self, _("Удаление"), _("Не удалось удалить:\n") + "\n".join(errors))
@@ -6744,10 +6948,16 @@ class Workspace(QMainWindow):
             self.cardImportRequested.emit([(path, _volume_label(path)) for path in volumes])
 
     def _drive_selected(self, drive_path: Path) -> None:
+        """Открывает сохранённую папку диска, а повторным кликом — его корень."""
         self._deactivate_shotsync()
         if drive_path.is_dir():
             self._set_tree_root_for_path(drive_path)
-            target = self._last_directory_for_volume(drive_path) or drive_path
+            current_root = _volume_root_for_path(self.current_dir, _mounted_volume_paths())
+            repeated_click = (
+                current_root is not None
+                and _drive_key(current_root) == _drive_key(drive_path)
+            )
+            target = drive_path if repeated_click else self._last_directory_for_volume(drive_path) or drive_path
             self.load_directory(target if target.is_dir() else drive_path)
 
     def _last_directory_for_volume(self, volume_root: Path) -> Path | None:
@@ -7887,6 +8097,11 @@ class Workspace(QMainWindow):
         self.settings.setValue("last_directory", str(directory))
         self.setWindowTitle(_workspace_title(directory))
         self.all_paths = []
+        self.burst_indices.clear()
+        self.burst_frames.clear()
+        self.burst_materialized.clear()
+        self._burst_removing.clear()
+        self._burst_removal_preserves_selection.clear()
         self.view_paths = []
         self.paths = []
         self._pending_view_cursor_path = None
@@ -8043,7 +8258,7 @@ class Workspace(QMainWindow):
             if current is not None:
                 value = current.data(Qt.ItemDataRole.UserRole)
                 if value:
-                    self._pending_view_cursor_path = Path(value)
+                    self._pending_view_cursor_path = _media_value(value)
             self._pending_view_selection = set(self._selected_paths())
         self._pending_view_scroll = self.grid.verticalScrollBar().value()
 
@@ -8247,6 +8462,192 @@ class Workspace(QMainWindow):
         self.visible_thumb_pending.clear()
         self._refresh_status_panel()
         self.populate_timer.start()
+        cr3_paths = [path for path in self.all_paths if path.is_file() and path.suffix.casefold() == ".cr3"]
+        if cr3_paths:
+            burst_future = self.directory_scan_executor.submit(_scan_canon_bursts, cr3_paths)
+            burst_future.add_done_callback(
+                lambda done, r=request, d=directory: self.bridge.burstsScanned.emit(r, d, done)
+            )
+
+    def _on_bursts_scanned(self, request: WorkspaceRequest, directory: Path, future: Future) -> None:
+        """Добавляет виртуальные кадры, не задерживая первоначальный показ папки."""
+        if self.closing or directory != self.current_dir or not self.workspace_state.accepts(request):
+            return
+        try:
+            self.burst_indices = future.result()
+        except Exception:
+            self.burst_indices = {}
+        self.burst_frames = {
+            source: tuple(BurstFrame(source, index, burst.frame_count) for index in range(burst.frame_count))
+            for source, burst in self.burst_indices.items()
+        }
+        if self.burst_frames:
+            self._restore_burst_materializations()
+            self._apply_view()
+
+    def _restore_burst_materializations(self) -> None:
+        if self.folder_cache is None or not self.cache_ready or not self.burst_frames:
+            return
+        stored = self.folder_cache.burst_materializations()
+        restored: dict[BurstFrame, Path] = {}
+        for source, frames in self.burst_frames.items():
+            for frame in frames:
+                name = stored.get((source.name, frame.index))
+                target = self.current_dir / name if name else materialized_path(frame)
+                if name and target.is_file():
+                    restored[frame] = target
+                    self.photo_details[frame.name] = dict(self.photo_details.get(target.name, {}))
+        self.burst_materialized = restored
+
+    @staticmethod
+    def _has_burst_selection(detail: dict) -> bool:
+        return bool(
+            detail.get("rating") or detail.get("color_label") or detail.get("comment")
+            or detail.get("keywords")
+        )
+
+    def _request_burst_materialization(
+        self, frame: BurstFrame, changes: dict, *, keep_without_selection: bool = False,
+    ) -> None:
+        pending = self._burst_pending_changes.get(frame)
+        if pending is not None:
+            pending.update(changes)
+            if keep_without_selection:
+                pending["_burst_keep"] = True
+            return
+        self._burst_pending_changes[frame] = dict(changes)
+        if keep_without_selection:
+            self._burst_pending_changes[frame]["_burst_keep"] = True
+        future = self.burst_executor.submit(
+            _materialize_burst_job,
+            frame,
+            dict(self._burst_pending_changes[frame]),
+        )
+        future.add_done_callback(
+            lambda done, f=frame: self.bridge.burstMaterialized.emit(f, None, done)
+        )
+
+    def _on_burst_materialized(self, frame: BurstFrame, _unused: object, future: Future) -> None:
+        changes = self._burst_pending_changes.pop(frame, {})
+        keep_without_selection = bool(changes.pop("_burst_keep", False))
+        try:
+            target = future.result()
+        except Exception as exc:
+            if self.closing or frame.source.parent != self.current_dir:
+                return
+            QMessageBox.warning(self, _("Извлечение RAW Burst"), str(exc))
+            if self.current_path == frame:
+                self.full_view.set_burst_extract_state(visible=True, extracted=False)
+            return
+        if self.closing:
+            return
+        if frame.source.parent != self.current_dir:
+            self.cache_flush_executor.submit(
+                persist_burst_materialization,
+                frame.source.parent,
+                frame.source.name,
+                frame.index,
+                target.name,
+                changes,
+            )
+            return
+        self._suppress_own_folder_refresh()
+        self.burst_materialized[frame] = target
+        if target not in self.all_paths:
+            self.all_paths.append(target)
+        self._cache_ai_paths.add(target)
+        self._cache_ai_waiting = True
+        detail = self.photo_details.setdefault(target.name, {})
+        detail.update(changes)
+        detail["_selection_updated_ns"] = time_ns()
+        self.photo_details[frame.name] = dict(detail)
+        if self.folder_cache is not None and self.cache_ready:
+            self.folder_cache.live_names.add(target.name)
+            self.folder_cache.register_burst_materialization(frame.source.name, frame.index, target.name)
+            self.folder_cache.store_photo_selection(
+                target.name,
+                rating=detail.get("rating"), color_label=detail.get("color_label", ""),
+                comment=detail.get("comment", ""), keywords=detail.get("keywords") or [],
+            )
+        if self._xmp_auto_enabled():
+            self._queue_xmp(target)
+        if ENABLE_EXIF_METADATA and self.folder_cache is not None:
+            self.metadata_pipeline.scan(
+                [target],
+                self.folder_cache,
+                self.bridge.metadataUpdated.emit,
+            )
+        self._apply_view()
+        if self.current_path == frame:
+            self.workspace_state.current_photo = frame
+            self._refresh_full_view_navigation(frame)
+            self.full_view.set_burst_extract_state(visible=True, extracted=True)
+        if not keep_without_selection and not self._has_burst_selection(detail):
+            self._remove_materialized_burst(frame, target)
+
+    def _remove_materialized_burst(
+        self, frame: BurstFrame, target: Path, *, preserve_selection: bool = False,
+    ) -> None:
+        """Удаляет только принадлежащий приложению CR3, оставляя виртуальный кадр на месте."""
+        # Удалять разрешено только тот путь, который был восстановлен из нашей таблицы
+        # соответствий. Обычный физический CR3 этот сценарий никогда не затрагивает.
+        if self.burst_materialized.get(frame) != target or frame in self._burst_removing:
+            return
+        self._burst_removing.add(frame)
+        if preserve_selection:
+            self._burst_removal_preserves_selection.add(frame)
+        future = self.burst_executor.submit(_delete_materialized_burst_files, target)
+        future.add_done_callback(
+            lambda done, f=frame, t=target: self.bridge.burstRemoved.emit(f, t, done)
+        )
+
+    def _on_burst_removed(self, frame: BurstFrame, target: Path, future: Future) -> None:
+        self._burst_removing.discard(frame)
+        preserve_selection = frame in self._burst_removal_preserves_selection
+        self._burst_removal_preserves_selection.discard(frame)
+        if self.closing or frame.source.parent != self.current_dir:
+            return
+        try:
+            future.result()
+        except OSError as exc:
+            QMessageBox.warning(self, _("Извлечение RAW Burst"), str(exc))
+            if self.current_path == frame:
+                self.full_view.set_burst_extract_state(visible=True, extracted=True)
+            return
+        keep_current = self.current_path == frame
+        self._suppress_own_folder_refresh()
+        virtual_detail = dict(self.photo_details.get(frame.name, {})) if preserve_selection else {}
+        self.burst_materialized.pop(frame, None)
+        self.all_paths = [path for path in self.all_paths if path != target]
+        self._cache_ai_paths.discard(target)
+        self.preview_finished_paths.discard(target)
+        self.decode_cache.remove_path(target)
+        self.photo_details.pop(target.name, None)
+        self.photo_details[frame.name] = virtual_detail
+        if self.folder_cache is not None and self.cache_ready:
+            self.folder_cache.live_names.discard(target.name)
+            self.folder_cache.remove_burst_materialization(frame.source.name, frame.index)
+        self._apply_view()
+        if keep_current:
+            # Перестройка физического списка не должна сдвигать FullView с
+            # виртуального кадра на предыдущий элемент серии.
+            self.current_path = frame
+            self.workspace_state.current_photo = frame
+            self._refresh_full_view_navigation(frame)
+            self.full_view.set_burst_extract_state(visible=True, extracted=False)
+
+    def _extract_current_burst(self) -> None:
+        """Переключает физический CR3 для выбранного виртуального кадра."""
+        frame = self.current_path
+        if not isinstance(frame, BurstFrame) or frame in self._burst_removing:
+            return
+        self.full_view.burst_extract_button.setEnabled(False)
+        self.full_view.burst_extract_action.setEnabled(False)
+        target = self.burst_materialized.get(frame)
+        if target is not None:
+            self._remove_materialized_burst(frame, target, preserve_selection=True)
+            return
+        self._request_burst_materialization(frame, {}, keep_without_selection=True)
 
     def _populate_next_items(self) -> None:
         if not self.workspace_active:
@@ -8275,7 +8676,7 @@ class Workspace(QMainWindow):
     def _grid_item_for_path(self, path: Path) -> QListWidgetItem:
         """Создаёт карточку пути и повторно использует уже загруженную миниатюру."""
         item = QListWidgetItem(path.name)
-        item.setData(Qt.ItemDataRole.UserRole, str(path))
+        item.setData(Qt.ItemDataRole.UserRole, path)
         item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
         item.setToolTip(str(path))
         item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
@@ -9272,8 +9673,23 @@ class Workspace(QMainWindow):
     def _folder_changed(self, path: str) -> None:
         if self._selection_progress is not None or self._upload_progress is not None:
             return
+        if (
+            self._file_mutation_waiting
+            or self._burst_pending_changes
+            or self._burst_removing
+            or monotonic() < self._ignore_folder_changes_until
+        ):
+            return
         if not self.closing and Path(path) == self.current_dir:
             self.folder_change_timer.start(FOLDER_CHANGE_DEBOUNCE_MS)
+
+    def _suppress_own_folder_refresh(self) -> None:
+        """Гасит watcher-событие от только что завершённой собственной операции."""
+        self.folder_change_timer.stop()
+        self._ignore_folder_changes_until = max(
+            self._ignore_folder_changes_until,
+            monotonic() + FOLDER_CHANGE_DEBOUNCE_MS / 1_000 + 0.5,
+        )
 
     def _reload_changed_folder(self) -> None:
         if self._selection_progress is not None or self._upload_progress is not None:
@@ -9291,6 +9707,13 @@ class Workspace(QMainWindow):
         """Перезагружает папку лишь при изменении фото, а не после записи XMP."""
         generation, directory, future = payload
         if self.closing or generation != self.cache_load_generation or directory != self.current_dir:
+            return
+        if (
+            self._file_mutation_waiting
+            or self._burst_pending_changes
+            or self._burst_removing
+            or monotonic() < self._ignore_folder_changes_until
+        ):
             return
         try:
             paths = future.result()
@@ -9745,7 +10168,7 @@ class Workspace(QMainWindow):
             value = item.data(Qt.ItemDataRole.UserRole)
             if not value:
                 continue
-            path = Path(value)
+            path = _media_value(value)
             key = (path, THUMB_SIZE)
             if key not in self.pending and path not in self.thumb_priority_set:
                 self.thumb_priority.append(path)
@@ -9816,6 +10239,7 @@ class Workspace(QMainWindow):
             self._face_search_index = None
             for path, item in self.items_by_path.items():
                 item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
+            self._restore_burst_materializations()
         export_xmp_after_load = self._xmp_export_after_cache_load
         self._xmp_export_after_cache_load = False
         if export_xmp_after_load and self._xmp_auto_enabled():
@@ -10024,7 +10448,8 @@ class Workspace(QMainWindow):
     def _grid_paths_with_series(self, paths: list[Path]) -> list[Path]:
         """Разворачивает выбранные серии, сохраняя экранный порядок сетки."""
         self.series_cards = {}
-        if not self.series_toggle.isChecked():
+        ai_series_enabled = self.series_toggle.isChecked()
+        if not ai_series_enabled and not self.burst_frames:
             return list(paths)
         result: list[Path] = [path for path in paths if path.is_dir()]
         group: list[Path] = []
@@ -10052,6 +10477,27 @@ class Workspace(QMainWindow):
         for path in paths:
             if path.is_dir():
                 continue
+            burst = self.burst_frames.get(path)
+            if burst:
+                flush()
+                result.append(path)
+                expanded = path in self.expanded_series
+                self.series_cards[path] = {
+                    "count": len(burst), "expanded": expanded, "leader": path, "burst": True,
+                }
+                if expanded:
+                    for frame in burst:
+                        result.append(frame)
+                        self.series_cards[frame] = {
+                            "count": 0, "member": True, "leader": path, "burst": True,
+                            "frame_index": frame.index,
+                            "materialized": frame in self.burst_materialized,
+                        }
+                continue
+            if not ai_series_enabled:
+                flush()
+                result.append(path)
+                continue
             if group and self._embedding_similarity(group[-1], path) < 0.92:
                 flush()
             group.append(path)
@@ -10072,7 +10518,7 @@ class Workspace(QMainWindow):
             self._refresh_full_view_navigation(self.current_path)
 
     def _selected_paths(self) -> list[Path]:
-        return [Path(item.data(Qt.ItemDataRole.UserRole)) for item in self.grid.selectedItems()]
+        return [value for item in self.grid.selectedItems() if (value := _media_value(item.data(Qt.ItemDataRole.UserRole))) is not None]
 
     def _selection_changed(self) -> None:
         selected = self._selected_paths()
@@ -10097,6 +10543,33 @@ class Workspace(QMainWindow):
                 else:
                     targets.append(path)
             paths = list(dict.fromkeys(targets))
+        redirected: list[Path] = []
+        virtual_aliases: list[tuple[BurstFrame, Path]] = []
+        for path in paths:
+            if not isinstance(path, BurstFrame):
+                redirected.append(path)
+                continue
+            prospective = dict(self.photo_details.get(path.name, {}))
+            prospective.update(changes)
+            self.photo_details[path.name] = prospective
+            target = self.burst_materialized.get(path)
+            pending = self._burst_pending_changes.get(path)
+            if pending is not None:
+                keep = pending.get("_burst_keep")
+                pending.clear()
+                pending.update(prospective)
+                if keep:
+                    pending["_burst_keep"] = True
+                continue
+            if self._has_burst_selection(prospective):
+                if target is None:
+                    self._request_burst_materialization(path, prospective)
+                else:
+                    redirected.append(target)
+                    virtual_aliases.append((path, target))
+            elif target is not None:
+                self._remove_materialized_burst(path, target)
+        paths = redirected
         if {"rating", "color_label", "comment", "keywords"}.intersection(changes):
             self._rebuild_xmp_pairs()
             paths = list(dict.fromkeys(
@@ -10126,6 +10599,8 @@ class Workspace(QMainWindow):
                 auto_xmp_targets.setdefault(sidecar_path(path), path)
         for path in auto_xmp_targets.values():
             self._queue_xmp(path)
+        for frame, target in virtual_aliases:
+            self.photo_details[frame.name] = dict(self.photo_details.get(target.name, {}))
         self.grid.viewport().update()
         if self.stack.currentWidget() is self.grid_page:
             self.meta_bar.set_metadata(
@@ -10730,8 +11205,10 @@ class Workspace(QMainWindow):
         self.preview_finished_paths.add(path)
         self._schedule_status_refresh()
 
-    def _on_decode_failed(self, path: str, message: str) -> None:
-        failed_path = Path(path)
+    def _on_decode_failed(self, path: object, message: str) -> None:
+        failed_path = _media_value(path)
+        if failed_path is None:
+            return
         self.visible_thumb_pending.discard((failed_path, THUMB_SIZE))
         self.preview_finished_paths.add(failed_path)
         item = self.items_by_path.get(failed_path)
@@ -10748,14 +11225,14 @@ class Workspace(QMainWindow):
     def _open_selected(self) -> None:
         item = self.grid.currentItem()
         if item:
-            self.open_full(Path(item.data(Qt.ItemDataRole.UserRole)))
+            self.open_full(_media_value(item.data(Qt.ItemDataRole.UserRole)))
 
     def _open_in_editor(self) -> None:
         """Открывает активное изображение в выбранном внешнем редакторе."""
         path = self.current_path if self.stack.currentWidget() is self.full_view else None
         if path is None:
             item = self.grid.currentItem()
-            path = Path(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
+            path = _media_value(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
         if path is None or not path.is_file():
             return
 
@@ -10847,7 +11324,7 @@ class Workspace(QMainWindow):
             return
         if self.stack.currentWidget() is not self.grid_page:
             return
-        path = Path(value)
+        path = _media_value(value)
         self.current_path = path
         self.workspace_state.current_photo = path
         self._refresh_status_panel()
@@ -10880,6 +11357,10 @@ class Workspace(QMainWindow):
         self.full_view.set_metadata(
             self.photo_details.get(path.name, {}),
             (path,),
+        )
+        self.full_view.set_burst_extract_state(
+            visible=isinstance(path, BurstFrame),
+            extracted=isinstance(path, BurstFrame) and path in self.burst_materialized,
         )
         self.stack.setCurrentWidget(self.full_view)
         self.fullViewRequested.emit(self)
@@ -11100,6 +11581,15 @@ class Workspace(QMainWindow):
             ),
             show_series_strip=not (len(series) > 1 and series[0] in self.expanded_series),
         )
+        for member in series:
+            item = self.full_view.series_strip.item_for_path(member)
+            if item is None:
+                continue
+            card = dict(item.data(SERIES_ROLE) or {})
+            card.update(strip_cards.get(member, {}))
+            if isinstance(member, BurstFrame):
+                card["materialized"] = member in self.burst_materialized
+            item.setData(SERIES_ROLE, card)
         self._prioritize_full_strip_thumbs(strip_current, strip_paths, series)
         # Видимая часть ленты может быть шире окна вокруг текущего кадра
         # (особенно у высокой вертикальной ленты), поэтому после раскладки
@@ -11231,10 +11721,19 @@ class Workspace(QMainWindow):
             )
 
         image_only_paths = [path for path in self.view_paths if path.is_file()]
+        burst_frames = getattr(self, "burst_frames", {})
+        burst_materialized = getattr(self, "burst_materialized", {})
         result: list[Path] = []
         series_by_path: dict[Path, tuple[Path, ...]] = {}
         if not self.series_toggle.isChecked():
             result = image_only_paths
+            for path in image_only_paths:
+                burst = burst_frames.get(path)
+                if not burst:
+                    continue
+                members = (path, *burst)
+                for member in members:
+                    series_by_path[member] = members
         else:
             group: list[Path] = []
 
@@ -11251,6 +11750,17 @@ class Workspace(QMainWindow):
                 group.clear()
 
             for path in image_only_paths:
+                burst = burst_frames.get(path)
+                if burst:
+                    flush()
+                    members = (path, *burst)
+                    for member in members:
+                        series_by_path[member] = members
+                    if path in self.expanded_series:
+                        result.extend(members)
+                    else:
+                        result.append(path)
+                    continue
                 if group and self._embedding_similarity(group[-1], path) < 0.92:
                     flush()
                 group.append(path)
@@ -11259,7 +11769,13 @@ class Workspace(QMainWindow):
         self._full_navigation_paths = result
         self._full_navigation_indices = {path: index for index, path in enumerate(result)}
         self._full_navigation_series = series_by_path
-        self._full_navigation_cards = {path: self.series_cards.get(path, {}) for path in result}
+        self._full_navigation_cards = {
+            path: {
+                **self.series_cards.get(path, {}),
+                **({"materialized": path in burst_materialized} if isinstance(path, BurstFrame) else {}),
+            }
+            for path in result
+        }
         self._full_navigation_generation = self.view_generation
         return result, self._full_navigation_indices, series_by_path, self._full_navigation_cards, True
 
@@ -11384,7 +11900,7 @@ class Workspace(QMainWindow):
             path is None
             or self.stack.currentWidget() is not self.grid_page
             or item is None
-            or item.data(Qt.ItemDataRole.UserRole) != str(path)
+            or _media_value(item.data(Qt.ItemDataRole.UserRole)) != path
         ):
             return
         full_size = self._full_preview_size()
@@ -12488,6 +13004,21 @@ def _scan_directory(directory: Path) -> list[Path]:
         return entries
     except OSError:
         return []
+
+
+def _scan_canon_bursts(paths: list[Path]) -> dict[Path, BurstIndex]:
+    """Индексирует CR3 roll после публикации быстрого списка папки."""
+    result: dict[Path, BurstIndex] = {}
+    for path in paths:
+        if path.suffix.casefold() != ".cr3":
+            continue
+        try:
+            index = read_burst_index(path)
+        except CanonBurstError:
+            continue
+        if index is not None and index.frame_count > 1:
+            result[path] = index
+    return result
 
 
 def _build_photo_view(

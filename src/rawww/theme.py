@@ -1767,8 +1767,6 @@ def apply_theme(app: QApplication) -> None:
             padding: 0;
         }
         QFrame#seriesPanel {
-            min-width: 136px;
-            max-width: 136px;
             border: 1px solid #383838;
             border-radius: 10px;
             background: #151515;

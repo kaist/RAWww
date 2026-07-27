@@ -88,6 +88,10 @@ class PixelImage:
 
 
 def is_supported_image(path: Path) -> bool:
+    from .canon_burst import BurstFrame
+
+    if isinstance(path, BurstFrame):
+        return True
     return path.suffix.lower() in IMAGE_EXTENSIONS
 
 
@@ -104,6 +108,13 @@ def decode_image(path: Path, max_size: int) -> DecodedImage:
 
 
 def decode_pixels(path: Path, max_size: int) -> PixelImage:
+    from .canon_burst import BurstFrame, read_burst_index, read_frame_preview
+
+    if isinstance(path, BurstFrame):
+        index = read_burst_index(path.source)
+        if index is None or index.frame_count != path.count:
+            raise RuntimeError("RAW Burst изменился или больше не распознаётся")
+        return _decode_pillow(path, max_size, data=read_frame_preview(index, path.index), use_draft=False)
     if path.suffix.lower() in RAW_EXTENSIONS:
         return _decode_raw_preview(path, max_size)
     return _decode_pillow(path, max_size)
@@ -123,6 +134,10 @@ def decode_original_pixels(path: Path) -> PixelImage:
     предпочитается встроенное превью; полный RAW-декодер включается лишь при его
     отсутствии.
     """
+    from .canon_burst import BurstFrame
+
+    if isinstance(path, BurstFrame):
+        return decode_pixels(path, 4096)
     if path.suffix.lower() in RAW_EXTENSIONS:
         return _decode_raw_preview(path, None)
     return _decode_pillow(path, None, use_draft=False, sharpen=False)

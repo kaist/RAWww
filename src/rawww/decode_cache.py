@@ -77,6 +77,14 @@ class DecodeCache:
             _path, expired = self.thumbnails.popitem(last=False)
             self.thumbnail_bytes -= expired.sizeInBytes()
 
+    def remove_path(self, path: Path) -> None:
+        """Забывает все варианты одного пути после удаления созданного файла."""
+        for key in [key for key in self.memory if key[0] == path]:
+            self.memory.pop(key, None)
+        thumbnail = self.thumbnails.pop(path, None)
+        if thumbnail is not None:
+            self.thumbnail_bytes -= thumbnail.sizeInBytes()
+
     def clear(self) -> None:
         self.memory.clear()
         self.thumbnails.clear()

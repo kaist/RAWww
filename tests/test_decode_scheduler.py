@@ -278,7 +278,7 @@ class DecodeSchedulerTests(unittest.TestCase):
         scheduler, host = _make(folder)
         scheduler.submit_decode(path, THUMB_SIZE, full_priority=False)
         self.assertEqual(len(host.bridge.failed.emitted), 1)
-        self.assertEqual(host.bridge.failed.emitted[0][0], str(path))
+        self.assertEqual(host.bridge.failed.emitted[0][0], path)
         self.assertEqual(scheduler.pending, {})
 
     def test_missing_file_during_cache_lookup_is_silent(self) -> None:

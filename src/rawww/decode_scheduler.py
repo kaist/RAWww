@@ -191,7 +191,7 @@ class DecodeScheduler:
             return
         except Exception as exc:
             log_exception(f"Не удалось получить превью видео: {path}", exc)
-            self._host.bridge.failed.emit(str(path), str(exc))
+            self._host.bridge.failed.emit(path, str(exc))
             return
         if decoded is not None:
             self._host.decode_cache.put(key, decoded)
@@ -298,7 +298,7 @@ class DecodeScheduler:
         except Exception as exc:
             self.visible_thumb_pending.discard(key)
             log_exception(f"Не удалось прочитать кэш превью: {path}", exc)
-            self._host.bridge.failed.emit(str(path), str(exc))
+            self._host.bridge.failed.emit(path, str(exc))
             return
         if decoded is not None:
             self.visible_thumb_pending.discard(key)
@@ -330,7 +330,7 @@ class DecodeScheduler:
             decoded = future.result()
         except Exception as exc:
             for path in paths:
-                self._host.bridge.failed.emit(str(path), str(exc))
+                self._host.bridge.failed.emit(path, str(exc))
             return
         for path in paths:
             image = decoded.get(path)
@@ -378,7 +378,7 @@ class DecodeScheduler:
             return
         except Exception as exc:
             log_exception(f"Не удалось декодировать файл: {path}", exc)
-            self._host.bridge.failed.emit(str(path), str(exc))
+            self._host.bridge.failed.emit(path, str(exc))
 
     def _current_decode_executor(self) -> Executor:
         if self.current_decode_executor is None:

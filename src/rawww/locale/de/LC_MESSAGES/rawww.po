@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-27 13:19+0300\n"
+"POT-Creation-Date: 2026-07-27 16:44+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -86,6 +86,12 @@ msgstr "Wiedergabe / Pause (Leertaste)"
 
 msgid "Развернуть ленту превью"
 msgstr "Vorschauleiste ausklappen"
+
+msgid "Удалить извлечённый кадр RAW Burst (X)"
+msgstr "Extrahiertes RAW-Burst-Bild löschen (X)"
+
+msgid "Извлечь кадр RAW Burst (X)"
+msgstr "RAW-Burst-Bild extrahieren (X)"
 
 msgid "Показать фото с этим лицом"
 msgstr "Fotos mit diesem Gesicht anzeigen"
@@ -349,6 +355,12 @@ msgstr "In neuem Tab öffnen"
 
 msgid "Удалить"
 msgstr "Löschen"
+
+msgid "Кадр RAW Burst уже извлечён"
+msgstr "Das RAW-Burst-Bild wurde bereits extrahiert"
+
+msgid "Извлечь кадр RAW Burst"
+msgstr "RAW-Burst-Bild extrahieren"
 
 msgid "Открыть"
 msgstr "Öffnen"
@@ -631,6 +643,9 @@ msgstr "Gruppierung nach Serien aktiviert"
 
 msgid "Группировка по сериям выключена"
 msgstr "Gruppierung nach Serien deaktiviert"
+
+msgid "Извлечение RAW Burst"
+msgstr "RAW-Burst-Extraktion"
 
 msgid "AI-анализ поставлен в очередь"
 msgstr "KI-Analyse in Warteschlange"
@@ -1650,6 +1665,9 @@ msgstr "Links oder Rücktaste"
 
 msgid "Включить или выключить масштаб (полный просмотр)"
 msgstr "Zoom ein-/ausschalten (Vollansicht)"
+
+msgid "Извлечь виртуальный кадр RAW Burst (полный просмотр)"
+msgstr "Virtuelles RAW-Burst-Bild extrahieren (Vollbildansicht)"
 
 msgid "Воспроизведение видео или аудио (полный просмотр)"
 msgstr "Video oder Audio abspielen (Vollansicht)"
