@@ -307,6 +307,9 @@ def main() -> None:
             "--add-data", f"{ROOT / 'src' / 'rawww' / 'assets'}{os.pathsep}data/assets",
             "--add-data", f"{ROOT / 'src' / 'rawww' / 'locale'}{os.pathsep}data/locale",
             "--collect-binaries", "onnxruntime",
+            # pyexiv2 подгружает расширение и libexiv2 через ctypes, поэтому
+            # PyInstaller не видит их обычным статическим анализом импортов.
+            "--collect-all", "pyexiv2",
             "--hidden-import", "rawpy",
             "--hidden-import", "rawww._build_version",
         ]

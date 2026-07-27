@@ -1,7 +1,6 @@
 ## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
 ## SPDX-License-Identifier: GPL-3.0-or-later
 
-import json
 import os
 from pathlib import Path
 
@@ -14,14 +13,17 @@ def _metadata_smoke(path: Path) -> None:
     Этот путь включается только переменной окружения сборки. Он ловит отсутствие
     нативной библиотеки pyexiv2, которое обычный старт пустого окна не замечает.
     """
-    from rawww.exif import extract_metadata_batch
+    from rawww.exif import read_metadata
 
-    results = extract_metadata_batch([str(path)])
-    if len(results) != 1:
-        raise RuntimeError(f"Metadata was not read: {path}")
-    metadata = json.loads(results[0][1])
-    required = ("orientation", "rating", "capture_settings", "camera", "original_datetime")
-    missing = [name for name in required if not metadata.get(name) and metadata.get(name) != 0]
+    metadata = read_metadata(str(path))
+    required = (
+        "EXIF:Orientation",
+        "XMP:Rating",
+        "EXIF:ExposureTime",
+        "EXIF:Model",
+        "Composite:SubSecDateTimeOriginal",
+    )
+    missing = [name for name in required if metadata.get(name) in (None, "")]
     if missing:
         raise RuntimeError(f"Metadata is incomplete ({', '.join(missing)}): {path}")
     print(f"Metadata smoke test passed: {path.name}")
