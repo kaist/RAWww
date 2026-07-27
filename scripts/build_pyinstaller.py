@@ -201,12 +201,6 @@ def _finalize_macos_app() -> None:
     _localize_macos_bundle_name(MACOS_APP)
 
     pyexiv2_lib = MACOS_APP / "Contents" / "Frameworks" / "pyexiv2" / "lib"
-    _bundle_pyexiv2_macos_dependencies(pyexiv2_lib)
-
-    # pyexiv2 поставляет собственные Mach-O: расширение Python и libexiv2.
-    # После --collect-all они появляются уже после исходной подписи PyInstaller;
-    # Apple Silicon не загрузит такую библиотеку из подписанного .app без
-    # отдельной ad-hoc подписи (inner -> outer).
     for path in pyexiv2_lib.glob("*"):
         if path.is_file() and path.suffix in {".dylib", ".so"}:
             subprocess.run(["codesign", "--force", "--sign", "-", str(path)], check=True)
@@ -216,43 +210,6 @@ def _finalize_macos_app() -> None:
     subprocess.run(["codesign", "--force", "--sign", "-", str(MACOS_APP)], check=True)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(MACOS_APP)], check=True)
     print(f"Finalized and re-signed macOS bundle: {MACOS_APP}")
-
-
-def _bundle_pyexiv2_macos_dependencies(library_dir: Path) -> None:
-    """Кладёт Homebrew-зависимости pyexiv2 рядом с libexiv2 в macOS-бандл.
-
-    Колесо pyexiv2 для Apple Silicon ссылается на библиотеки из /opt/homebrew.
-    На раннере они есть, поэтому сборка проходит, но у пользователя их может не
-    быть. Переписываем такие ссылки на соседние файлы внутри .app рекурсивно.
-    """
-    root_library = library_dir / "libexiv2.dylib"
-    if not root_library.is_file():
-        raise RuntimeError(f"macOS bundle is missing pyexiv2 library: {root_library}")
-
-    pending = [root_library]
-    visited: set[Path] = set()
-    changes: list[tuple[Path, str, str]] = []
-    while pending:
-        binary = pending.pop()
-        if binary in visited:
-            continue
-        visited.add(binary)
-        output = subprocess.check_output(["otool", "-L", str(binary)], text=True)
-        for line in output.splitlines()[1:]:
-            dependency = line.strip().split(" (", 1)[0]
-            if not dependency.startswith("/") or dependency.startswith(("/usr/lib/", "/System/Library/")):
-                continue
-            source = Path(dependency)
-            if not source.is_file():
-                raise RuntimeError(f"pyexiv2 dependency is unavailable on build host: {source}")
-            bundled = library_dir / source.name
-            if not bundled.exists():
-                shutil.copy2(source, bundled)
-            changes.append((binary, dependency, f"@loader_path/{source.name}"))
-            pending.append(bundled)
-
-    for binary, old_name, new_name in changes:
-        subprocess.run(["install_name_tool", "-change", old_name, new_name, str(binary)], check=True)
 
 
 def _compress_binaries(directory: Path) -> None:

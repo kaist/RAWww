@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import json
 import threading
-import ctypes
 from datetime import datetime
 from pathlib import Path
 from concurrent.futures import Future, ProcessPoolExecutor
+
+import pyexiv2
 
 from .cache import FolderCache
 from .error_log import log_exception
@@ -25,28 +26,8 @@ from .worker_priority import lower_background_priority
 
 
 METADATA_BATCH_SIZE = 32
-
-
-def _load_pyexiv2():
-    """Импортирует pyexiv2 лениво и сохраняет исходную ошибку загрузчика macOS.
-
-    PyInstaller заменяет ctypes.CDLL обёрткой, которая стирает текст dyld и
-    сообщает только «не найдено». pyexiv2 передаёт абсолютный путь, поэтому
-    здесь безопасно временно вернуть исходный загрузчик: реальная причина
-    сбоя останется видна и пользователю, и проверке пакета.
-    """
-    loader = ctypes.CDLL
-    if loader.__module__ == "pyimod03_ctypes":
-        ctypes.CDLL = loader.__bases__[0]
-        ctypes.cdll = ctypes.LibraryLoader(ctypes.CDLL)
-    try:
-        import pyexiv2
-    except OSError as error:
-        raise RuntimeError(f"Не удалось загрузить pyexiv2: {error}") from error
-    return pyexiv2
 def read_metadata(path: str) -> dict:
     """Читает EXIF и XMP одного файла, всегда освобождая нативный дескриптор."""
-    pyexiv2 = _load_pyexiv2()
     image = pyexiv2.Image(path)
     try:
         exif = image.read_exif()

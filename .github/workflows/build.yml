@@ -61,6 +61,10 @@ jobs:
           # Не переиспользуем rawpy, случайно собранный прежним запуском под 15.
           uv cache clean rawpy
           uv sync --locked
+          # Публичный wheel pyexiv2 с Apple Silicon привязан к Homebrew. Здесь
+          # Exiv2 вшивается в расширение, поэтому готовый .app самодостаточен.
+          uv run python scripts/build_macos_pyexiv2.py
+          uv run python -m unittest tests.test_exif -v
 
       - name: Install Linux runtime libraries
         if: runner.os == 'Linux'

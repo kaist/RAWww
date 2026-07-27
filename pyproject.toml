@@ -42,5 +42,6 @@ where = ["src"]
 [dependency-groups]
 dev = [
     "babel>=2.18.0",
+    "pybind11>=2.13,<3",
     "pyinstaller>=6.21.0",
 ]
