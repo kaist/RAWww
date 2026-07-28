@@ -303,7 +303,7 @@ def _frame_workers(
         return 1
     # С нейроретушью параллельные кадры закрывают только простои
     # однопоточных этапов, поэтому их число растёт с ядрами медленно.
-    by_cpu = 2 if cpus < 12 else min(6, cpus // 4)
+    by_cpu = 2 if cpus < 9 else min(6, cpus // 3)
     return max(1, min(6, by_cpu, by_memory))
 
 
@@ -328,6 +328,7 @@ def _batch(
     """
     total = len(tasks)
     counted = 0
+    failed = 0
     counter = threading.Lock()
     postponed: list[dict] = []
     tight = threading.Event()
@@ -347,6 +348,7 @@ def _batch(
 
     def attempt(task: dict) -> None:
         """Считает кадр, а нехватку памяти превращает в отложенную задачу."""
+        nonlocal failed
         try:
             render(task)
         except MemoryError:
@@ -356,6 +358,12 @@ def _batch(
             tight.set()
             with counter:
                 postponed.append(task)
+        except Exception as exc:
+            # Один битый или занятый снимок не должен уносить весь пакет: остальные
+            # кадры считаются дальше, а провалившийся называется по имени.
+            with counter:
+                failed += 1
+            _event("error", message=f"{Path(task['source']).name}: {exc}")
 
     workers = _frame_workers(
         neural=bool(settings.neural_retouch and settings.neural_strength > 0),
@@ -388,9 +396,17 @@ def _batch(
             render(task)
         except MemoryError:
             gc.collect()
+            failed += 1
             _event("error", message=f"Не хватило памяти на кадр {Path(task['source']).name}")
+        except Exception as exc:
+            failed += 1
+            _event("error", message=f"{Path(task['source']).name}: {exc}")
     if stopped:
         _event("stopped", done=counted, total=total)
+    # Итог пакета считается по событиям, а не по коду выхода процесса: на
+    # выгрузке моделей нативные библиотеки иногда возвращают мусорный код, а
+    # все кадры при этом уже на диске.
+    _event("completed", done=counted, total=total, failed=failed)
 
 
 def _jobs(control: _BatchControl) -> queue.Queue:
