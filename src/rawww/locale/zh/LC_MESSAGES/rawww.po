@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 03:15+0300\n"
+"POT-Creation-Date: 2026-07-28 10:28+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -1627,28 +1627,50 @@ msgstr "取消选择"
 msgid "Удалить выбранный файл или папку"
 msgstr "删除所选文件或文件夹"
 
-msgid ""
-"Модели запускаются в отдельном процессе и выгружаются после каждого "
-"предпросмотра и пакета."
-msgstr "模型在独立进程中运行，并会在每次预览和整批处理后卸载。"
+msgid "Модели работают в отдельном процессе и выгружаются вместе с окном."
+msgstr "模型在独立进程中运行，并随窗口一起卸载。"
 
-msgid "Выравнивание тона кожи"
-msgstr "肤色均匀"
+msgid "РЕТУШЬ КОЖИ"
+msgstr "皮肤修饰"
 
-msgid "Матирование кожи"
-msgstr "皮肤去油光"
+msgid "Выравнивание тона"
+msgstr "肤色均衡"
+
+msgid "Матирование"
+msgstr "消光"
 
 msgid "Dodge & Burn"
 msgstr "加深减淡"
 
-msgid "Ретушь кожи"
-msgstr "皮肤修饰"
+msgid "Нейроретушь"
+msgstr "神经网络修饰"
 
-msgid "Сила ретуши кожи"
-msgstr "皮肤修饰强度"
+msgid "ЦВЕТ"
+msgstr "颜色"
 
-msgid "Папка результата"
-msgstr "输出文件夹"
+msgid "Яркость"
+msgstr "亮度"
+
+msgid "Контраст"
+msgstr "对比度"
+
+msgid "ТАБЛИЦА LUT"
+msgstr "LUT 表"
+
+msgid "Наложить таблицу .cube"
+msgstr "应用 .cube 表"
+
+msgid "Файл не выбран"
+msgstr "未选择文件"
+
+msgid "Выбрать таблицу .cube"
+msgstr "选择 .cube 表"
+
+msgid "Сила таблицы"
+msgstr "表强度"
+
+msgid "СОХРАНИТЬ В ПАПКУ"
+msgstr "保存到文件夹"
 
 #, python-brace-format
 msgid "Обработать {count} фото"
@@ -1660,15 +1682,20 @@ msgstr "上一张"
 msgid "Следующая"
 msgstr "下一张"
 
-msgid "Вписать"
-msgstr "适合窗口"
+msgid "Пиксель в пиксель"
+msgstr "实际像素"
 
-msgid "До"
-msgstr "之前"
+msgid "Шторка сравнения: слева оригинал, справа результат"
+msgstr "对比滑帘：左侧为原图，右侧为结果"
 
-#, python-brace-format
-msgid "{current} из {total}: {name}"
-msgstr "{current} / {total}: {name}"
+msgid "Вписать в окно"
+msgstr "适应窗口"
+
+msgid "Таблицы LUT (*.cube)"
+msgstr "LUT 表 (*.cube)"
+
+msgid "Папка результата"
+msgstr "输出文件夹"
 
 msgid "Укажите папку результата."
 msgstr "请指定输出文件夹。"
@@ -1678,13 +1705,6 @@ msgstr "已开始批量修图…"
 
 msgid "Не удалось запустить воркер ретуши."
 msgstr "无法启动修图工作进程。"
-
-msgid "готово"
-msgstr "完成"
-
-#, python-brace-format
-msgid "Ретушь: {done}/{total}"
-msgstr "修图：{done}/{total}"
 
 #, python-brace-format
 msgid "Ошибка ретуши: {error}"
@@ -1696,9 +1716,15 @@ msgstr "预览已准备好。"
 msgid "Не удалось подготовить предпросмотр."
 msgstr "无法准备预览。"
 
-#, fuzzy
+msgid "готово"
+msgstr "完成"
+
+#, python-brace-format
+msgid "Ретушь: {done}/{total}"
+msgstr "修图：{done}/{total}"
+
 msgid "Пакетная ретушь завершена."
-msgstr "批量修图因错误而结束。"
+msgstr "批量修图已完成。"
 
 msgid "Пакетная ретушь завершилась с ошибкой."
 msgstr "批量修图因错误而结束。"
@@ -2023,3 +2049,15 @@ msgstr "快速查看和筛选 RAW 与 JPG 照片"
 
 #~ msgid "Сглаживание тона"
 #~ msgstr "肤色平滑"
+
+#~ msgid "{current} из {total}: {name}"
+#~ msgstr "{current} / {total}: {name}"
+
+#~ msgid "Сила ретуши кожи"
+#~ msgstr "皮肤修饰强度"
+
+#~ msgid "До"
+#~ msgstr "之前"
+
+#~ msgid "После"
+#~ msgstr "之后"

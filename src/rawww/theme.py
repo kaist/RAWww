@@ -25,6 +25,7 @@ FOMANTIC_ICON_CODES = {
     "images": "\uf302", "grid": "\uf00a", "user": "\uf007", "brush": "\uf1fc", "media": "\uf87c",
     "sort": "\uf160", "search": "\uf002", "star": "\uf005", "ban": "\uf05e",
     "chevron-down": "\uf078", "chevron-up": "\uf077", "bookmark": "\uf02e",
+    "chevron-left": "\uf053", "chevron-right": "\uf054",
     "step-forward": "\uf051", "keyboard": "\uf11c", "folder": "\uf07c",
     "filter": "\uf0b0", "lightbulb": "\uf0eb", "volume": "\uf028", "microphone": "\uf130", "close": "\uf00d",
     "plus": "\uf067", "trash": "\uf1f8",
@@ -1451,6 +1452,66 @@ def apply_theme(app: QApplication) -> None:
         }
         QPushButton#batchRenamePrimaryButton:hover { background: #3d6f9d; }
         QPushButton#batchRenamePrimaryButton:disabled { background: #303030; border-color: #464646; color: #777d84; }
+        QDialog#batchRetouchDialog { background: #242424; color: #e8e8e8; }
+        QDialog#batchRetouchDialog QLabel { background: transparent; }
+        QFrame#batchRetouchPanel {
+            background: #2b2b2b;
+            border: 1px solid #3a3a3a;
+            border-radius: 8px;
+        }
+        QLabel#batchRetouchSliderLabel { color: #d9dfe6; font-size: 12px; font-weight: 600; }
+        QLabel#batchRetouchSliderValue { color: #9fabb8; font-size: 12px; }
+        QScrollArea#batchRetouchScroll { background: transparent; border: 0; }
+        QWidget#batchRetouchStages { background: transparent; }
+        QFrame#batchRetouchGroup {
+            background: #262626;
+            border: 1px solid #383838;
+            border-radius: 6px;
+        }
+        QLabel#batchRetouchSectionLabel {
+            color: #9fabb8;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 1px;
+        }
+        QSlider#batchRetouchSlider { background: transparent; min-height: 18px; }
+        QSlider#batchRetouchSlider::groove:horizontal { height: 4px; background: #1b1b1b; border-radius: 2px; }
+        QSlider#batchRetouchSlider::sub-page:horizontal { height: 4px; background: #3f6db5; border-radius: 2px; }
+        QSlider#batchRetouchSlider::add-page:horizontal { height: 4px; background: #1b1b1b; border-radius: 2px; }
+        QSlider#batchRetouchSlider::handle:horizontal {
+            width: 10px;
+            margin: -4px 0;
+            background: #c8c8c8;
+            border-radius: 5px;
+        }
+        QSlider#batchRetouchSlider::handle:horizontal:hover { background: #ffffff; }
+        QSlider#batchRetouchSlider::sub-page:horizontal:disabled { background: #38414c; }
+        QSlider#batchRetouchSlider::handle:horizontal:disabled { background: #6c737b; }
+        QLineEdit#batchRetouchOutput {
+            background: #181818;
+            border: 1px solid #4c5967;
+            border-radius: 6px;
+            color: #dfe6ef;
+            padding: 0 10px;
+        }
+        QToolButton#batchRetouchBrowse {
+            border: 1px solid #4a5662;
+            border-radius: 6px;
+            background: #353c44;
+        }
+        QToolButton#batchRetouchBrowse:hover { background: #46515d; border-color: #718294; }
+        QFrame#batchRetouchOverlay {
+            background: rgba(20, 20, 20, 170);
+            border: 1px solid #4a5662;
+            border-radius: 8px;
+        }
+        QToolButton#batchRetouchOverlayButton {
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+        }
+        QToolButton#batchRetouchOverlayButton:hover { background: #46515d; }
+        QToolButton#batchRetouchOverlayButton:disabled { background: transparent; }
         QDialog#batchResizeDialog { background: #242424; color: #e8e8e8; }
         QDialog#batchResizeDialog QLabel { background: transparent; }
         QLabel#batchResizeFieldLabel {

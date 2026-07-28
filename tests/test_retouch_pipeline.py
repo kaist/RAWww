@@ -8,13 +8,19 @@ ONNX-модели здесь не нужны: `even_skin_tone` работает 
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 
 import numpy as np
 
 from rawww import retouch_pipeline
-from rawww.retouch_pipeline import _linear_to_srgb, _pigments, _smooth, _srgb_to_linear, even_skin_tone, matte_skin
+from rawww.retouch_pipeline import (
+    _lightness, _linear_to_srgb, _pigments, _smooth, _srgb_to_linear,
+    adjust_colour, apply_lut, dodge_burn, even_skin_tone, load_cube_lut, matte_skin,
+)
 
 
 def _skin(size: int = 320, blotches: bool = True, zone: bool = False) -> np.ndarray:
@@ -206,6 +212,187 @@ class MatteSkinTest(unittest.TestCase):
         result = matte_skin(self.rgb, weights, 1.0, self.face_scale)
         self.assertTrue(np.array_equal(result[:, :100], self.rgb[:, :100]))
         self.assertFalse(np.array_equal(result[self.shine], self.rgb[self.shine]))
+
+
+class DodgeBurnTest(unittest.TestCase):
+    """Dodge & Burn правит только светлоту и только мелкие перепады."""
+
+    def setUp(self) -> None:
+        # Кожа со светотенью и парой локальных темных пятен — ровно тот
+        # масштаб неровности, за которым охотится dodge и burn.
+        size = 320
+        yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+        shading = 1.0 - .18 * (xx / size)
+        spots = np.zeros((size, size), np.float32)
+        for cx, cy in ((110, 120), (210, 200)):
+            spots += np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 2.5 ** 2))
+        base = np.array((208.0, 168.0, 150.0), np.float32)
+        image = base * (shading * (1.0 - .07 * spots))[..., None]
+        self.rgb = np.clip(image, 0, 255).astype(np.uint8)
+        self.spot = (spots > .6)
+        self.weights = np.ones(self.rgb.shape[:2], np.float32)
+
+    def test_zero_strength_keeps_pixels(self) -> None:
+        self.assertTrue(np.array_equal(dodge_burn(self.rgb, self.weights, 0.0), self.rgb))
+
+    def test_local_spot_fades_and_shading_survives(self) -> None:
+        light = lambda rgb: _lightness(_srgb_to_linear(rgb) @ retouch_pipeline._LUMA)
+        source, result = light(self.rgb), light(dodge_burn(self.rgb, self.weights, 1.0))
+        around = ~self.spot
+        depth = lambda values: float(values[around].mean() - values[self.spot].mean())
+        self.assertLess(depth(result), depth(source) * .95)
+        # Объём лица — низкая частота и остаётся нетронутым.
+        gradient = lambda values: float(values[10:310, 10:60].mean() - values[10:310, 260:310].mean())
+        self.assertAlmostEqual(gradient(result), gradient(source), delta=.3)
+
+    def test_hue_survives(self) -> None:
+        """Меняется яркость пикселя, а не его цвет: правка идёт множителем."""
+        result = dodge_burn(self.rgb, self.weights, 1.0).astype(np.float32) + 1.0
+        source = self.rgb.astype(np.float32) + 1.0
+        shift = np.abs(result[..., 0] / result[..., 2] - source[..., 0] / source[..., 2])
+        self.assertLess(float(shift.max()), .04)
+
+    def test_mask_limits_correction(self) -> None:
+        weights = self.weights.copy()
+        weights[:, :100] = 0.0
+        result = dodge_burn(self.rgb, weights, 1.0)
+        self.assertTrue(np.array_equal(result[:, :100], self.rgb[:, :100]))
+        self.assertFalse(np.array_equal(result[self.spot], self.rgb[self.spot]))
+
+
+class AdjustColourTest(unittest.TestCase):
+    """Яркость, контраст и насыщенность после ретуши кожи."""
+
+    def setUp(self) -> None:
+        rng = np.random.default_rng(7)
+        self.rgb = rng.integers(40, 210, (32, 32, 3), dtype=np.uint8)
+
+    def test_zero_keeps_frame(self) -> None:
+        self.assertTrue(np.array_equal(adjust_colour(self.rgb, 0.0, 0.0, 0.0), self.rgb))
+
+    def test_brightness_moves_mean(self) -> None:
+        brighter = adjust_colour(self.rgb, .3, 0.0, 0.0).astype(np.float32)
+        darker = adjust_colour(self.rgb, -.3, 0.0, 0.0).astype(np.float32)
+        self.assertGreater(brighter.mean(), self.rgb.mean() + 10)
+        self.assertLess(darker.mean(), self.rgb.mean() - 10)
+
+    def test_saturation_zero_gives_grey(self) -> None:
+        grey = adjust_colour(self.rgb, 0.0, 0.0, -1.0)
+        self.assertLess(float(np.abs(grey[..., 0].astype(np.float32) - grey[..., 1]).max()), 2)
+
+    def test_contrast_stretches_spread(self) -> None:
+        harder = adjust_colour(self.rgb, 0.0, .5, 0.0).astype(np.float32)
+        self.assertGreater(harder.std(), self.rgb.astype(np.float32).std())
+
+
+def _write_cube(path, size: int = 2, invert: bool = True) -> None:
+    lines = [f"LUT_3D_SIZE {size}"]
+    for blue in range(size):
+        for green in range(size):
+            for red in range(size):
+                values = [component / (size - 1) for component in (red, green, blue)]
+                if invert:
+                    values = [1.0 - value for value in values]
+                lines.append(" ".join(f"{value:.6f}" for value in values))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class CubeLutTest(unittest.TestCase):
+    """Чтение .cube и наложение таблицы последним этапом."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "invert.cube"
+        _write_cube(self.path)
+        self.lut = load_cube_lut(self.path)
+        rng = np.random.default_rng(3)
+        self.rgb = rng.integers(0, 256, (16, 16, 3), dtype=np.uint8)
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def test_reads_size_and_table(self) -> None:
+        self.assertEqual(self.lut.size, 2)
+        self.assertEqual(len(self.lut.table), 2 ** 3 * 3)
+
+    def test_rejects_one_dimensional_table(self) -> None:
+        path = Path(self.directory.name) / "curve.cube"
+        path.write_text("LUT_1D_SIZE 4\n0 0 0\n1 1 1\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            load_cube_lut(path)
+
+    def test_full_strength_inverts_frame(self) -> None:
+        result = apply_lut(self.rgb, self.lut, 1.0).astype(np.float32)
+        self.assertLess(float(np.abs(result - (255 - self.rgb.astype(np.float32))).max()), 3)
+
+    def test_zero_strength_keeps_frame(self) -> None:
+        self.assertTrue(np.array_equal(apply_lut(self.rgb, self.lut, 0.0), self.rgb))
+
+    def test_half_strength_lands_between(self) -> None:
+        result = apply_lut(self.rgb, self.lut, .5).astype(np.float32)
+        expected = (self.rgb.astype(np.float32) + (255 - self.rgb.astype(np.float32))) / 2
+        self.assertLess(float(np.abs(result - expected).max()), 3)
+
+
+class PipelineOrderTest(unittest.TestCase):
+    """Порядок этапов: кожа, затем цвет, затем таблица."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "invert.cube"
+        _write_cube(self.path)
+        self.retoucher = retouch_pipeline.SkinRetoucher.__new__(retouch_pipeline.SkinRetoucher)
+        self.retoucher._lut_cache = None
+        self.rgb = np.full((8, 8, 3), 100, dtype=np.uint8)
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def test_skin_stages_run_in_agreed_order(self) -> None:
+        """Матирование обязано идти до тона: по блику пигменты считаются неверно."""
+        calls: list[str] = []
+        rgb = _skin(96)
+        masks = retouch_pipeline.SkinMasks(np.full(rgb.shape[:2], 255, dtype=np.uint8), None, 90.0)
+        self.retoucher._regions = lambda mask, pad: [(0, 0, rgb.shape[1], rgb.shape[0])]
+        settings = retouch_pipeline.RetouchSettings(
+            tone_strength=.5,
+            matte_strength=.5,
+            dodge_burn=.5,
+            neural_retouch=True,
+            neural_strength=.5,
+        )
+        with mock.patch.object(retouch_pipeline, "matte_skin", side_effect=lambda frame, *a: calls.append("matte") or frame), \
+             mock.patch.object(retouch_pipeline, "even_skin_tone", side_effect=lambda frame, *a: calls.append("tone") or frame), \
+             mock.patch.object(retouch_pipeline, "dodge_burn", side_effect=lambda frame, *a: calls.append("burn") or frame):
+            self.retoucher.neural_retouch = lambda frame, *a: calls.append("neural") or frame
+            self.retoucher.retouch_skin(rgb, settings, masks)
+
+        self.assertEqual(calls, ["matte", "tone", "burn", "neural"])
+
+    def test_lut_lands_after_colour(self) -> None:
+        settings = retouch_pipeline.RetouchSettings(
+            brightness=.5,
+            lut_path=str(self.path),
+            lut_strength=1.0,
+        )
+        result = self.retoucher.finish(self.rgb, settings)
+        brightened = adjust_colour(self.rgb, .5, 0.0, 0.0)
+        expected = apply_lut(brightened, load_cube_lut(self.path), 1.0)
+        self.assertTrue(np.array_equal(result, expected))
+
+    def test_table_is_parsed_once(self) -> None:
+        with mock.patch.object(retouch_pipeline, "load_cube_lut", wraps=load_cube_lut) as parse:
+            for _ in range(3):
+                self.retoucher.lut(str(self.path))
+        self.assertEqual(parse.call_count, 1)
+
+    def test_edited_table_is_reread(self) -> None:
+        first = self.retoucher.lut(str(self.path))
+        _write_cube(self.path, size=3)
+        os.utime(self.path, (0, 0))
+        second = self.retoucher.lut(str(self.path))
+        self.assertIsNot(first, second)
+        self.assertEqual(second.size, 3)
 
 
 if __name__ == "__main__":

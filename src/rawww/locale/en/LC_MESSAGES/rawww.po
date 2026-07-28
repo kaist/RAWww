@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 03:15+0300\n"
+"POT-Creation-Date: 2026-07-28 10:28+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1668,30 +1668,52 @@ msgstr "Clear selection"
 msgid "Удалить выбранный файл или папку"
 msgstr "Delete the selected file or folder"
 
-msgid ""
-"Модели запускаются в отдельном процессе и выгружаются после каждого "
-"предпросмотра и пакета."
+msgid "Модели работают в отдельном процессе и выгружаются вместе с окном."
 msgstr ""
-"Models run in a separate process and are unloaded after every preview and"
-" batch."
+"Models run in a separate process and are unloaded together with the "
+"window."
 
-msgid "Выравнивание тона кожи"
+msgid "РЕТУШЬ КОЖИ"
+msgstr "SKIN RETOUCH"
+
+msgid "Выравнивание тона"
 msgstr "Tone equalization"
 
-msgid "Матирование кожи"
-msgstr "Skin mattifying"
+msgid "Матирование"
+msgstr "Mattifying"
 
 msgid "Dodge & Burn"
 msgstr "Dodge & Burn"
 
-msgid "Ретушь кожи"
-msgstr "Skin retouch"
+msgid "Нейроретушь"
+msgstr "Neural retouch"
 
-msgid "Сила ретуши кожи"
-msgstr "Skin retouch strength"
+msgid "ЦВЕТ"
+msgstr "COLOR"
 
-msgid "Папка результата"
-msgstr "Output folder"
+msgid "Яркость"
+msgstr "Brightness"
+
+msgid "Контраст"
+msgstr "Contrast"
+
+msgid "ТАБЛИЦА LUT"
+msgstr "LUT TABLE"
+
+msgid "Наложить таблицу .cube"
+msgstr "Apply a .cube table"
+
+msgid "Файл не выбран"
+msgstr "No file selected"
+
+msgid "Выбрать таблицу .cube"
+msgstr "Choose a .cube table"
+
+msgid "Сила таблицы"
+msgstr "Table strength"
+
+msgid "СОХРАНИТЬ В ПАПКУ"
+msgstr "SAVE TO FOLDER"
 
 #, python-brace-format
 msgid "Обработать {count} фото"
@@ -1703,15 +1725,20 @@ msgstr "Previous"
 msgid "Следующая"
 msgstr "Next"
 
-msgid "Вписать"
-msgstr "Fit"
+msgid "Пиксель в пиксель"
+msgstr "Actual pixels"
 
-msgid "До"
-msgstr "Before"
+msgid "Шторка сравнения: слева оригинал, справа результат"
+msgstr "Comparison wipe: original on the left, result on the right"
 
-#, python-brace-format
-msgid "{current} из {total}: {name}"
-msgstr "{current} of {total}: {name}"
+msgid "Вписать в окно"
+msgstr "Fit to window"
+
+msgid "Таблицы LUT (*.cube)"
+msgstr "LUT tables (*.cube)"
+
+msgid "Папка результата"
+msgstr "Output folder"
 
 msgid "Укажите папку результата."
 msgstr "Specify an output folder."
@@ -1721,13 +1748,6 @@ msgstr "Batch retouch started…"
 
 msgid "Не удалось запустить воркер ретуши."
 msgstr "Could not start the retouch worker."
-
-msgid "готово"
-msgstr "done"
-
-#, python-brace-format
-msgid "Ретушь: {done}/{total}"
-msgstr "Retouch: {done}/{total}"
 
 #, python-brace-format
 msgid "Ошибка ретуши: {error}"
@@ -1739,9 +1759,15 @@ msgstr "Preview ready."
 msgid "Не удалось подготовить предпросмотр."
 msgstr "Could not prepare preview."
 
-#, fuzzy
+msgid "готово"
+msgstr "done"
+
+#, python-brace-format
+msgid "Ретушь: {done}/{total}"
+msgstr "Retouch: {done}/{total}"
+
 msgid "Пакетная ретушь завершена."
-msgstr "Batch retouch ended with an error."
+msgstr "Batch retouch finished."
 
 msgid "Пакетная ретушь завершилась с ошибкой."
 msgstr "Batch retouch ended with an error."
@@ -2070,3 +2096,15 @@ msgstr "Fast RAW and JPG viewing and culling"
 
 #~ msgid "Сглаживание тона"
 #~ msgstr "Tone smoothing"
+
+#~ msgid "{current} из {total}: {name}"
+#~ msgstr "{current} of {total}: {name}"
+
+#~ msgid "Сила ретуши кожи"
+#~ msgstr "Skin retouch strength"
+
+#~ msgid "До"
+#~ msgstr "Before"
+
+#~ msgid "После"
+#~ msgstr "After"
