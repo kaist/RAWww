@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-27 16:44+0300\n"
+"POT-Creation-Date: 2026-07-28 03:15+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -20,6 +20,10 @@ msgstr ""
 
 msgid "Контролька"
 msgstr "Controlka"
+
+#, python-brace-format
+msgid "кэш {name}: {error}"
+msgstr "cache {name}: {error}"
 
 #, python-brace-format
 msgid "Несколько XMP должны получить имя «{name}»"
@@ -418,10 +422,6 @@ msgstr "{name}: cannot place a folder inside itself"
 msgid "{name}: не удалось заменить {error}"
 msgstr "{name}: could not replace {error}"
 
-#, python-brace-format
-msgid "кэш {name}: {error}"
-msgstr "cache {name}: {error}"
-
 msgid "Копирование файлов"
 msgstr "Copying files"
 
@@ -686,17 +686,20 @@ msgstr "Batch resize"
 msgid "Уменьшить JPG"
 msgstr "Shrink JPG"
 
+msgid "Пакетная ретушь"
+msgstr "Batch retouch"
+
 msgid "Пока не реализовано"
 msgstr "Not implemented yet"
+
+msgid "В текущем списке нет фотографий."
+msgstr "There are no photos in the current list."
 
 msgid "Переименование недоступно для папок, связанных со съёмками ShotSync."
 msgstr "Renaming is not available for folders linked to ShotSync shoots."
 
 msgid "Подождите, пока загрузится папка."
 msgstr "Wait until the folder loads."
-
-msgid "В текущем списке нет фотографий."
-msgstr "There are no photos in the current list."
 
 msgid "Выполняется переименование"
 msgstr "Renaming in progress"
@@ -1665,6 +1668,81 @@ msgstr "Clear selection"
 msgid "Удалить выбранный файл или папку"
 msgstr "Delete the selected file or folder"
 
+msgid ""
+"Модели запускаются в отдельном процессе и выгружаются после каждого "
+"предпросмотра и пакета."
+msgstr ""
+"Models run in a separate process and are unloaded after every preview and"
+" batch."
+
+msgid "Выравнивание тона кожи"
+msgstr "Tone equalization"
+
+msgid "Dodge & Burn"
+msgstr "Dodge & Burn"
+
+msgid "Ретушь кожи"
+msgstr "Skin retouch"
+
+msgid "Сила ретуши кожи"
+msgstr "Skin retouch strength"
+
+msgid "Папка результата"
+msgstr "Output folder"
+
+#, python-brace-format
+msgid "Обработать {count} фото"
+msgstr "Retouch {count} photos"
+
+msgid "Предыдущая"
+msgstr "Previous"
+
+msgid "Следующая"
+msgstr "Next"
+
+msgid "Вписать"
+msgstr "Fit"
+
+msgid "До"
+msgstr "Before"
+
+#, python-brace-format
+msgid "{current} из {total}: {name}"
+msgstr "{current} of {total}: {name}"
+
+msgid "Укажите папку результата."
+msgstr "Specify an output folder."
+
+msgid "Запущена пакетная ретушь…"
+msgstr "Batch retouch started…"
+
+msgid "Не удалось запустить воркер ретуши."
+msgstr "Could not start the retouch worker."
+
+msgid "готово"
+msgstr "done"
+
+#, python-brace-format
+msgid "Ретушь: {done}/{total}"
+msgstr "Retouch: {done}/{total}"
+
+#, python-brace-format
+msgid "Ошибка ретуши: {error}"
+msgstr "Retouch error: {error}"
+
+msgid "Предпросмотр готов."
+msgstr "Preview ready."
+
+msgid "Не удалось подготовить предпросмотр."
+msgstr "Could not prepare preview."
+
+#, fuzzy
+msgid "Пакетная ретушь завершена."
+msgstr "Batch retouch ended with an error."
+
+msgid "Пакетная ретушь завершилась с ошибкой."
+msgstr "Batch retouch ended with an error."
+
 msgid "Не удалось войти. Попробуйте ещё раз."
 msgstr "Sign-in failed. Please try again."
 
@@ -1891,9 +1969,6 @@ msgstr "{speed}/s"
 msgid "измеряю скорость"
 msgstr "measuring speed"
 
-msgid "готово"
-msgstr "done"
-
 msgid "считаю…"
 msgstr "calculating…"
 
@@ -1986,3 +2061,9 @@ msgstr "Controlka: RAW and JPG photos"
 
 msgid "Быстрый просмотр и отбор RAW и JPG"
 msgstr "Fast RAW and JPG viewing and culling"
+
+#~ msgid "Готовится предпросмотр…"
+#~ msgstr "Preparing preview…"
+
+#~ msgid "Сглаживание тона"
+#~ msgstr "Tone smoothing"

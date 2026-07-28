@@ -135,6 +135,7 @@ from .dialogs import (
     SettingsDialog,
     ShrinkJpegDialog,
 )
+from .retouch_dialog import BatchRetouchDialog
 from .workspace import WorkspaceRequest, WorkspaceState
 from .xmp import (
     XmpChangedError,
@@ -9315,6 +9316,7 @@ class Workspace(QMainWindow):
             (_("Групповое переименование"), "edit", self._show_batch_rename_dialog),
             (_("Групповой резайс"), "expand", self._show_batch_resize_dialog),
             (_("Уменьшить JPG"), "download", self._show_shrink_jpeg_dialog),
+            (_("Пакетная ретушь"), "magic", self._show_batch_retouch_dialog),
         ):
             button = QPushButton(label)
             button.setObjectName("toolbarPopupUtilityButton")
@@ -9331,6 +9333,18 @@ class Workspace(QMainWindow):
         action.setDefaultWidget(content)
         menu.addAction(action)
         menu.exec(self.utilities_button.mapToGlobal(QPoint(0, self.utilities_button.height())))
+
+    def _show_batch_retouch_dialog(self) -> None:
+        """Открывает отдельное окно ретуши, не загружая ONNX-модели в Workspace."""
+        paths = [path for path in self.view_paths if path.is_file() and is_supported_image(path)]
+        if not paths:
+            QMessageBox.information(self, _("Пакетная ретушь"), _("В текущем списке нет фотографий."))
+            return
+        selected = self._selected_paths()
+        current = self.current_path if self.current_path in paths else (selected[0] if selected and selected[0] in paths else paths[0])
+        dialog = BatchRetouchDialog(paths, current, self.settings, self)
+        dialog.showMaximized()
+        dialog.exec()
 
     def _show_batch_rename_dialog(self) -> None:
         if self._is_shotsync_rename_blocked():

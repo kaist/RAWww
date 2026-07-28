@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-27 16:44+0300\n"
+"POT-Creation-Date: 2026-07-28 03:15+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -20,6 +20,10 @@ msgstr ""
 
 msgid "Контролька"
 msgstr "Controlka"
+
+#, python-brace-format
+msgid "кэш {name}: {error}"
+msgstr "Cache {name}: {error}"
 
 #, python-brace-format
 msgid "Несколько XMP должны получить имя «{name}»"
@@ -421,10 +425,6 @@ msgstr "{name}: Ordner kann nicht in sich selbst verschoben werden"
 msgid "{name}: не удалось заменить {error}"
 msgstr "{name}: konnte nicht ersetzt werden {error}"
 
-#, python-brace-format
-msgid "кэш {name}: {error}"
-msgstr "Cache {name}: {error}"
-
 msgid "Копирование файлов"
 msgstr "Dateien kopieren"
 
@@ -695,8 +695,14 @@ msgstr "Stapel-Größenänderung"
 msgid "Уменьшить JPG"
 msgstr "JPG verkleinern"
 
+msgid "Пакетная ретушь"
+msgstr "Stapelretusche"
+
 msgid "Пока не реализовано"
 msgstr "Noch nicht implementiert"
+
+msgid "В текущем списке нет фотографий."
+msgstr "In der aktuellen Liste sind keine Fotos vorhanden."
 
 msgid "Переименование недоступно для папок, связанных со съёмками ShotSync."
 msgstr ""
@@ -705,9 +711,6 @@ msgstr ""
 
 msgid "Подождите, пока загрузится папка."
 msgstr "Warten Sie, bis der Ordner geladen ist."
-
-msgid "В текущем списке нет фотографий."
-msgstr "In der aktuellen Liste sind keine Fotos vorhanden."
 
 msgid "Выполняется переименование"
 msgstr "Umbenennen läuft"
@@ -1693,6 +1696,81 @@ msgstr "Auswahl aufheben"
 msgid "Удалить выбранный файл или папку"
 msgstr "Ausgewählte Datei oder Ordner löschen"
 
+msgid ""
+"Модели запускаются в отдельном процессе и выгружаются после каждого "
+"предпросмотра и пакета."
+msgstr ""
+"Modelle laufen in einem separaten Prozess und werden nach jeder Vorschau "
+"und jedem Stapel entladen."
+
+msgid "Выравнивание тона кожи"
+msgstr "Tonausgleich"
+
+msgid "Dodge & Burn"
+msgstr "Dodge & Burn"
+
+msgid "Ретушь кожи"
+msgstr "Hautretusche"
+
+msgid "Сила ретуши кожи"
+msgstr "Stärke der Hautretusche"
+
+msgid "Папка результата"
+msgstr "Zielordner"
+
+#, python-brace-format
+msgid "Обработать {count} фото"
+msgstr "{count} Fotos retuschieren"
+
+msgid "Предыдущая"
+msgstr "Zurück"
+
+msgid "Следующая"
+msgstr "Weiter"
+
+msgid "Вписать"
+msgstr "Einpassen"
+
+msgid "До"
+msgstr "Vorher"
+
+#, python-brace-format
+msgid "{current} из {total}: {name}"
+msgstr "{current} von {total}: {name}"
+
+msgid "Укажите папку результата."
+msgstr "Geben Sie einen Zielordner an."
+
+msgid "Запущена пакетная ретушь…"
+msgstr "Stapelretusche gestartet…"
+
+msgid "Не удалось запустить воркер ретуши."
+msgstr "Der Retusche-Worker konnte nicht gestartet werden."
+
+msgid "готово"
+msgstr "fertig"
+
+#, python-brace-format
+msgid "Ретушь: {done}/{total}"
+msgstr "Retusche: {done}/{total}"
+
+#, python-brace-format
+msgid "Ошибка ретуши: {error}"
+msgstr "Retuschefehler: {error}"
+
+msgid "Предпросмотр готов."
+msgstr "Vorschau ist fertig."
+
+msgid "Не удалось подготовить предпросмотр."
+msgstr "Vorschau konnte nicht erstellt werden."
+
+#, fuzzy
+msgid "Пакетная ретушь завершена."
+msgstr "Stapelretusche wurde mit einem Fehler beendet."
+
+msgid "Пакетная ретушь завершилась с ошибкой."
+msgstr "Stapelretusche wurde mit einem Fehler beendet."
+
 msgid "Не удалось войти. Попробуйте ещё раз."
 msgstr "Anmeldung fehlgeschlagen. Bitte versuchen Sie es erneut."
 
@@ -1923,9 +2001,6 @@ msgstr "{speed}/s"
 msgid "измеряю скорость"
 msgstr "Geschwindigkeit wird gemessen"
 
-msgid "готово"
-msgstr "fertig"
-
 msgid "считаю…"
 msgstr "wird berechnet…"
 
@@ -2018,3 +2093,9 @@ msgstr "Controlka: RAW- und JPG-Fotos"
 
 msgid "Быстрый просмотр и отбор RAW и JPG"
 msgstr "Schnelle Sichtung und Auswahl von RAW- und JPG-Fotos"
+
+#~ msgid "Готовится предпросмотр…"
+#~ msgstr "Vorschau wird erstellt…"
+
+#~ msgid "Сглаживание тона"
+#~ msgstr "Tonglättung"

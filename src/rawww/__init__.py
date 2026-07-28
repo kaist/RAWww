@@ -14,6 +14,13 @@ def main(*args, **kwargs):
     Язык интерфейса активируется до импорта ``.app``: строковые константы уровня
     модуля берут перевод сразу при загрузке, без повторной трансляции виджетов.
     """
+    import sys
+
+    if "--retouch-worker" in sys.argv:
+        index = sys.argv.index("--retouch-worker")
+        from .retouch_worker import main as worker_main
+        return worker_main(sys.argv[index + 1:index + 2])
+
     from . import i18n
 
     i18n.activate()

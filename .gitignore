@@ -20,6 +20,9 @@ wheels/
 !.env.example
 .rawww/
 
+# Временные задания и предпросмотры одноразовых процессов ретуши.
+work/
+
 # Build-time generated version module (see scripts/build_pyinstaller.py)
 src/rawww/_build_version.py
 

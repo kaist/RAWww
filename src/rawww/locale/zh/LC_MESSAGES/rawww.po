@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-27 16:44+0300\n"
+"POT-Creation-Date: 2026-07-28 03:15+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -20,6 +20,10 @@ msgstr ""
 
 msgid "Контролька"
 msgstr "Controlka"
+
+#, python-brace-format
+msgid "кэш {name}: {error}"
+msgstr "缓存 {name}：{error}"
 
 #, python-brace-format
 msgid "Несколько XMP должны получить имя «{name}»"
@@ -418,10 +422,6 @@ msgstr "{name}：无法将文件夹放入其自身内"
 msgid "{name}: не удалось заменить {error}"
 msgstr "{name}：无法替换 {error}"
 
-#, python-brace-format
-msgid "кэш {name}: {error}"
-msgstr "缓存 {name}：{error}"
-
 msgid "Копирование файлов"
 msgstr "复制文件"
 
@@ -679,17 +679,20 @@ msgstr "批量调整尺寸"
 msgid "Уменьшить JPG"
 msgstr "压缩 JPG"
 
+msgid "Пакетная ретушь"
+msgstr "批量修图"
+
 msgid "Пока не реализовано"
 msgstr "尚未实现"
+
+msgid "В текущем списке нет фотографий."
+msgstr "当前列表中没有照片。"
 
 msgid "Переименование недоступно для папок, связанных со съёмками ShotSync."
 msgstr "与 ShotSync 拍摄关联的文件夹无法重命名。"
 
 msgid "Подождите, пока загрузится папка."
 msgstr "请等待文件夹加载完成。"
-
-msgid "В текущем списке нет фотографий."
-msgstr "当前列表中没有照片。"
 
 msgid "Выполняется переименование"
 msgstr "正在重命名"
@@ -1624,6 +1627,79 @@ msgstr "取消选择"
 msgid "Удалить выбранный файл или папку"
 msgstr "删除所选文件或文件夹"
 
+msgid ""
+"Модели запускаются в отдельном процессе и выгружаются после каждого "
+"предпросмотра и пакета."
+msgstr "模型在独立进程中运行，并会在每次预览和整批处理后卸载。"
+
+msgid "Выравнивание тона кожи"
+msgstr "肤色均匀"
+
+msgid "Dodge & Burn"
+msgstr "加深减淡"
+
+msgid "Ретушь кожи"
+msgstr "皮肤修饰"
+
+msgid "Сила ретуши кожи"
+msgstr "皮肤修饰强度"
+
+msgid "Папка результата"
+msgstr "输出文件夹"
+
+#, python-brace-format
+msgid "Обработать {count} фото"
+msgstr "修饰 {count} 张照片"
+
+msgid "Предыдущая"
+msgstr "上一张"
+
+msgid "Следующая"
+msgstr "下一张"
+
+msgid "Вписать"
+msgstr "适合窗口"
+
+msgid "До"
+msgstr "之前"
+
+#, python-brace-format
+msgid "{current} из {total}: {name}"
+msgstr "{current} / {total}: {name}"
+
+msgid "Укажите папку результата."
+msgstr "请指定输出文件夹。"
+
+msgid "Запущена пакетная ретушь…"
+msgstr "已开始批量修图…"
+
+msgid "Не удалось запустить воркер ретуши."
+msgstr "无法启动修图工作进程。"
+
+msgid "готово"
+msgstr "完成"
+
+#, python-brace-format
+msgid "Ретушь: {done}/{total}"
+msgstr "修图：{done}/{total}"
+
+#, python-brace-format
+msgid "Ошибка ретуши: {error}"
+msgstr "修图错误：{error}"
+
+msgid "Предпросмотр готов."
+msgstr "预览已准备好。"
+
+msgid "Не удалось подготовить предпросмотр."
+msgstr "无法准备预览。"
+
+#, fuzzy
+msgid "Пакетная ретушь завершена."
+msgstr "批量修图因错误而结束。"
+
+msgid "Пакетная ретушь завершилась с ошибкой."
+msgstr "批量修图因错误而结束。"
+
 msgid "Не удалось войти. Попробуйте ещё раз."
 msgstr "登录失败。请重试。"
 
@@ -1846,9 +1922,6 @@ msgstr "{speed}/秒"
 msgid "измеряю скорость"
 msgstr "正在测速"
 
-msgid "готово"
-msgstr "完成"
-
 msgid "считаю…"
 msgstr "正在计算…"
 
@@ -1941,3 +2014,9 @@ msgstr "Controlka：RAW 和 JPG 照片"
 
 msgid "Быстрый просмотр и отбор RAW и JPG"
 msgstr "快速查看和筛选 RAW 与 JPG 照片"
+
+#~ msgid "Готовится предпросмотр…"
+#~ msgstr "正在准备预览…"
+
+#~ msgid "Сглаживание тона"
+#~ msgstr "肤色平滑"

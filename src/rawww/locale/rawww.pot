@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-27 16:44+0300\n"
+"POT-Creation-Date: 2026-07-28 03:15+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,6 +18,10 @@ msgstr ""
 "Generated-By: Babel 2.18.0\n"
 
 msgid "Контролька"
+msgstr ""
+
+#, python-brace-format
+msgid "кэш {name}: {error}"
 msgstr ""
 
 #, python-brace-format
@@ -415,10 +419,6 @@ msgstr ""
 msgid "{name}: не удалось заменить {error}"
 msgstr ""
 
-#, python-brace-format
-msgid "кэш {name}: {error}"
-msgstr ""
-
 msgid "Копирование файлов"
 msgstr ""
 
@@ -657,16 +657,19 @@ msgstr ""
 msgid "Уменьшить JPG"
 msgstr ""
 
+msgid "Пакетная ретушь"
+msgstr ""
+
 msgid "Пока не реализовано"
+msgstr ""
+
+msgid "В текущем списке нет фотографий."
 msgstr ""
 
 msgid "Переименование недоступно для папок, связанных со съёмками ShotSync."
 msgstr ""
 
 msgid "Подождите, пока загрузится папка."
-msgstr ""
-
-msgid "В текущем списке нет фотографий."
 msgstr ""
 
 msgid "Выполняется переименование"
@@ -1586,6 +1589,78 @@ msgstr ""
 msgid "Удалить выбранный файл или папку"
 msgstr ""
 
+msgid ""
+"Модели запускаются в отдельном процессе и выгружаются после каждого "
+"предпросмотра и пакета."
+msgstr ""
+
+msgid "Выравнивание тона кожи"
+msgstr ""
+
+msgid "Dodge & Burn"
+msgstr ""
+
+msgid "Ретушь кожи"
+msgstr ""
+
+msgid "Сила ретуши кожи"
+msgstr ""
+
+msgid "Папка результата"
+msgstr ""
+
+#, python-brace-format
+msgid "Обработать {count} фото"
+msgstr ""
+
+msgid "Предыдущая"
+msgstr ""
+
+msgid "Следующая"
+msgstr ""
+
+msgid "Вписать"
+msgstr ""
+
+msgid "До"
+msgstr ""
+
+#, python-brace-format
+msgid "{current} из {total}: {name}"
+msgstr ""
+
+msgid "Укажите папку результата."
+msgstr ""
+
+msgid "Запущена пакетная ретушь…"
+msgstr ""
+
+msgid "Не удалось запустить воркер ретуши."
+msgstr ""
+
+msgid "готово"
+msgstr ""
+
+#, python-brace-format
+msgid "Ретушь: {done}/{total}"
+msgstr ""
+
+#, python-brace-format
+msgid "Ошибка ретуши: {error}"
+msgstr ""
+
+msgid "Предпросмотр готов."
+msgstr ""
+
+msgid "Не удалось подготовить предпросмотр."
+msgstr ""
+
+msgid "Пакетная ретушь завершена."
+msgstr ""
+
+msgid "Пакетная ретушь завершилась с ошибкой."
+msgstr ""
+
 msgid "Не удалось войти. Попробуйте ещё раз."
 msgstr ""
 
@@ -1806,9 +1881,6 @@ msgid "{speed}/с"
 msgstr ""
 
 msgid "измеряю скорость"
-msgstr ""
-
-msgid "готово"
 msgstr ""
 
 msgid "считаю…"
