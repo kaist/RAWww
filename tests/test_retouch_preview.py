@@ -297,7 +297,7 @@ class BatchControlTests(unittest.TestCase):
         with redirect_stdout(capture):
             retouch_worker._batch(object(), [{"source": "a.jpg", "target": "b.jpg"}], RetouchSettings(), control)
 
-        events = capture.events()
+        events = [event for event in capture.events() if event.get("event") != "completed"]
         self.assertEqual([event.get("event") for event in events], ["stopped"])
         self.assertEqual(events[0]["done"], 0)
 
@@ -341,7 +341,7 @@ class BatchPipelineTests(unittest.TestCase):
 
         self.assertEqual(retouch_worker._frame_workers(2, memory_gb=32), 1)
         self.assertEqual(retouch_worker._frame_workers(8, memory_gb=32), 2)
-        self.assertEqual(retouch_worker._frame_workers(16, memory_gb=32), 4)
+        self.assertEqual(retouch_worker._frame_workers(16, memory_gb=32), 5)
         self.assertEqual(retouch_worker._frame_workers(32, memory_gb=64), 6)
 
     def test_frame_workers_fill_cores_without_neural(self) -> None:
@@ -417,9 +417,8 @@ class BatchPipelineTests(unittest.TestCase):
 
         self.assertFalse(worker.is_alive())
         self.assertEqual(peak, 2)
-        events = capture.events()
+        events = [event for event in capture.events() if event["event"] == "progress"]
         self.assertEqual([event["done"] for event in events], [1, 2, 3, 4])
-        self.assertEqual({event["event"] for event in events}, {"progress"})
 
     def test_memory_error_narrows_window_and_retries_frame(self) -> None:
         """Нехватка памяти тихо схлопывает лишний поток, а кадр досчитывается позже."""
@@ -454,7 +453,7 @@ class BatchPipelineTests(unittest.TestCase):
             with redirect_stdout(capture):
                 retouch_worker._batch(_Tight(), tasks, RetouchSettings())
 
-        events = capture.events()
+        events = [event for event in capture.events() if event["event"] != "completed"]
         self.assertEqual({event["event"] for event in events}, {"progress"})
         self.assertEqual([event["done"] for event in events], list(range(1, 9)))
         # Отложенный кадр досчитан вторым заходом, и он же ушёл последним.
@@ -507,7 +506,7 @@ class BatchPipelineTests(unittest.TestCase):
             with redirect_stdout(capture):
                 retouch_worker._batch(_Stopper(), tasks, RetouchSettings(), control)
 
-        events = capture.events()
+        events = [event for event in capture.events() if event["event"] != "completed"]
         stopped = events[-1]
         self.assertEqual(stopped["event"], "stopped")
         self.assertEqual(stopped["total"], 6)

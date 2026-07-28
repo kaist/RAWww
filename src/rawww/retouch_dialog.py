@@ -257,6 +257,8 @@ class BatchRetouchDialog(QDialog):
         self._batch_control: CallbackJobControl | None = None
         self._batch_paused_at: float | None = None
         self._batch_paused_total = 0.0
+        # Итог пакета берётся из события воркера, а не из кода выхода процесса.
+        self._batch_result: tuple[int, int, int] | None = None
         self._sliders: list[QSlider] = []
         self._before_preview = QPixmap()
         self._after_preview = QPixmap()
@@ -598,6 +600,7 @@ class BatchRetouchDialog(QDialog):
         self._batch_started_at = monotonic()
         self._batch_paused_at = None
         self._batch_paused_total = 0.0
+        self._batch_result = None
         self.batch.setEnabled(False)
         self.progress.start(len(sources), _("Подготовка…"))
         self.status.setText(_("Запущена пакетная ретушь…"))
@@ -706,6 +709,12 @@ class BatchRetouchDialog(QDialog):
                 self._show_progress(event)
             elif kind == "stopped" and not preview:
                 self.status.setText(_("Пакетная ретушь остановлена."))
+            elif kind == "completed" and not preview:
+                self._batch_result = (
+                    int(event.get("done", 0)),
+                    int(event.get("total", 0)),
+                    int(event.get("failed", 0)),
+                )
             elif kind == "error":
                 self.status.setText(_("Ошибка ретуши: {error}").format(error=event.get("message", "")))
             elif kind == "preview" and preview:
@@ -830,7 +839,12 @@ class BatchRetouchDialog(QDialog):
         if stopped:
             self.status.setText(_("Пакетная ретушь остановлена."))
             return
-        self.status.setText(_("Пакетная ретушь завершена.") if process.exitCode() == 0 else _("Пакетная ретушь завершилась с ошибкой."))
+        # Код выхода процесса — плохой судья: нативные библиотеки иногда падают
+        # на выгрузке моделей, когда все кадры уже записаны. Поэтому итог берётся
+        # из события воркера: ошибкой называется только неполучившийся кадр.
+        result = self._batch_result
+        good = result is not None and not result[2] and result[0] >= result[1]
+        self.status.setText(_("Пакетная ретушь завершена.") if good else _("Пакетная ретушь завершилась с ошибкой."))
 
     def _release_batch_entry(self) -> None:
         entry, self._batch_entry = self._batch_entry, None
