@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -371,6 +372,9 @@ class PipelineOrderTest(unittest.TestCase):
         _write_cube(self.path)
         self.retoucher = retouch_pipeline.SkinRetoucher.__new__(retouch_pipeline.SkinRetoucher)
         self.retoucher._lut_cache = None
+        # Кадры пакета лезут в кэш таблицы параллельно, поэтому у настоящего
+        # объекта есть замок: заглушке он нужен ровно за этим.
+        self.retoucher._lut_lock = threading.Lock()
         self.rgb = np.full((8, 8, 3), 100, dtype=np.uint8)
 
     def tearDown(self) -> None:

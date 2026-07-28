@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import math
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -595,6 +596,9 @@ class SkinRetoucher:
         # результата, поэтому плитки нейроретуши занимают все ядра: это самый
         # дорогой этап и он линейно ускоряется потоками.
         self._workers = max(1, cpus)
+        self._tile_pool: ThreadPoolExecutor | None = None
+        self._tile_lock = threading.Lock()
+        self._lut_lock = threading.Lock()
         self._lut_cache: tuple[tuple[str, int], CubeLut] | None = None
 
     def skin_masks(self, rgb: np.ndarray) -> SkinMasks:
@@ -738,6 +742,19 @@ class SkinRetoucher:
         y1 = min(height, math.ceil((ys.max() + 1) * height / small.shape[0]) + margin)
         return [(x0, y0, x1, y1)]
 
+    def _tiles(self) -> ThreadPoolExecutor:
+        """Отдаёт единственный на процесс пул плиток нейроретуши.
+
+        Пул общий нарочно: пакет считает несколько кадров одновременно, и
+        отдельный пул на кадр раздул бы число потоков инференса кратно числу
+        кадров. Ядер от этого не прибавится, а переключение контекста и память
+        ONNX съели бы весь выигрыш от параллельных кадров.
+        """
+        with self._tile_lock:
+            if self._tile_pool is None:
+                self._tile_pool = ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="retouch-tile")
+            return self._tile_pool
+
     def _neural(self, rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
         tile, core, border = 278, 214, 32
         height, width = rgb.shape[:2]
@@ -754,9 +771,8 @@ class SkinRetoucher:
             prediction = self._retoucher.run(None, {self._retoucher_input: patch})[0][0]
             return y, x, np.clip(prediction.transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
 
-        with ThreadPoolExecutor(max_workers=self._workers) as executor:
-            for y, x, prediction in executor.map(infer, jobs):
-                result[y:y + core, x:x + core] = prediction
+        for y, x, prediction in self._tiles().map(infer, jobs):
+            result[y:y + core, x:x + core] = prediction
         return result[:height, :width]
 
     def neural_retouch(self, rgb: np.ndarray, mask: np.ndarray, strength: float) -> np.ndarray:
@@ -788,11 +804,14 @@ class SkinRetoucher:
             key = (path, Path(path).stat().st_mtime_ns)
         except OSError:
             return None
-        if self._lut_cache is not None and self._lut_cache[0] == key:
-            return self._lut_cache[1]
-        lut = load_cube_lut(path)
-        self._lut_cache = (key, lut)
-        return lut
+        with self._lut_lock:
+            # Кадры пакета считаются параллельно и лезут в кэш одновременно:
+            # без замка таблицу разбирали бы несколько потоков разом.
+            if self._lut_cache is not None and self._lut_cache[0] == key:
+                return self._lut_cache[1]
+            lut = load_cube_lut(path)
+            self._lut_cache = (key, lut)
+            return lut
 
     def finish(self, rgb: np.ndarray, settings: RetouchSettings) -> np.ndarray:
         """Доводит кадр после ретуши кожи: тон и цвет, затем таблица.

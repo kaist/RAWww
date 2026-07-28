@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import replace
 import json
 import os
@@ -29,10 +30,19 @@ from .retouch_pipeline import MASK_SIDE, RetouchSettings, SkinMasks, SkinRetouch
 from .runtime_paths import data_path
 
 
+_output_lock = threading.Lock()
+
+
 def _event(kind: str, **values) -> None:
-    """Отправляет протокол всегда в UTF-8, независимо от кодовой страницы Windows."""
-    sys.stdout.buffer.write(json.dumps({"event": kind, **values}, ensure_ascii=False).encode("utf-8") + b"\n")
-    sys.stdout.buffer.flush()
+    """Отправляет протокол всегда в UTF-8, независимо от кодовой страницы Windows.
+
+    Кадры пакета считаются параллельно, поэтому строка пишется под замком:
+    перемешанные половинки JSON интерфейс разобрать не сможет.
+    """
+    line = json.dumps({"event": kind, **values}, ensure_ascii=False).encode("utf-8") + b"\n"
+    with _output_lock:
+        sys.stdout.buffer.write(line)
+        sys.stdout.buffer.flush()
 
 
 def _read(path: Path, max_side: int | None, region: tuple[int, int, int, int] | None = None) -> tuple[np.ndarray, tuple[int, int], tuple[int, int]]:
@@ -192,21 +202,77 @@ class _BatchControl:
         return not self._stopped
 
 
+def _frame_workers(cpus: int | None = None) -> int:
+    """Сколько кадров пакета считается одновременно.
+
+    Нейроретушь занимает все ядра плитками, а декодирование, матирование,
+    выравнивание тона, D&B, LUT и запись JPEG живут в одном потоке и на
+    многоядерной машине занимают одно ядро из десятка. Соседние кадры занимают
+    эти простои: пока один считает цвет, другой кормит общий пул плиток.
+
+    Потоков сознательно мало: узкое место теперь не ядра, а память — каждый
+    кадр в работе держит несколько float32-копий сорокамегапиксельного RAW.
+    """
+    if cpus is None:
+        cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 4
+    if cpus < 4:
+        # Двухядерной машине параллельные кадры дают только расход памяти:
+        # плитки нейроретуши и так выбирают всё, что есть.
+        return 1
+    return 3 if cpus >= 12 else 2
+
+
 def _batch(
     retoucher: SkinRetoucher,
     tasks: list[dict],
     settings: RetouchSettings,
     control: _BatchControl | None = None,
 ) -> None:
-    for index, task in enumerate(tasks, 1):
-        if control is not None and not control.wait_while_paused():
-            _event("stopped", done=index - 1, total=len(tasks))
-            return
+    """Считает пакет конвейером из нескольких кадров в работе.
+
+    Потоки, а не процессы: сессии ONNX потокобезопасны, а декодирование,
+    numpy-этапы и кодирование JPEG отпускают GIL. Отдельные процессы пришлось
+    бы грузить тремя моделями каждый, и они же поделили бы ядра между собой.
+
+    Остановка и пауза срабатывают на границе подачи нового кадра: кадры в
+    работе дописываются, иначе в папке остался бы недописанный ``.tmp``.
+    """
+    total = len(tasks)
+    counted = 0
+    counter = threading.Lock()
+
+    def render(task: dict) -> None:
+        nonlocal counted
         source = Path(task["source"])
         original, _origin, _full_size = _read(source, task.get("max_side"))
         target = Path(task["target"])
         _write(target, retoucher.process(original, settings))
-        _event("progress", done=index, total=len(tasks), source=str(source), target=str(target))
+        with counter:
+            counted += 1
+            done = counted
+        # Порядок готовых кадров теперь любой, поэтому интерфейсу идёт
+        # общее число сделанного, а не номер задачи в списке.
+        _event("progress", done=done, total=total, source=str(source), target=str(target))
+
+    workers = _frame_workers()
+    stopped = False
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="retouch-frame") as executor:
+        pending: set[Future] = set()
+        for task in tasks:
+            if control is not None and not control.wait_while_paused():
+                stopped = True
+                break
+            while len(pending) >= workers:
+                # Окно поданных задач ограниченное: иначе пауза и остановка
+                # увидели бы уже всю очередь в работе.
+                finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    future.result()
+            pending.add(executor.submit(render, task))
+        for future in pending:
+            future.result()
+    if stopped:
+        _event("stopped", done=counted, total=total)
 
 
 def _jobs(control: _BatchControl) -> queue.Queue:
