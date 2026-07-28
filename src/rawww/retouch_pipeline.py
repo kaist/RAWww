@@ -585,12 +585,17 @@ class SkinRetoucher:
         options = ort.SessionOptions()
         options.intra_op_num_threads = 1
         options.inter_op_num_threads = 1
+        self._options = options
+        self._retoucher_path = retoucher
         self._segmenter = ort.InferenceSession(str(segmenter), options, providers=["CPUExecutionProvider"])
-        self._retoucher = ort.InferenceSession(str(retoucher), options, providers=["CPUExecutionProvider"])
         self._face_parser = ort.InferenceSession(str(face_parser), options, providers=["CPUExecutionProvider"])
         self._segmenter_input = self._segmenter.get_inputs()[0].name
-        self._retoucher_input = self._retoucher.get_inputs()[0].name
         self._face_parser_input = self._face_parser.get_inputs()[0].name
+        # Самая тяжёлая модель грузится первым обращением: пакет без
+        # нейроретуши и проверка одной маски кожи её не трогают вовсе.
+        self._retoucher_session: object | None = None
+        self._retoucher_input = ""
+        self._retoucher_lock = threading.Lock()
         cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 4
         # Воркер живёт в отдельном процессе, а интерфейс в это время ждёт его
         # результата, поэтому плитки нейроретуши занимают все ядра: это самый
@@ -742,6 +747,23 @@ class SkinRetoucher:
         y1 = min(height, math.ceil((ys.max() + 1) * height / small.shape[0]) + margin)
         return [(x0, y0, x1, y1)]
 
+    def _neural_session(self):
+        """Грузит сетку ретуши только перед первым инференсом.
+
+        Модель отключают целыми пакетами, а стоит она секунды загрузки и
+        сотни мегабайт памяти, нужной параллельным кадрам.
+        """
+        import onnxruntime as ort
+
+        with self._retoucher_lock:
+            if self._retoucher_session is None:
+                session = ort.InferenceSession(
+                    str(self._retoucher_path), self._options, providers=["CPUExecutionProvider"]
+                )
+                self._retoucher_input = session.get_inputs()[0].name
+                self._retoucher_session = session
+            return self._retoucher_session
+
     def _tiles(self) -> ThreadPoolExecutor:
         """Отдаёт единственный на процесс пул плиток нейроретуши.
 
@@ -765,10 +787,12 @@ class SkinRetoucher:
         padded_mask = np.pad(mask, ((0, padded_h - height), (0, padded_w - width)))
         jobs = [(y, x) for y in range(0, padded_h, core) for x in range(0, padded_w, core) if np.any(padded_mask[y:y + core, x:x + core])]
 
+        session = self._neural_session()
+
         def infer(job: tuple[int, int]) -> tuple[int, int, np.ndarray]:
             y, x = job
             patch = padded[y:y + tile, x:x + tile].astype(np.float32).transpose(2, 0, 1)[None] / 255
-            prediction = self._retoucher.run(None, {self._retoucher_input: patch})[0][0]
+            prediction = session.run(None, {self._retoucher_input: patch})[0][0]
             return y, x, np.clip(prediction.transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
 
         for y, x, prediction in self._tiles().map(infer, jobs):

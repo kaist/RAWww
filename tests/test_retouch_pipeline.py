@@ -427,5 +427,21 @@ class PipelineOrderTest(unittest.TestCase):
         self.assertEqual(second.size, 3)
 
 
+class NeuralSessionTest(unittest.TestCase):
+    """Сетка ретуши грузится лениво: пакет без неё не должен платить за модель."""
+
+    def test_session_appears_only_on_first_inference(self) -> None:
+        from rawww.runtime_paths import data_path
+
+        models = data_path("models") / "retouch"
+        if not (models / "opt.onnx").is_file():
+            self.skipTest("модели ретуши не установлены")
+        retoucher = retouch_pipeline.SkinRetoucher(models)
+        self.assertIsNone(retoucher._retoucher_session)
+        session = retoucher._neural_session()
+        self.assertIs(session, retoucher._neural_session())
+        self.assertTrue(retoucher._retoucher_input)
+
+
 if __name__ == "__main__":
     unittest.main()
