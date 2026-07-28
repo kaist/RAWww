@@ -384,7 +384,7 @@ class BatchRetouchDialog(QDialog):
         self.batch = ScopeButtons(_("Обработать"), len(self._paths), len(self._selected), "batchResize", icon="magic", vertical=True)
         self.batch.startRequested.connect(self._start_batch)
         layout.addWidget(self.batch)
-        close = QPushButton(_("Закрыть"))
+        close = QPushButton(_("Закрыть").upper())
         close.setObjectName("batchResizeSecondaryButton")
         close.clicked.connect(self.reject)
         layout.addWidget(close)

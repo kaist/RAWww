@@ -1178,7 +1178,7 @@ class BatchRenameDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        self.cancel_button = QPushButton(_("Отмена"))
+        self.cancel_button = QPushButton(_("Отмена").upper())
         self.cancel_button.setObjectName("batchRenameSecondaryButton")
         self.cancel_button.clicked.connect(self.reject)
         buttons.addWidget(self.cancel_button)
@@ -1696,7 +1696,7 @@ class BatchResizeDialog(QDialog):
         layout.addWidget(self.progress)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        self.cancel_button = QPushButton(_("Отмена"))
+        self.cancel_button = QPushButton(_("Отмена").upper())
         self.cancel_button.setObjectName("batchResizeSecondaryButton")
         self.cancel_button.clicked.connect(self.reject)
         buttons.addWidget(self.cancel_button)
@@ -1809,7 +1809,7 @@ class ShrinkJpegDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
-        self.cancel_button = QPushButton(_("Отмена"))
+        self.cancel_button = QPushButton(_("Отмена").upper())
         self.cancel_button.setObjectName("batchResizeSecondaryButton")
         self.cancel_button.clicked.connect(self.reject)
         buttons.addWidget(self.cancel_button)

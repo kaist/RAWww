@@ -70,8 +70,10 @@ class ScopeButtons(QWidget):
         self.set_counts(total, selected)
 
     def set_counts(self, total: int, selected: int) -> None:
-        self.all_button.setText(_("{verb} все ({count})").format(verb=self._verb, count=total))
-        self.selected_button.setText(_("{verb} выделенные ({count})").format(verb=self._verb, count=selected))
+        # Капс делается в коде, а не в стилях: в Qt Style Sheets нет
+        # `text-transform`, а переводы хранятся в обычном регистре.
+        self.all_button.setText(_("{verb} все ({count})").format(verb=self._verb, count=total).upper())
+        self.selected_button.setText(_("{verb} выделенные ({count})").format(verb=self._verb, count=selected).upper())
         self.selected_button.setEnabled(bool(selected))
         self.selected_button.setToolTip("" if selected else _("В сетке ничего не выделено."))
 
