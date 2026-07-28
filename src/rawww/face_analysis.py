@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 
 import numpy as np
 from PIL import Image
@@ -55,6 +56,10 @@ class Face:
 _detector_session = None
 _recognition_session = None
 _landmark_session = None
+# Пакетная ретушь считает кадры параллельно и просит детектор из нескольких
+# потоков: сессию ONNX можно вызывать одновременно, но создавать её дважды
+# незачем — это секунды и десятки мегабайт впустую.
+_session_lock = threading.Lock()
 
 
 def _session(model: Path):
@@ -72,23 +77,26 @@ def _session(model: Path):
 
 def _detector():
     global _detector_session
-    if _detector_session is None:
-        _detector_session = _session(DETECTOR_MODEL)
-    return _detector_session
+    with _session_lock:
+        if _detector_session is None:
+            _detector_session = _session(DETECTOR_MODEL)
+        return _detector_session
 
 
 def _recognition():
     global _recognition_session
-    if _recognition_session is None:
-        _recognition_session = _session(RECOGNITION_MODEL)
-    return _recognition_session
+    with _session_lock:
+        if _recognition_session is None:
+            _recognition_session = _session(RECOGNITION_MODEL)
+        return _recognition_session
 
 
 def _landmark():
     global _landmark_session
-    if _landmark_session is None:
-        _landmark_session = _session(LANDMARK_MODEL)
-    return _landmark_session
+    with _session_lock:
+        if _landmark_session is None:
+            _landmark_session = _session(LANDMARK_MODEL)
+        return _landmark_session
 
 
 def _landmark_input(image: Image.Image, box: np.ndarray) -> np.ndarray:

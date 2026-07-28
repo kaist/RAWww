@@ -332,6 +332,99 @@ class BatchControlTests(unittest.TestCase):
         self.assertFalse(control.wait_while_paused())
 
 
+class BatchPipelineTests(unittest.TestCase):
+    """Кадры пакета считаются одновременно, но отчёт остаётся связным."""
+
+    def test_frame_workers_grow_with_cores(self) -> None:
+        from rawww import retouch_worker
+
+        self.assertEqual(retouch_worker._frame_workers(2), 1)
+        self.assertEqual(retouch_worker._frame_workers(8), 2)
+        self.assertEqual(retouch_worker._frame_workers(16), 3)
+
+    def test_frames_overlap_and_progress_counts_every_frame(self) -> None:
+        """Пока один кадр ждёт, второй обязан идти: иначе ядра простаивают."""
+        from rawww import retouch_worker
+
+        inside = threading.Semaphore(0)
+        release = threading.Event()
+        peak = 0
+        current = 0
+        guard = threading.Lock()
+
+        class _Slow:
+            def process(self, rgb, settings, masks=None):
+                nonlocal peak, current
+                with guard:
+                    current += 1
+                    peak = max(peak, current)
+                inside.release()
+                release.wait(5)
+                with guard:
+                    current -= 1
+                return rgb
+
+        tasks = [{"source": f"{index}.jpg", "target": f"{index}_out.jpg"} for index in range(4)]
+        capture = _Capture()
+        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None: 2), \
+                mock.patch.object(retouch_worker, "_read", lambda path, max_side: (b"", (0, 0), (1, 1))), \
+                mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
+            worker = threading.Thread(
+                target=lambda: retouch_worker._batch(_Slow(), tasks, RetouchSettings()),
+                daemon=True,
+            )
+            with redirect_stdout(capture):
+                worker.start()
+                self.assertTrue(inside.acquire(timeout=5))
+                self.assertTrue(inside.acquire(timeout=5), "второй кадр должен считаться параллельно")
+                release.set()
+                worker.join(30)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(peak, 2)
+        events = capture.events()
+        self.assertEqual([event["done"] for event in events], [1, 2, 3, 4])
+        self.assertEqual({event["event"] for event in events}, {"progress"})
+
+    def test_stop_counts_only_finished_frames(self) -> None:
+        """Остановка на границе подачи: кадры в работе дописываются и считаются."""
+        from rawww import retouch_worker
+
+        control = retouch_worker._BatchControl()
+
+        class _Stopper:
+            def process(self, rgb, settings, masks=None):
+                control.apply("stop")
+                return rgb
+
+        tasks = [{"source": f"{index}.jpg", "target": f"{index}_out.jpg"} for index in range(6)]
+        capture = _Capture()
+        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None: 1), \
+                mock.patch.object(retouch_worker, "_read", lambda path, max_side: (b"", (0, 0), (1, 1))), \
+                mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
+            with redirect_stdout(capture):
+                retouch_worker._batch(_Stopper(), tasks, RetouchSettings(), control)
+
+        events = capture.events()
+        stopped = events[-1]
+        self.assertEqual(stopped["event"], "stopped")
+        self.assertEqual(stopped["total"], 6)
+        self.assertLess(stopped["done"], 6)
+        self.assertEqual(stopped["done"], sum(event["event"] == "progress" for event in events))
+
+    def test_tile_pool_is_shared_between_frames(self) -> None:
+        """Пул плиток один на процесс: иначе потоков инференса станет кратно больше."""
+        from rawww.retouch_pipeline import SkinRetoucher
+
+        holder = SimpleNamespace(_tile_pool=None, _tile_lock=threading.Lock(), _workers=2)
+        first = SkinRetoucher._tiles(holder)
+        try:
+            self.assertIs(first, SkinRetoucher._tiles(holder))
+            self.assertEqual(first._max_workers, 2)
+        finally:
+            first.shutdown(wait=True)
+
+
 class ClosedDialogCallbackTests(unittest.TestCase):
     """Поздние сигналы процесса не должны трогать удалённые виджеты окна."""
 
