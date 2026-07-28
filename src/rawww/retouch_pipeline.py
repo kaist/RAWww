@@ -551,21 +551,30 @@ def dodge_burn(rgb: np.ndarray, weights: np.ndarray, strength: float) -> np.ndar
     for y in range(0, height, 256):
         light[y:y + 256] = _lightness(_srgb_to_linear(rgb[y:y + 256]) @ _LUMA)
     sigma = max(3.5, min(height, width) * .006)
-    local_weight = _blur(weights * 255, sigma) / 255
-    local = _blur(light * weights, sigma) / np.maximum(local_weight, 1e-4)
-    detail = light - local
-    gate = np.clip((np.abs(detail) - 2.7) / 9, 0, 1) * (np.abs(detail) < 18) * (light > 52)
-    shift = np.clip(-detail * .62, -7, 7) * gate * weights * strength
+    # Локальная база — низкая частота, и точность полного кадра ей не нужна:
+    # база считается на уменьшенной копии и растягивается обратно. Мелкие
+    # перепады при этом целиком остаются в `light`, ворота фильтра их видят.
+    scale = min(1.0, 2.0 / sigma)
+    small = (max(24, round(width * scale)), max(24, round(height * scale)))
+    small_scale = min(small[0] / width, small[1] / height)
+    small_light = _resize_map(light, small, Image.Resampling.BOX)
+    small_weight = _reduce_weight(weights, small)
+    small_sigma = max(1.0, sigma * small_scale)
+    base = _blur(small_light * small_weight, small_sigma) / np.maximum(_blur(small_weight * 255, small_sigma) / 255, 1e-4)
+    local = _resize_map(base, (width, height), Image.Resampling.BILINEAR)
     result = np.empty(rgb.shape, dtype=np.uint8)
     for y in range(0, height, 256):
         rows = slice(y, y + 256)
+        detail = light[rows] - local[rows]
+        gate = np.clip((np.abs(detail) - 2.7) / 9, 0, 1) * (np.abs(detail) < 18) * (light[rows] > 52)
+        shift = np.clip(-detail * .62, -7, 7) * gate * weights[rows] * strength
         linear = _srgb_to_linear(rgb[rows])
         luminance = linear @ _LUMA
-        target = _luminance(light[rows] + shift[rows])
+        target = _luminance(light[rows] + shift)
         # Там, где ворота фильтра закрыты, пиксель обязан остаться прежним:
         # округление обратного перевода светлоты иначе шевелит младший бит и
         # добавляет в поры собственный шум.
-        ratio = np.where(shift[rows] == 0, np.float32(1.0), target / np.maximum(luminance, 1e-5))
+        ratio = np.where(shift == 0, np.float32(1.0), target / np.maximum(luminance, 1e-5))
         result[rows] = _encode(linear * ratio[..., None])
     return result
 
@@ -808,12 +817,23 @@ class SkinRetoucher:
         strength = float(np.clip(strength, 0, 1))
         if strength <= 0.0:
             return rgb
-        cleaned = self._neural(rgb, mask)
-        alpha = _blur(mask.astype(np.float32), 1.3)[:, :, None] / 255 * strength
-        result = np.empty(rgb.shape, dtype=np.uint8)
-        for y in range(0, rgb.shape[0], 256):
-            source = rgb[y:y + 256].astype(np.float32)
-            result[y:y + 256] = np.clip(source + (cleaned[y:y + 256].astype(np.float32) - source) * alpha[y:y + 256], 0, 255).astype(np.uint8)
+        # Сетка меняет только кожу, поэтому паддинг, копии и смешивание живут
+        # в прямоугольнике кожи, а не на целом кадре: на ростовом портрете это
+        # большая часть пикселей и памяти. Запас — контекст крайних плиток.
+        regions = self._regions(mask, 48)
+        if not regions:
+            return rgb
+        x0, y0, x1, y1 = regions[0]
+        crop = rgb[y0:y1, x0:x1]
+        cleaned = self._neural(crop, mask[y0:y1, x0:x1])
+        alpha = _blur(mask[y0:y1, x0:x1], 1.3) * np.float32(strength / 255.0)
+        result = rgb.copy()
+        window = result[y0:y1, x0:x1]
+        for y in range(0, crop.shape[0], 256):
+            rows = slice(y, y + 256)
+            source = crop[rows].astype(np.float32)
+            blended = source + (cleaned[rows].astype(np.float32) - source) * alpha[rows, :, None]
+            window[rows] = np.clip(blended, 0, 255).astype(np.uint8)
         return result
 
     def lut(self, path: str) -> CubeLut | None:
