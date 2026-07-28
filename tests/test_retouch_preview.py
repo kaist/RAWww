@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import queue
 import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 from types import SimpleNamespace
@@ -415,6 +416,73 @@ class BatchPipelineTests(unittest.TestCase):
         events = capture.events()
         self.assertEqual([event["done"] for event in events], [1, 2, 3, 4])
         self.assertEqual({event["event"] for event in events}, {"progress"})
+
+    def test_memory_error_narrows_window_and_retries_frame(self) -> None:
+        """Нехватка памяти тихо схлопывает лишний поток, а кадр досчитывается позже."""
+        from rawww import retouch_worker
+
+        current = 0
+        guard = threading.Lock()
+        attempts: list[str] = []
+        neighbours: dict[str, int] = {}
+
+        class _Tight:
+            def process(self, rgb, settings, masks=None):
+                nonlocal current
+                with guard:
+                    attempts.append(rgb)
+                    current += 1
+                    neighbours[rgb] = max(neighbours.get(rgb, 0), current)
+                try:
+                    if rgb == "0.jpg" and attempts.count(rgb) == 1:
+                        raise MemoryError("нет памяти")
+                    time.sleep(.02)
+                    return rgb
+                finally:
+                    with guard:
+                        current -= 1
+
+        tasks = [{"source": f"{index}.jpg", "target": f"{index}_out.jpg"} for index in range(8)]
+        capture = _Capture()
+        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True: 3), \
+                mock.patch.object(retouch_worker, "_read", lambda path, max_side: (path.name, (0, 0), (1, 1))), \
+                mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
+            with redirect_stdout(capture):
+                retouch_worker._batch(_Tight(), tasks, RetouchSettings())
+
+        events = capture.events()
+        self.assertEqual({event["event"] for event in events}, {"progress"})
+        self.assertEqual([event["done"] for event in events], list(range(1, 9)))
+        # Отложенный кадр досчитан вторым заходом, и он же ушёл последним.
+        self.assertEqual(events[-1]["source"], "0.jpg")
+        self.assertEqual(attempts.count("0.jpg"), 2)
+        # Кадры, поданные уже после нехватки памяти, соседей в памяти не имели.
+        for name in ("5.jpg", "6.jpg", "7.jpg"):
+            self.assertEqual(neighbours[name], 1, name)
+
+    def test_frame_that_never_fits_is_reported_once(self) -> None:
+        """Кадр, не влезающий даже в одиночку, объявляется, но пакет не рвётся."""
+        from rawww import retouch_worker
+
+        class _Huge:
+            def process(self, rgb, settings, masks=None):
+                if rgb == "1.jpg":
+                    raise MemoryError("нет памяти")
+                return rgb
+
+        tasks = [{"source": f"{index}.jpg", "target": f"{index}_out.jpg"} for index in range(3)]
+        capture = _Capture()
+        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True: 2), \
+                mock.patch.object(retouch_worker, "_read", lambda path, max_side: (path.name, (0, 0), (1, 1))), \
+                mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
+            with redirect_stdout(capture):
+                retouch_worker._batch(_Huge(), tasks, RetouchSettings())
+
+        events = capture.events()
+        errors = [event for event in events if event["event"] == "error"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("1.jpg", errors[0]["message"])
+        self.assertEqual([event["done"] for event in events if event["event"] == "progress"], [1, 2])
 
     def test_stop_counts_only_finished_frames(self) -> None:
         """Остановка на границе подачи: кадры в работе дописываются и считаются."""
