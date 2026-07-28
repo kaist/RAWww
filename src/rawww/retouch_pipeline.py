@@ -171,6 +171,17 @@ _PIGMENT_BASIS = np.stack((_MELANIN, _HEMOGLOBIN, _SHADING), axis=1).astype(np.f
 _PIGMENT_SPLIT = np.linalg.inv(_PIGMENT_BASIS).astype(np.float32)
 _DENSITY_FLOOR = np.float32(1e-6)
 _LUMA = np.array((.2126729, .7151522, .0721750), dtype=np.float32)
+_XYZ_FROM_LINEAR_RGB = np.array(
+    (
+        (.4124564, .3575761, .1804375),
+        (.2126729, .7151522, .0721750),
+        (.0193339, .1191920, .9503041),
+    ),
+    dtype=np.float32,
+)
+_LINEAR_RGB_FROM_XYZ = np.linalg.inv(_XYZ_FROM_LINEAR_RGB).astype(np.float32)
+_LAB_WHITE = np.array((.95047, 1.0, 1.08883), dtype=np.float32)
+_LAB_DELTA = np.float32(6.0 / 29.0)
 # Доля яркостного изменения, которую разрешается оставить. Выравнивание
 # тона отвечает за цвет, а светотенью занимается второй ползунок: если тон
 # меняет светлоту заметно, кожа сразу выглядит замыленной. Небольшая доля
@@ -317,6 +328,34 @@ def _encode(linear: np.ndarray) -> np.ndarray:
     """Переводит линейный свет в 8-битный sRGB через таблицу."""
     index = np.sqrt(np.clip(linear, 0.0, 1.0)) * np.float32(_ENCODE_STEPS - 1)
     return _ENCODE_LUT[index.astype(np.uint16)]
+
+
+def _lab_f(values: np.ndarray) -> np.ndarray:
+    return np.where(values > _LAB_DELTA ** 3, np.cbrt(values), values / (3 * _LAB_DELTA ** 2) + 4 / 29)
+
+
+def _lab_f_inv(values: np.ndarray) -> np.ndarray:
+    return np.where(values > _LAB_DELTA, values ** 3, 3 * _LAB_DELTA ** 2 * (values - 4 / 29))
+
+
+def _rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
+    """Переводит sRGB 8 bit или 0..255 float в CIE Lab (D65)."""
+    linear = _srgb_to_linear(rgb)
+    xyz = (linear @ _XYZ_FROM_LINEAR_RGB.T) / _LAB_WHITE
+    fx, fy, fz = np.moveaxis(_lab_f(xyz), -1, 0)
+    return np.stack((116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)), axis=-1).astype(np.float32)
+
+
+def _lab_to_rgb(lab: np.ndarray) -> np.ndarray:
+    """Возвращает CIE Lab (D65) в 8-битный sRGB."""
+    light, a, b = np.moveaxis(lab.astype(np.float32, copy=False), -1, 0)
+    fy = (light + 16.0) / 116.0
+    xyz = np.stack((
+        _lab_f_inv(fy + a / 500.0),
+        _lab_f_inv(fy),
+        _lab_f_inv(fy - b / 200.0),
+    ), axis=-1) * _LAB_WHITE
+    return _encode(xyz @ _LINEAR_RGB_FROM_XYZ.T)
 
 
 def _pigments(rgb: np.ndarray) -> np.ndarray:
@@ -489,7 +528,15 @@ def even_skin_tone(
         # Около чёрного и в выбитых бликах плотность недостоверна: там любая
         # правка даёт цветной шум, а не ровный тон.
         luminance = linear @ _LUMA
-        gate = np.clip((luminance - .004) / .03, 0.0, 1.0) * np.clip((.995 - luminance) / .06, 0.0, 1.0)
+        lightness = _lightness(luminance)
+        # В глубоких тенях пигментная модель нестабильна: небольшая ошибка
+        # в плотностях легко превращает естественный цвет тени в серый.
+        shadow_gate = np.clip((lightness - 64.0) / 58.0, 0.0, 1.0)
+        gate = (
+            np.clip((luminance - .004) / .03, 0.0, 1.0)
+            * np.clip((.995 - luminance) / .06, 0.0, 1.0)
+            * shadow_gate
+        )
         alpha = weights[rows] * gate
         pigments[..., 0:2] -= correction[rows] * alpha[..., None]
         corrected = np.exp(-(pigments @ _PIGMENT_BASIS.T))
@@ -500,6 +547,42 @@ def even_skin_tone(
         corrected *= (target / np.maximum(corrected @ _LUMA, 1e-5))[..., None]
         result[rows] = _encode(corrected)
     return result
+
+
+def lab_skin_tone_smooth(rgb: np.ndarray, weights: np.ndarray, strength: float, face_scale: float) -> np.ndarray:
+    """Доводит тон кожи локальным сглаживанием цветности в Lab.
+
+    Пигментный шаг выше хорошо отделяет красноту и загар от светотени, но
+    небольшие цветные пятна в сравнении с black-box фильтром остаются слишком
+    заметными. Этот слой работает только с `a*`/`b*`: светлота, объём и текстура
+    берутся из исходного результата, а глубокие тени почти не трогаются.
+    """
+    strength = float(np.clip(strength, 0.0, 1.0))
+    if strength <= 0.0:
+        return rgb.copy()
+    confident = weights > .5
+    if np.count_nonzero(confident) <= 24:
+        return rgb.copy()
+    lab = _rgb_to_lab(rgb)
+    lightness = lab[..., 0]
+    # Полная сила начинается только в средних тонах кожи: это убирает
+    # обесцвечивание теней, где глаз особенно быстро замечает серость.
+    shadow_gate = np.clip((lightness - 30.0) / 22.0, 0.0, 1.0)
+    highlight_gate = np.clip((98.0 - lightness) / 8.0, 0.0, 1.0)
+    alpha = weights * shadow_gate * highlight_gate
+    if float(alpha.max()) <= 1e-3:
+        return rgb.copy()
+
+    sigma = max(12.0, min(face_scale * .16, 42.0))
+    local_a = _masked_smooth(lab[..., 1], weights, sigma)
+    local_b = _masked_smooth(lab[..., 2], weights, sigma)
+    gain = math.sqrt(strength)
+    lab[..., 1] -= (lab[..., 1] - local_a) * np.float32(.78 * gain) * alpha
+    lab[..., 2] -= (lab[..., 2] - local_b) * np.float32(.58 * gain) * alpha
+    # Black-box на нейтральном портрете слегка утеплял кожу, но без заметного
+    # разворота оттенка: добавляем только малую низкочастотную составляющую.
+    lab[..., 2] += np.float32(.9 * strength) * alpha
+    return _lab_to_rgb(lab)
 
 
 def matte_skin(rgb: np.ndarray, weights: np.ndarray, strength: float, face_scale: float) -> np.ndarray:
@@ -1007,6 +1090,7 @@ class SkinRetoucher:
                             for left, top, right, bottom in ready.faces
                         ),
                     )
+                    result[y0:y1, x0:x1] = lab_skin_tone_smooth(result[y0:y1, x0:x1], weights, tone, face_scale)
                 if burn:
                     result[y0:y1, x0:x1] = dodge_burn(result[y0:y1, x0:x1], weights, burn)
         if settings.neural_retouch:
