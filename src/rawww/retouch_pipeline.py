@@ -34,6 +34,168 @@ def _blur(channel: np.ndarray, radius: float) -> np.ndarray:
     return np.asarray(image.filter(ImageFilter.GaussianBlur(radius)), dtype=np.float32)
 
 
+# Векторы пигментов кожи в пространстве оптической плотности RGB. Модель кожи
+# Tsumura и др. (ICA of skin color image): по закону Ламберта—Бера плотность
+# кожи раскладывается на меланин, гемоглобин и общий множитель освещённости.
+# Точность векторов не критична: алгоритм подавляет не абсолютные значения
+# компонент, а лишь их пространственную неровность.
+_MELANIN = np.array((.4143, .3570, .8372), dtype=np.float32)
+_HEMOGLOBIN = np.array((.2988, .6838, .6657), dtype=np.float32)
+_SHADING = np.array((1., 1., 1.), dtype=np.float32) / math.sqrt(3.0)
+_PIGMENT_BASIS = np.stack((_MELANIN, _HEMOGLOBIN, _SHADING), axis=1).astype(np.float32)
+_PIGMENT_SPLIT = np.linalg.inv(_PIGMENT_BASIS).astype(np.float32)
+_DENSITY_FLOOR = np.float32(1e-6)
+
+
+def _box_pass(values: np.ndarray, radius: int) -> np.ndarray:
+    """Усредняет столбцы окном 2*radius+1 через префиксные суммы."""
+    padded = np.pad(values, ((radius + 1, radius), (0, 0)), mode="edge")
+    integral = np.cumsum(padded, axis=0, dtype=np.float32)
+    window = 2 * radius + 1
+    return (integral[window:] - integral[:-window]) / np.float32(window)
+
+
+def _smooth(values: np.ndarray, sigma: float) -> np.ndarray:
+    """Приближает гаусс тремя проходами бокс-фильтра.
+
+    Pillow умеет размывать только 8-битные каналы, а плотности пигментов нужны
+    в float: квантование в uint8 стирает как раз те доли процента, из которых
+    и состоит пятнистость кожи. Тройной бокс-фильтр на префиксных суммах стоит
+    O(N) независимо от радиуса, поэтому большие зональные радиусы бесплатны.
+    """
+    radius = int(round(math.sqrt(max(sigma, 0.0) ** 2 * 4.0 + 1.0) / 2.0))
+    if radius < 1:
+        return values.astype(np.float32, copy=True)
+    result = values.astype(np.float32, copy=False)
+    for _ in range(3):
+        result = _box_pass(result, radius)
+        result = np.ascontiguousarray(_box_pass(np.ascontiguousarray(result.T), radius).T)
+    return result
+
+
+def _masked_smooth(values: np.ndarray, weight: np.ndarray, sigma: float) -> np.ndarray:
+    """Сглаживает канал, не подмешивая ничего из-за границы маски кожи."""
+    return _smooth(values * weight, sigma) / np.maximum(_smooth(weight, sigma), 1e-4)
+
+
+def _resize_map(values: np.ndarray, size: tuple[int, int], resample: Image.Resampling) -> np.ndarray:
+    return np.asarray(Image.fromarray(values.astype(np.float32), "F").resize(size, resample), dtype=np.float32)
+
+
+def _srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
+    source = rgb.astype(np.float32) / 255.0
+    return np.where(source <= .04045, source / 12.92, ((source + .055) / 1.055) ** 2.4)
+
+
+def _linear_to_srgb(linear: np.ndarray) -> np.ndarray:
+    clipped = np.clip(linear, 0.0, 1.0)
+    return np.where(clipped <= .0031308, clipped * 12.92, 1.055 * clipped ** (1 / 2.4) - .055)
+
+
+def _pigments(rgb: np.ndarray) -> np.ndarray:
+    """Раскладывает sRGB на меланин, гемоглобин и освещённость.
+
+    Пол яркости держится глубоко под чёрным пикселем: он обязан спасти
+    логарифм от бесконечности, но не сдвинуть нетронутые тёмные пиксели при
+    обратной сборке.
+    """
+    return (-np.log(np.maximum(_srgb_to_linear(rgb), _DENSITY_FLOOR))) @ _PIGMENT_SPLIT.T
+
+
+def even_skin_tone(
+    rgb: np.ndarray,
+    weights: np.ndarray,
+    strength: float,
+    face_scale: float,
+    face_weight: np.ndarray | None = None,
+) -> np.ndarray:
+    """Выравнивает тон кожи, подавляя неровность пигментов в полосе частот пятен.
+
+    Кожа переводится в оптическую плотность и раскладывается на меланин,
+    гемоглобин и освещённость. Пятнистость (краснота, сосуды, пигментные
+    неровности) живёт в средних пространственных частотах карт пигментов, тогда
+    как поры и шум — в высоких, а светотень и анатомия — в низких. Поэтому
+    вычитается только полосовой остаток карт пигментов: текстура и объём лица
+    остаются нетронутыми, а канал освещённости не меняется вовсе.
+
+    Работает и с цветом, и с яркостью: пятно гемоглобина темнее и краснее
+    окружения одновременно, а прежняя коррекция только направления цветности
+    такое пятно почти не замечала.
+
+    `weights` — маска кожи 0..1, `face_scale` — характерный размер лица в
+    пикселях (задаёт радиусы), `face_weight` — доля лица в пикселе: руки, шея и
+    плечи выравниваются слабее, там неровность обычно и есть натуральный вид.
+    """
+    strength = float(np.clip(strength, 0.0, 1.0))
+    if strength <= 0.0:
+        return rgb.copy()
+    height, width = rgb.shape[:2]
+
+    # Оценка неровности считается на уменьшенной копии: пятна — крупные детали,
+    # а полный размер тратил бы память и время на заведомо сглаживаемое.
+    scale = min(1.0, 128.0 / max(face_scale, 32.0))
+    small = (max(24, min(width, int(round(width * scale)))), max(24, min(height, int(round(height * scale)))))
+    small_scale = min(small[0] / width, small[1] / height)
+    fine_sigma = max(1.0, face_scale * small_scale * .035)
+    base_sigma = max(4.0, face_scale * small_scale * .42)
+    small_weight = _resize_map(weights, small, Image.Resampling.BOX)
+    small_rgb = np.stack([_resize_map(rgb[..., channel], small, Image.Resampling.BOX) for channel in range(3)], axis=-1)
+    small_pigments = _pigments(small_rgb)
+    confident = small_weight > .5
+    if np.count_nonzero(confident) <= 24:
+        confident = np.ones_like(small_weight, dtype=bool)
+    residual = np.empty((small[1], small[0], 2), dtype=np.float32)
+    for index in (0, 1):
+        channel = small_pigments[..., index]
+        fine = _masked_smooth(channel, small_weight, fine_sigma)
+        base = _masked_smooth(channel, small_weight, base_sigma)
+        band = fine - base
+        # Мягкое ограничение выбросов: протечка маски на волосы или тень от
+        # очков не должна оставить пятно-ореол. Порог считается отдельно для
+        # меланина и гемоглобина: их масштабы отличаются на порядок. Перцентиль
+        # рядом с медианным разбросом нужен для чистой кожи с парой ярких
+        # пятен: там медиана почти нулевая и одна бы задавила всю коррекцию.
+        magnitude = np.abs(band[confident])
+        limit = max(
+            float(np.median(magnitude)) * 1.4826 * 4.0,
+            float(np.quantile(magnitude, .98)),
+            1e-3,
+        )
+        residual[..., index] = limit * np.tanh(band / limit)
+
+    # Слегка нелинейная шкала: середина уже хорошо видна, а 100 % убирает
+    # пятнистость почти полностью.
+    gain = strength * (.75 + .25 * strength)
+    # Избыток гемоглобина (краснота, сосуды) убирается охотнее, чем добавляется
+    # в бледные участки, а меланин трогаем сдержанно: полное выравнивание
+    # веснушек и загара превращает кожу в пластик.
+    scales = np.where(residual > 0, np.float32(1.0), np.float32(.72))
+    scales[..., 0] *= np.float32(.55)
+    residual *= scales * gain
+    correction = np.stack(
+        [_resize_map(residual[..., index], (width, height), Image.Resampling.BICUBIC) for index in (0, 1)],
+        axis=-1,
+    )
+
+    # Применение идёт полосами: на кадре в десятки мегапикселей полноразмерные
+    # промежуточные float-массивы стоят больше гигабайта памяти воркера.
+    luma = np.array((.2126729, .7151522, .0721750), dtype=np.float32)
+    result = np.empty(rgb.shape, dtype=np.uint8)
+    for y in range(0, height, 256):
+        rows = slice(y, y + 256)
+        linear = np.maximum(_srgb_to_linear(rgb[rows]), _DENSITY_FLOOR)
+        pigments = (-np.log(linear)) @ _PIGMENT_SPLIT.T
+        # Около чёрного и в выбитых бликах плотность недостоверна: там любая
+        # правка даёт цветной шум, а не ровный тон.
+        luminance = linear @ luma
+        gate = np.clip((luminance - .004) / .03, 0.0, 1.0) * np.clip((.995 - luminance) / .06, 0.0, 1.0)
+        alpha = weights[rows] * gate
+        alpha = alpha * (.55 + .45 * face_weight[rows]) if face_weight is not None else alpha * .85
+        pigments[..., 0:2] -= correction[rows] * alpha[..., None]
+        result[rows] = np.clip(_linear_to_srgb(np.exp(-(pigments @ _PIGMENT_BASIS.T))) * 255.0 + .5, 0, 255).astype(np.uint8)
+    return result
+
+
 def _rgb_to_lab(rgb: np.ndarray) -> np.ndarray:
     matrix = np.array(((.4124564, .3575761, .1804375), (.2126729, .7151522, .0721750), (.0193339, .1191920, .9503041)), dtype=np.float32)
     white = np.array((.95047, 1., 1.08883), dtype=np.float32)
@@ -93,7 +255,7 @@ class SkinRetoucher:
         cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 4
         self._workers = max(1, cpus - max(1, cpus // 4))
 
-    def _skin_masks(self, rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
+    def _skin_masks(self, rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray | None, float]:
         height, width = rgb.shape[:2]
         resized = np.asarray(Image.fromarray(rgb).resize((256, 256), Image.Resampling.BILINEAR), dtype=np.float32) / 255
         logits = self._segmenter.run(None, {self._segmenter_input: resized[None]})[0][0]
@@ -102,44 +264,48 @@ class SkinRetoucher:
         binary = Image.fromarray(selected).filter(ImageFilter.MaxFilter(5)).filter(ImageFilter.MinFilter(5))
         binary = binary.resize((width, height), Image.Resampling.NEAREST)
         skin = np.asarray(binary.filter(ImageFilter.GaussianBlur(max(1.4, min(height, width) * .0028))), dtype=np.uint8)
-        face_skin, face_coverage, face_reference, face_area = self._facial_masks(rgb)
+        face_skin, face_coverage, face_area, face_scale = self._facial_masks(rgb)
         if face_skin is not None and face_coverage is not None:
             # Сегментатор человека не различает детали лица. Внутри рамки лица его
             # ответ заменяется семантической маской, иначе губы и белки глаз иногда
             # попадают в ретушь даже при идеальных лендмарках.
             coverage = face_coverage.astype(np.float32) / 255.0
             skin = np.clip(skin.astype(np.float32) * (1.0 - coverage) + face_skin.astype(np.float32), 0, 255).astype(np.uint8)
-        return skin, face_reference, face_area
+        if face_scale <= 0:
+            # Без найденного лица (кроп 100 %, спина, руки) остаётся оценка по кадру.
+            face_scale = min(height, width) * .38
+        return skin, face_area, face_scale
 
     def mask(self, rgb: np.ndarray) -> np.ndarray:
         """Возвращает маску кожи для внешних проверок без деталей лица."""
         return self._skin_masks(rgb)[0]
 
-    def _facial_masks(self, rgb: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, np.ndarray | None]:
-        """Уточняет кожу лица по классам и строит зоны для оценки её цвета.
+    def _facial_masks(self, rgb: np.ndarray) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, float]:
+        """Уточняет кожу лица по классам и сообщает характерный размер лица.
 
         Лендмарки/детектор используются только для быстрого поиска и кадрирования
         лиц. Принадлежность пикселя коже определяет отдельная модель парсинга:
         геометрические контуры не способны надёжно исключить помаду, глаза и волосы.
+        Размер лица нужен выравниванию тона: радиусы фильтров задаются в долях
+        лица, иначе на портрете и ростовом кадре сглаживаются разные детали.
         """
         try:
             from .face_analysis import _detect
 
             boxes, _landmarks, _scores = _detect(Image.fromarray(rgb), threshold=.55)
         except Exception:
-            return None, None, None, None
+            return None, None, None, 0.0
         if not len(boxes):
-            return None, None, None, None
+            return None, None, None, 0.0
         width, height = rgb.shape[1], rgb.shape[0]
         parsed_skin = Image.new("L", (width, height), 0)
         coverage = Image.new("L", (width, height), 0)
-        reference = Image.new("L", (rgb.shape[1], rgb.shape[0]), 0)
         face_area = Image.new("L", (rgb.shape[1], rgb.shape[0]), 0)
         skin_draw = ImageDraw.Draw(parsed_skin)
         coverage_draw = ImageDraw.Draw(coverage)
-        reference_draw = ImageDraw.Draw(reference)
         face_draw = ImageDraw.Draw(face_area)
         image = Image.fromarray(rgb, "RGB")
+        widths: list[float] = []
         for box in boxes:
             left, top, right, bottom = (float(value) for value in box[:4])
             face_width, face_height = right - left, bottom - top
@@ -161,30 +327,19 @@ class SkinRetoucher:
             skin_draw.bitmap((x0, y0), restored, fill=255)
             coverage_draw.rectangle((x0, y0, x1, y1), fill=255)
             face_draw.bitmap((x0, y0), restored, fill=255)
-
-            # Щёки и верх лба являются лишь фильтром выбора образца. Их всё равно
-            # пересекаем с семантической кожей, чтобы эталон не включал волосы/глаза.
-            center_x = (left + right) / 2.0
-            for sign in (-1.0, 1.0):
-                cx = center_x + sign * face_width * .22
-                cy = top + face_height * .58
-                reference_draw.ellipse((cx - face_width * .17, cy - face_height * .17, cx + face_width * .17, cy + face_height * .17), fill=255)
-            reference_draw.ellipse((center_x - face_width * .24, top + face_height * .08, center_x + face_width * .24, top + face_height * .30), fill=255)
-        semantic_skin = np.asarray(parsed_skin, dtype=np.uint8)
-        raw_reference = np.asarray(reference, dtype=np.uint8)
-        reference = Image.fromarray(np.minimum(semantic_skin, raw_reference), "L")
+            widths.append(face_width)
         # Мягкий край маски не даёт заметного контура на стыке лица и тела.
         softness = max(2.0, min(rgb.shape[:2]) * .004)
         return (
             np.asarray(parsed_skin.filter(ImageFilter.GaussianBlur(softness)), dtype=np.uint8),
             np.asarray(coverage.filter(ImageFilter.GaussianBlur(softness)), dtype=np.uint8),
-            np.asarray(reference.filter(ImageFilter.GaussianBlur(softness)), dtype=np.float32) / 255.0,
             np.asarray(face_area.filter(ImageFilter.GaussianBlur(softness)), dtype=np.float32) / 255.0,
+            float(np.median(widths)) if widths else 0.0,
         )
 
     @staticmethod
     def _regions(mask: np.ndarray, margin: int) -> list[tuple[int, int, int, int]]:
-        """Ограничивает дорогие Lab-операции расширенными областями кожи."""
+        """Ограничивает дорогие цветовые операции расширенными областями кожи."""
         height, width = mask.shape
         small = np.asarray(Image.fromarray(mask).resize((min(256, width), min(256, height)), Image.Resampling.BOX)) >= 8
         ys, xs = np.nonzero(small)
@@ -195,12 +350,6 @@ class SkinRetoucher:
         x1 = min(width, math.ceil((xs.max() + 1) * width / small.shape[1]) + margin)
         y1 = min(height, math.ceil((ys.max() + 1) * height / small.shape[0]) + margin)
         return [(x0, y0, x1, y1)]
-
-    @staticmethod
-    def _weighted_mean(channel: np.ndarray, weight: np.ndarray, radius: float) -> np.ndarray:
-        """Возвращает цвет кожи без влияния фона за границей маски."""
-        soft = _blur(weight * 255, radius) / 255
-        return _blur(channel * weight, radius) / np.maximum(soft, 1e-4)
 
     def _neural(self, rgb: np.ndarray, mask: np.ndarray) -> np.ndarray:
         tile, core, border = 278, 214, 32
@@ -224,77 +373,35 @@ class SkinRetoucher:
         return result[:height, :width]
 
     def process(self, rgb: np.ndarray, settings: RetouchSettings) -> np.ndarray:
-        mask, face_reference, face_area = self._skin_masks(rgb)
+        mask, face_area, face_scale = self._skin_masks(rgb)
         if np.count_nonzero(mask) < 300:
             return rgb.copy()
         result = rgb.copy()
         tone = float(np.clip(settings.tone_strength, 0, 1))
         burn = float(np.clip(settings.dodge_burn, 0, 1))
         if tone or burn:
-            radius = max(16., min(rgb.shape[:2]) * .032)
-            zone_radius = max(radius * 3.2, min(rgb.shape[:2]) * .15)
-            regions = self._regions(mask, math.ceil(zone_radius * 3))
+            # Запас вокруг кожи берётся по самому широкому фильтру выравнивания.
+            regions = self._regions(mask, math.ceil(max(face_scale * .42, 16.0) * 3))
             if regions:
                 x0, y0, x1, y1 = regions[0]
                 weights = mask[y0:y1, x0:x1].astype(np.float32) / 255
-                lab = _rgb_to_lab(result[y0:y1, x0:x1])
-                valid = weights > .35
-                if tone and np.any(valid):
-                    # Корректируем вектор цветности Lab целиком, а не a и b по
-                    # отдельности. Прямое притягивание двух каналов к среднему
-                    # превращает здоровую тёплую кожу в грязный серо-зелёный цвет.
-                    # Здесь сохраняется исходная насыщенность и меняется лишь
-                    # аномальное направление цвета; красный нос дополнительно
-                    # теряет только избыток насыщенности относительно окружения.
-                    zonal_mix = .72
-                    channels = lab[..., 1:3] - 128.0
-                    local = np.stack((
-                        self._weighted_mean(channels[..., 0], weights, radius),
-                        self._weighted_mean(channels[..., 1], weights, radius),
-                    ), axis=-1)
-                    zonal = np.stack((
-                        self._weighted_mean(channels[..., 0], weights, zone_radius),
-                        self._weighted_mean(channels[..., 1], weights, zone_radius),
-                    ), axis=-1)
-                    reference = local * (1.0 - zonal_mix) + zonal * zonal_mix
-                    if face_reference is not None and face_area is not None:
-                        stable = (
-                            (face_reference > .55)
-                            & (weights > .35)
-                            & (lab[..., 0] > 88)
-                            & (lab[..., 0] < 220)
-                        )
-                        if np.count_nonzero(stable) > 80:
-                            face_tone = np.median(channels[stable], axis=0)
-                            # Лицо получает более надёжный эталон щёк/лба.
-                            # Руки и шея сохраняют свой локальный свет: для них
-                            # направление лица лишь очень слабая подсказка.
-                            influence = face_area[..., None] * .65 + (1.0 - face_area[..., None]) * .10
-                            reference = reference * (1.0 - influence) + face_tone * influence
-                    chroma = np.linalg.norm(channels, axis=-1)
-                    reference_chroma = np.linalg.norm(reference, axis=-1)
-                    unit = reference / np.maximum(reference_chroma[..., None], 1e-4)
-                    cosine = np.sum(channels * unit, axis=-1) / np.maximum(chroma, 1e-4)
-                    hue_outlier = np.clip((1.0 - cosine - .018) / .18, 0.0, 1.0)
-                    excess_chroma = np.clip((chroma - reference_chroma - 4.0) / 16.0, 0.0, 1.0)
-                    target_chroma = chroma - np.maximum(chroma - reference_chroma - 4.0, 0.0) * .90
-                    target = unit * target_chroma[..., None]
-                    shadow_gate = np.clip((lab[..., 0] - 72.0) / 62.0, 0.0, 1.0)
-                    shadow_gate = shadow_gate * shadow_gate * (3.0 - 2.0 * shadow_gate)
-                    # Нелинейная шкала оставляет середину управляемой, но даёт
-                    # честный рабочий максимум: 100 % заметно сильнее 50 %.
-                    tone_gain = tone * (.50 + 1.50 * tone)
-                    alpha = np.clip(weights * shadow_gate * tone_gain * np.maximum(hue_outlier, excess_chroma), 0.0, 1.0)
-                    channels += (target - channels) * alpha[..., None]
-                    lab[..., 1:3] = channels + 128.0
+                if tone:
+                    result[y0:y1, x0:x1] = even_skin_tone(
+                        result[y0:y1, x0:x1],
+                        weights,
+                        tone,
+                        face_scale,
+                        None if face_area is None else face_area[y0:y1, x0:x1],
+                    )
                 if burn:
+                    lab = _rgb_to_lab(result[y0:y1, x0:x1])
                     light = lab[..., 0]
                     local_weight = _blur(weights * 255, max(3.5, min(lab.shape[:2]) * .006)) / 255
                     local = _blur(light * weights, max(3.5, min(lab.shape[:2]) * .006)) / np.maximum(local_weight, 1e-4)
                     detail = light - local
                     gate = np.clip((np.abs(detail) - 2.7) / 9, 0, 1) * (np.abs(detail) < 18) * (light > 52)
                     light += np.clip(-detail * .62, -7, 7) * gate * weights * burn
-                result[y0:y1, x0:x1] = _lab_to_rgb(lab)
+                    result[y0:y1, x0:x1] = _lab_to_rgb(lab)
         if settings.neural_retouch:
             cleaned = self._neural(result, mask)
             alpha = _blur(mask.astype(np.float32), 1.3)[:, :, None] / 255 * float(np.clip(settings.neural_strength, 0, 1))
