@@ -9,13 +9,15 @@ ONNX-модели здесь не нужны: `even_skin_tone` работает 
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
+from rawww import retouch_pipeline
 from rawww.retouch_pipeline import _pigments, _smooth, even_skin_tone
 
 
-def _skin(size: int = 320, blotches: bool = True) -> np.ndarray:
+def _skin(size: int = 320, blotches: bool = True, zone: bool = False) -> np.ndarray:
     """Синтетическая кожа: светотень, поры и пятна гемоглобина.
 
     Изображение строится прямо из карт пигментов, поэтому у теста есть
@@ -31,6 +33,11 @@ def _skin(size: int = 320, blotches: bool = True) -> np.ndarray:
         for center in ((.3, .3), (.7, .35), (.45, .65), (.75, .75)):
             cx, cy = center[0] * size, center[1] * size
             hemoglobin += .28 * np.exp(-(((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * (size * .06) ** 2)))
+    if zone:
+        # Красный нос: одна большая зона целиком в низких частотах.
+        hemoglobin += .33 * np.exp(
+            -(((xx - size * .5) ** 2 + (yy - size * .5) ** 2) / (2 * (size * .17) ** 2))
+        )
     shading = .35 - .25 * np.exp(-(((xx - size * .4) ** 2 + (yy - size * .5) ** 2) / (2 * (size * .5) ** 2)))
     density = np.stack((melanin, hemoglobin, shading), axis=-1) @ _PIGMENT_BASIS.T
     density += rng.normal(0, .012, (size, size, 1)).astype(np.float32)
@@ -87,8 +94,11 @@ class EvenSkinToneTest(unittest.TestCase):
         source, corrected = self._hemoglobin(self.rgb), self._hemoglobin(result)
         texture = lambda values: float((values - _smooth(values, 2)).std())
         self.assertAlmostEqual(texture(corrected), texture(source), delta=texture(source) * .5)
-        light = lambda rgb: _smooth(_pigments(rgb)[..., 2], 40)
-        self.assertLess(float(np.abs(light(result) - light(self.rgb)).max()), .02)
+        # Светотень проверяется по видимой светлоте, а не по каналу
+        # освещённости: именно он берёт на себя возврат яркости после правки
+        # пигментов, чтобы в кадре светлота осталась прежней.
+        light = lambda rgb: _smooth(rgb.astype(np.float32) @ retouch_pipeline._LUMA, 40)
+        self.assertLess(float(np.abs(light(result) - light(self.rgb)).max()), 2.0)
 
     def test_mask_limits_correction(self) -> None:
         weights = self.weights.copy()
@@ -102,6 +112,26 @@ class EvenSkinToneTest(unittest.TestCase):
         face = even_skin_tone(self.rgb, self.weights, 1.0, self.face_scale, np.ones(self.rgb.shape[:2], np.float32))
         difference = lambda rgb: float(np.abs(rgb.astype(np.float32) - self.rgb).mean())
         self.assertLess(difference(body), difference(face))
+
+    def test_zonal_redness_is_removed(self) -> None:
+        """Краснота размером с нос лежит ниже полосы пятен и требует зонального шага."""
+        rgb = _skin(zone=True)
+        size = rgb.shape[0]
+        centre = (slice(int(size * .42), int(size * .58)),) * 2
+        edge = (slice(0, int(size * .12)),) * 2
+        excess = lambda image: float(self._hemoglobin(image)[centre].mean() - self._hemoglobin(image)[edge].mean())
+        result = even_skin_tone(rgb, self.weights, 1.0, self.face_scale)
+        self.assertLess(excess(result), excess(rgb) * .5)
+
+    def test_lightness_is_almost_untouched(self) -> None:
+        """Тон отвечает за цвет: светлота обязана остаться почти исходной."""
+        rgb = _skin(zone=True)
+        luma = lambda image: image.astype(np.float32) @ retouch_pipeline._LUMA
+        shift = lambda image: float(np.abs(luma(image) - luma(rgb)).mean())
+        kept = shift(even_skin_tone(rgb, self.weights, 1.0, self.face_scale))
+        with mock.patch.object(retouch_pipeline, "_LUMA_SHARE", np.float32(1.0)):
+            free = shift(even_skin_tone(rgb, self.weights, 1.0, self.face_scale))
+        self.assertLess(kept, free * .4)
 
     def test_black_pixels_are_left_alone(self) -> None:
         rgb = self.rgb.copy()

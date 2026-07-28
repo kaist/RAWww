@@ -45,6 +45,14 @@ _SHADING = np.array((1., 1., 1.), dtype=np.float32) / math.sqrt(3.0)
 _PIGMENT_BASIS = np.stack((_MELANIN, _HEMOGLOBIN, _SHADING), axis=1).astype(np.float32)
 _PIGMENT_SPLIT = np.linalg.inv(_PIGMENT_BASIS).astype(np.float32)
 _DENSITY_FLOOR = np.float32(1e-6)
+_LUMA = np.array((.2126729, .7151522, .0721750), dtype=np.float32)
+# Доля яркостного изменения, которую разрешается оставить. Выравнивание
+# тона отвечает за цвет, а светотенью занимается второй ползунок: если тон
+# меняет светлоту заметно, кожа сразу выглядит замыленной. Небольшая доля
+# всё же остаётся, иначе тёмно-красное пятно так и осталось бы тёмным.
+_LUMA_SHARE = np.float32(.2)
+# Как сильно гасится зональный избыток гемоглобина против медианы кожи.
+_ZONAL_SHARE = np.float32(.7)
 
 
 def _box_pass(values: np.ndarray, radius: int) -> np.ndarray:
@@ -115,12 +123,14 @@ def even_skin_tone(
     гемоглобин и освещённость. Пятнистость (краснота, сосуды, пигментные
     неровности) живёт в средних пространственных частотах карт пигментов, тогда
     как поры и шум — в высоких, а светотень и анатомия — в низких. Поэтому
-    вычитается только полосовой остаток карт пигментов: текстура и объём лица
-    остаются нетронутыми, а канал освещённости не меняется вовсе.
+    вычитается полосовой остаток карт пигментов: текстура и объём лица
+    остаются нетронутыми, а канал освещённости не меняется вовсе. Для
+    гемоглобина к полосе добавляется зональный избыток над медианой кожи —
+    иначе краснота размером с нос или скулу целиком лежит в низких частотах и
+    не правится вообще.
 
-    Работает и с цветом, и с яркостью: пятно гемоглобина темнее и краснее
-    окружения одновременно, а прежняя коррекция только направления цветности
-    такое пятно почти не замечала.
+    Результат приводится к исходной светлоте: тон отвечает за цвет, светотенью
+    занимается отдельный ползунок dodge/burn.
 
     `weights` — маска кожи 0..1, `face_scale` — характерный размер лица в
     пикселях (задаёт радиусы), `face_weight` — доля лица в пикселе: руки, шея и
@@ -150,6 +160,14 @@ def even_skin_tone(
         fine = _masked_smooth(channel, small_weight, fine_sigma)
         base = _masked_smooth(channel, small_weight, base_sigma)
         band = fine - base
+        if index == 1:
+            # Красный нос или скулы — пятно размером с часть лица: оно целиком
+            # сидит в низких частотах и полосовой остаток его не видит. Поэтому
+            # зональный избыток гемоглобина считается от медианы по всей коже и
+            # добавляется к полосе. Гасится только избыток: бледные зоны вроде
+            # лба подкрашивать нельзя, иначе уйдёт естественный рельеф лица.
+            level = float(np.median(channel[confident]))
+            band = band + _ZONAL_SHARE * np.maximum(base - level, 0.0)
         # Мягкое ограничение выбросов: протечка маски на волосы или тень от
         # очков не должна оставить пятно-ореол. Порог считается отдельно для
         # меланина и гемоглобина: их масштабы отличаются на порядок. Перцентиль
@@ -172,6 +190,15 @@ def even_skin_tone(
     scales = np.where(residual > 0, np.float32(1.0), np.float32(.72))
     scales[..., 0] *= np.float32(.55)
     residual *= scales * gain
+    if face_weight is not None:
+        # Граница разбора лица жёсткая и обрывается по рамке детектора, а
+        # разная сила на лице и теле сделала бы из неё видимый прямоугольный
+        # шов посередине щеки. Поэтому доля лица размазывается на четверть
+        # лица и входит в карту коррекции ещё до увеличения.
+        share = _smooth(_resize_map(face_weight, small, Image.Resampling.BOX), max(2.0, face_scale * small_scale * .25))
+        residual *= (.55 + .45 * np.clip(share, 0.0, 1.0))[..., None]
+    else:
+        residual *= np.float32(.85)
     correction = np.stack(
         [_resize_map(residual[..., index], (width, height), Image.Resampling.BICUBIC) for index in (0, 1)],
         axis=-1,
@@ -179,7 +206,6 @@ def even_skin_tone(
 
     # Применение идёт полосами: на кадре в десятки мегапикселей полноразмерные
     # промежуточные float-массивы стоят больше гигабайта памяти воркера.
-    luma = np.array((.2126729, .7151522, .0721750), dtype=np.float32)
     result = np.empty(rgb.shape, dtype=np.uint8)
     for y in range(0, height, 256):
         rows = slice(y, y + 256)
@@ -187,12 +213,17 @@ def even_skin_tone(
         pigments = (-np.log(linear)) @ _PIGMENT_SPLIT.T
         # Около чёрного и в выбитых бликах плотность недостоверна: там любая
         # правка даёт цветной шум, а не ровный тон.
-        luminance = linear @ luma
+        luminance = linear @ _LUMA
         gate = np.clip((luminance - .004) / .03, 0.0, 1.0) * np.clip((.995 - luminance) / .06, 0.0, 1.0)
         alpha = weights[rows] * gate
-        alpha = alpha * (.55 + .45 * face_weight[rows]) if face_weight is not None else alpha * .85
         pigments[..., 0:2] -= correction[rows] * alpha[..., None]
-        result[rows] = np.clip(_linear_to_srgb(np.exp(-(pigments @ _PIGMENT_BASIS.T))) * 255.0 + .5, 0, 255).astype(np.uint8)
+        corrected = np.exp(-(pigments @ _PIGMENT_BASIS.T))
+        # Коррекция возвращается к исходной светлоте: меняется почти только
+        # цветность, а светотень и объём остаются как в кадре. Нетронутые
+        # пиксели при этом получают множитель ровно 1.
+        target = luminance + _LUMA_SHARE * ((corrected @ _LUMA) - luminance)
+        corrected *= (target / np.maximum(corrected @ _LUMA, 1e-5))[..., None]
+        result[rows] = np.clip(_linear_to_srgb(corrected) * 255.0 + .5, 0, 255).astype(np.uint8)
     return result
 
 
@@ -320,9 +351,12 @@ class SkinRetoucher:
             values = (values - np.array((.485, .456, .406), dtype=np.float32)) / np.array((.229, .224, .225), dtype=np.float32)
             logits = self._face_parser.run(None, {self._face_parser_input: values.transpose(2, 0, 1)[None]})[0][0]
             labels = np.argmax(logits, axis=0).astype(np.uint8)
-            # 1 — кожа, 14 и 15 — шея. Все остальные классы (включая губы,
-            # глаза, брови, волосы и зубы) исключаются до смешивания результата.
-            crop_skin = np.where(np.isin(labels, (1, 14, 15)), 255, 0).astype(np.uint8)
+            # 1 — кожа, 7 и 8 — уши, 10 — нос, 14 — шея. Нос и уши модель
+            # выделяет отдельными классами, и без них краснота носа оставалась
+            # нетронутой — ровно там, где она заметнее всего. Класс 15 — это
+            # ожерелье, а не шея. Губы, глаза, брови, волосы, зубы и одежда
+            # по-прежнему исключаются до смешивания результата.
+            crop_skin = np.where(np.isin(labels, (1, 7, 8, 10, 14)), 255, 0).astype(np.uint8)
             restored = Image.fromarray(crop_skin).resize((x1 - x0, y1 - y0), Image.Resampling.NEAREST)
             skin_draw.bitmap((x0, y0), restored, fill=255)
             coverage_draw.rectangle((x0, y0, x1, y1), fill=255)
