@@ -353,7 +353,7 @@ class FacialMaskTest(unittest.TestCase):
         retoucher._face_parser_input = "input"
         rgb = np.full((size, size, 3), 190, dtype=np.uint8)
         with mock.patch("rawww.face_analysis._detect", return_value=(np.array([[0.0, 0.0, size, size]]), None, None)):
-            skin, _coverage, _area, _scale = retoucher._facial_masks(rgb, (size, size))
+            skin, _coverage, _area, _scale, _faces = retoucher._facial_masks(rgb, (size, size))
 
         weights = skin.astype(np.float32) / 255
         self.assertGreater(weights[labels == 1].mean(), .8, "кожа обязана остаться в маске")
@@ -361,6 +361,41 @@ class FacialMaskTest(unittest.TestCase):
             values = weights[labels == label]
             self.assertLess(values.max(), .25, f"{name}: маска наползает на запретный класс")
             self.assertLess(values.mean(), .05, f"{name}: слишком большой средний вес")
+
+
+class PerFaceToneTest(unittest.TestCase):
+    """Групповой портрет: тон каждого лица считается со своими радиусами."""
+
+    def _frame(self) -> tuple[np.ndarray, np.ndarray]:
+        rng = np.random.default_rng(11)
+        rgb = np.clip(rng.normal((196, 148, 128), 9, (240, 320, 3)), 0, 255).astype(np.uint8)
+        weights = np.ones((240, 320), dtype=np.float32)
+        return rgb, weights
+
+    def test_two_faces_recompute_their_residuals(self) -> None:
+        rgb, weights = self._frame()
+        shared = retouch_pipeline.even_skin_tone(rgb, weights, .8, 90.0)
+        split = retouch_pipeline.even_skin_tone(
+            rgb, weights, .8, 90.0, None,
+            ((20.0, 30.0, 140.0, 170.0), (200.0, 60.0, 240.0, 110.0)),
+        )
+        self.assertFalse(np.array_equal(shared, split), "радиусы мелкого лица обязаны отличаться")
+
+    def test_single_face_keeps_shared_pass(self) -> None:
+        """Одно лицо и так задаёт медианные радиусы: пересчёт не нужен."""
+        rgb, weights = self._frame()
+        shared = retouch_pipeline.even_skin_tone(rgb, weights, .8, 90.0)
+        single = retouch_pipeline.even_skin_tone(
+            rgb, weights, .8, 90.0, None, ((20.0, 30.0, 140.0, 170.0),),
+        )
+        self.assertTrue(np.array_equal(shared, single))
+
+    def test_crop_masks_shift_faces_into_crop(self) -> None:
+        masks = retouch_pipeline.SkinMasks(
+            np.full((100, 100), 255, dtype=np.uint8), None, 40.0, ((30.0, 40.0, 70.0, 90.0),),
+        )
+        cropped = retouch_pipeline.crop_masks(masks, (20.0, 20.0, 70.0, 70.0), (100, 100))
+        self.assertEqual(cropped.faces, ((20.0, 40.0, 100.0, 140.0),))
 
 
 class NeuralRegionTest(unittest.TestCase):

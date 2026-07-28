@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
-from .imaging import RAW_EXTENSIONS, decode_original_pixels, decode_pixels
+from .imaging import RAW_EXTENSIONS, _rawpy, decode_original_pixels, decode_pixels
 from .retouch_pipeline import MASK_SIDE, RetouchSettings, SkinMasks, SkinRetoucher, crop_masks
 from .runtime_paths import data_path
 
@@ -240,36 +240,71 @@ def _memory_gb() -> float:
         return 4.0
 
 
-def _frame_workers(cpus: int | None = None, neural: bool = True, memory_gb: float | None = None) -> int:
+def _batch_megapixels(tasks: list[dict]) -> float:
+    """Крупнейший кадр пакета в мегапикселях по заголовкам файлов.
+
+    Размер читается без декодирования: Pillow берёт его из заголовка, а для RAW
+    его сообщает libraw по оглавлению файла. Кадры в пакете бывают разного
+    размера, а правило памяти должно исходить из худшего, а не из среднего.
+    """
+    largest = 0.0
+    for task in tasks:
+        path = Path(task["source"])
+        try:
+            if path.suffix.lower() in RAW_EXTENSIONS:
+                with _rawpy().imread(str(path)) as raw:
+                    width, height = raw.sizes.width, raw.sizes.height
+            else:
+                with Image.open(path) as opened:
+                    width, height = opened.size
+        except Exception:
+            # Битый или недоступный файл: об этом сообщит сама обработка кадра.
+            continue
+        max_side = task.get("max_side")
+        if max_side:
+            share = min(1.0, float(max_side) / max(width, height, 1))
+            width, height = width * share, height * share
+        largest = max(largest, width * height / 1e6)
+    return largest or 24.0
+
+
+def _frame_workers(
+    cpus: int | None = None,
+    neural: bool = True,
+    memory_gb: float | None = None,
+    megapixels: float = 24.0,
+) -> int:
     """Сколько кадров пакета считается одновременно.
 
     Нейроретушь занимает все ядра плитками, а декодирование, матирование,
     выравнивание тона, D&B, LUT и запись JPEG живут в одном потоке и на
     многоядерной машине занимают одно ядро из десятка. Соседние кадры занимают
-    эти простои: пока один считает цвет, другой кормит общий пул плиток.
+    эти простои: пока один считает цвет, другой кормит общий пул плиток. Без
+    нейроретуши ни один этап по ядрам не растёт, и единственный способ занять
+    процессор целиком — считать кадров столько, сколько ядер.
 
-    С включённой нейроретушью кадров в работе держится мало: ядра и так заняты
-    плитками, а узкое место — память: каждый кадр держит несколько
-    float32-копий сорокамегапиксельного RAW. Без нейроретуши ни один этап по
-    ядрам не растёт, и единственный способ занять процессор целиком — считать
-    кадров столько, сколько ядер.
-
-    Потолок ставит память, а не ядра: замер даёт около 300 МБ на кадр в работе
-    при шести мегапикселях, то есть порядка двух гигабайт на сорока. Поэтому
-    берётся по кадру на каждые три гигабайта ОЗУ, и не больше шести: дальше
-    выигрыш съедает подкачка.
+    Потолок ставит память, а не ядра, и мерится она мегапикселями конкретного
+    пакета, а не абстрактным «кадром»: замер даёт около 300 МБ на кадр в
+    работе при шести мегапикселях — около 60 МБ на мегапиксель. Два гигабайта
+    остаются моделям, системе и интерфейсу. Больше шести кадров не берётся
+    никогда: дальше выигрыш съедают переключения и подкачка.
     """
     if cpus is None:
         cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 4
+    if memory_gb is None:
+        memory_gb = _memory_gb()
+    per_frame_gb = max(4.0, megapixels) * .06
+    by_memory = int(max(memory_gb - 2.0, per_frame_gb) / per_frame_gb)
     if not neural:
-        if memory_gb is None:
-            memory_gb = _memory_gb()
-        return max(1, min(6, cpus, int(memory_gb // 3)))
+        return max(1, min(6, cpus, by_memory))
     if cpus < 4:
         # Двухядерной машине параллельные кадры дают только расход памяти:
         # плитки нейроретуши и так выбирают всё, что есть.
         return 1
-    return 3 if cpus >= 12 else 2
+    # С нейроретушью параллельные кадры закрывают только простои
+    # однопоточных этапов, поэтому их число растёт с ядрами медленно.
+    by_cpu = 2 if cpus < 12 else min(6, cpus // 4)
+    return max(1, min(6, by_cpu, by_memory))
 
 
 def _batch(
@@ -322,7 +357,10 @@ def _batch(
             with counter:
                 postponed.append(task)
 
-    workers = _frame_workers(neural=bool(settings.neural_retouch and settings.neural_strength > 0))
+    workers = _frame_workers(
+        neural=bool(settings.neural_retouch and settings.neural_strength > 0),
+        megapixels=_batch_megapixels(tasks),
+    )
     stopped = False
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="retouch-frame") as executor:
         pending: set[Future] = set()
