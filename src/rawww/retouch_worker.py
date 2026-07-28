@@ -25,7 +25,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from .imaging import RAW_EXTENSIONS, decode_original_pixels, decode_pixels
-from .retouch_pipeline import RetouchSettings, SkinMasks, SkinRetoucher
+from .retouch_pipeline import MASK_SIDE, RetouchSettings, SkinMasks, SkinRetoucher, crop_masks
 from .runtime_paths import data_path
 
 
@@ -97,6 +97,7 @@ class _Preview:
     def __init__(self, retoucher: SkinRetoucher) -> None:
         self._retoucher = retoucher
         self._frame: _Frame | None = None
+        self._whole: tuple[str, SkinMasks, tuple[int, int]] | None = None
 
     def run(self, task: dict, settings: RetouchSettings, *, stale) -> None:
         source = Path(task["source"])
@@ -108,7 +109,7 @@ class _Preview:
             frame = _Frame(key, rgb, origin, full_size)
             self._frame = frame
         if frame.masks is None:
-            frame.masks = self._retoucher.skin_masks(frame.rgb)
+            frame.masks = self._masks(source, frame, region)
         if stale():
             return
         base = self._retoucher.retouch_skin(frame.rgb, replace(settings, neural_retouch=False), frame.masks)
@@ -121,6 +122,32 @@ class _Preview:
         # предпросмотр отличался бы от результата пакета порядком этапов.
         exact = self._retoucher.neural_retouch(base, frame.masks.skin, settings.neural_strength)
         self._send(frame, self._retoucher.finish(exact, settings), exact=True)
+
+    def _masks(self, source: Path, frame: _Frame, region: tuple[int, int, int, int] | None) -> SkinMasks:
+        """Даёт маски кадра, а для кропа 100 % — вырезку из масок целого снимка.
+
+        По кропу маски считать нельзя: лицо крупным планом не влезает в него
+        целиком, детектор молчит, парсинг лица не запускается и губы с глазами
+        остаются в маске. Маски целого снимка кэшируются на снимок, поэтому
+        прокрутка при 100 % не платит за сегментацию повторно.
+        """
+        if region is None:
+            return self._retoucher.skin_masks(frame.rgb)
+        cached = self._whole
+        if cached is None or cached[0] != str(source):
+            whole, _origin, _full = _read(source, MASK_SIDE)
+            cached = (str(source), self._retoucher.skin_masks(whole), (whole.shape[1], whole.shape[0]))
+            self._whole = cached
+        _key, masks, size = cached
+        share = (size[0] / frame.full_size[0], size[1] / frame.full_size[1])
+        left, top = frame.origin
+        box = (
+            left * share[0],
+            top * share[1],
+            (left + frame.rgb.shape[1]) * share[0],
+            (top + frame.rgb.shape[0]) * share[1],
+        )
+        return crop_masks(masks, box, (frame.rgb.shape[1], frame.rgb.shape[0]))
 
     def _send(self, frame: _Frame, result: np.ndarray, *, exact: bool) -> None:
         values = {
@@ -188,6 +215,9 @@ def main(argv: list[str] | None = None) -> int:
                     if newer is None:
                         closed = True
                         break
+                    # За брошенную задачу всё равно отчитываемся: интерфейс
+                    # считает ответы, и без этого спиннер висел бы до конца.
+                    _event("finished")
                     line = newer
                 job = json.loads(line.decode("utf-8"))
                 if retoucher is None:

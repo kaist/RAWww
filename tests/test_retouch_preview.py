@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import json
 import os
+from pathlib import Path
 import queue
 import unittest
 from contextlib import redirect_stdout
@@ -138,6 +139,33 @@ class _StubRetoucher:
         return rgb
 
 
+class RegionMaskTests(unittest.TestCase):
+    """При 100 % маски берутся у целого снимка, а не считаются по кропу."""
+
+    def setUp(self) -> None:
+        from rawww.retouch_worker import _Frame, _Preview
+
+        self.retoucher = _StubRetoucher()
+        self.preview = _Preview(self.retoucher)
+        # Кроп 400×300 из снимка 4000×3000, левый верхний угол (1200, 900).
+        self.frame = _Frame(("photo.jpg", None, (1200, 900, 400, 300)), np.zeros((300, 400, 3), np.uint8), (1200, 900), (4000, 3000))
+
+    def test_region_masks_come_from_the_whole_photo(self) -> None:
+        whole = np.zeros((1200, 1600, 3), np.uint8)
+        with mock.patch("rawww.retouch_worker._read", return_value=(whole, (0, 0), (4000, 3000))) as read:
+            masks = self.preview._masks(Path("photo.jpg"), self.frame, (1200, 900, 400, 300))
+            again = self.preview._masks(Path("photo.jpg"), self.frame, (1200, 900, 400, 300))
+
+        self.assertEqual(masks.skin.shape, (300, 400))
+        self.assertEqual(again.skin.shape, (300, 400))
+        # Целый снимок читается и сегментируется один раз на фото: прокрутка при
+        # 100 % не платит за сегментацию повторно.
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(self.retoucher.mask_calls, 1)
+        # Кроп увеличивает лицо в 2.5 раза относительно кадра масок 1600 px.
+        self.assertAlmostEqual(masks.face_scale, 100.0 * 400 / 160, places=3)
+
+
 class PreviewWorkerTests(unittest.TestCase):
     """Один процесс предпросмотра держит кадр и маски между задачами."""
 
@@ -195,6 +223,36 @@ class PreviewWorkerTests(unittest.TestCase):
 
 class WorkerStreamTests(unittest.TestCase):
     """Задача, пришедшая вместе с концом потока, обязана быть выполнена."""
+
+    def test_skipped_preview_is_still_reported(self) -> None:
+        """За схлопнутую задачу нужен ответ: по ним интерфейс гасит спиннер."""
+        from rawww import retouch_worker
+
+        jobs = [
+            {"settings": {"tone_strength": share}, "tasks": [{"source": "photo.jpg"}], "preview": True}
+            for share in (.1, .2, .3)
+        ]
+        incoming: queue.Queue = queue.Queue()
+        for job in jobs:
+            incoming.put(json.dumps(job).encode("utf-8"))
+        incoming.put(None)
+        served: list[dict] = []
+        capture = _Capture()
+
+        class _Stub:
+            def run(self, task: dict, settings: RetouchSettings, stale) -> None:
+                served.append(task)
+
+        with mock.patch.object(retouch_worker, "_jobs", side_effect=lambda: incoming), \
+             mock.patch.object(retouch_worker, "SkinRetoucher", return_value=object()), \
+             mock.patch.object(retouch_worker, "_Preview", return_value=_Stub()), \
+             redirect_stdout(capture):
+            retouch_worker.main(["--stdin"])
+
+        # Посчитана только последняя задача, но ответов ровно столько, сколько
+        # задач отправил интерфейс.
+        self.assertEqual(len(served), 1)
+        self.assertEqual([event.get("event") for event in capture.events()].count("finished"), len(jobs))
 
     def test_batch_survives_immediately_closed_channel(self) -> None:
         from rawww import retouch_worker

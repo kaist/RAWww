@@ -24,6 +24,9 @@ from .theme import _fomantic_icon
 from .widgets import SettingsCheckBox
 
 _FIELD_HEIGHT = 40
+# Задержка дребезга предпросмотра: ползунок успевает доехать, а воркер не
+# считает кадры, которые всё равно устареют.
+_PREVIEW_DELAY = 350
 
 
 class RetouchPreviewView(QGraphicsView):
@@ -239,6 +242,7 @@ class BatchRetouchDialog(QDialog):
         self._streams = {"preview": b"", "batch": b""}
         self._pending_previews = 0
         self._batch_running = False
+        self._sliders: list[QSlider] = []
         self._before_preview = QPixmap()
         self._after_preview = QPixmap()
         self._batch_started_at = 0.0
@@ -246,7 +250,7 @@ class BatchRetouchDialog(QDialog):
         self._loaded_region = QRectF()
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
-        self._preview_timer.setInterval(350)
+        self._preview_timer.setInterval(_PREVIEW_DELAY)
         self._preview_timer.timeout.connect(self._start_preview)
         self._region_timer = QTimer(self)
         self._region_timer.setSingleShot(True)
@@ -459,6 +463,7 @@ class BatchRetouchDialog(QDialog):
         slider.sliderReleased.connect(self._queue_exact_preview)
         slider.valueChanged.emit(slider.value())
         layout.addWidget(slider)
+        self._sliders.append(slider)
         return slider
 
     def _options(self) -> dict:
@@ -523,14 +528,22 @@ class BatchRetouchDialog(QDialog):
 
     def _queue_preview(self) -> None:
         if not self._batch_running:
-            self._preview_timer.start()
+            self._preview_timer.start(_PREVIEW_DELAY)
 
     def _queue_exact_preview(self) -> None:
+        # Отпущенный ползунок и выбор файла — законченное действие: ждать
+        # задержку дребезга нечего. Интервал задаётся явно, иначе короткий
+        # запуск остался бы интервалом таймера и для следующих запросов.
         if not self._batch_running:
             self._preview_timer.start(1)
 
     def _start_preview(self) -> None:
         if self._batch_running:
+            return
+        if any(slider.isSliderDown() for slider in self._sliders):
+            # Пока палец на ползунке, воркеру ничего не отдаём: расчёт
+            # всё равно устареет к следующему движению, а отпускание
+            # само запросит точный вариант.
             return
         region = None
         if not self._fit and self._source_size is not None:
@@ -542,19 +555,13 @@ class BatchRetouchDialog(QDialog):
             bottom = min(self._source_size[1], round(visible.bottom()) + margin)
             region = (x, y, max(1, right - x), max(1, bottom - y))
         max_side = None if region is not None else max(1080, max(self.preview.viewport().width(), self.preview.viewport().height()) * 2)
-        fast = any(slider.isSliderDown() for slider in (self.tone, self.matte, self.dodge, self.neural_strength))
         self.status.clear()
         self.preview.set_loading(True)
         task = {"source": str(self._paths[self._index]), "max_side": max_side}
         if region is not None:
             task["region"] = region
-        options = self._options()
-        if fast:
-            # Пока палец на ползунке, не тратим секунды на нейроретушь: точный
-            # вариант автоматически построится сразу после отпускания.
-            options["neural_retouch"] = False
         self._pending_previews += 1
-        self._send(self._ensure_preview_process(), {"settings": options, "tasks": [task], "preview": True})
+        self._send(self._ensure_preview_process(), {"settings": self._options(), "tasks": [task], "preview": True})
 
     def _ensure_preview_process(self) -> QProcess:
         """Держит один процесс предпросмотра: он кэширует кадр и маски кожи."""
@@ -659,8 +666,7 @@ class BatchRetouchDialog(QDialog):
             elif kind == "finished" and preview:
                 self._pending_previews = max(0, self._pending_previews - 1)
                 if not self._pending_previews:
-                    self.preview.set_loading(False)
-                    self.status.setText(_("Предпросмотр готов.") if self.preview.has_preview() else _("Не удалось подготовить предпросмотр."))
+                    self._preview_done()
 
     def _show_progress(self, event: dict) -> None:
         done, total = int(event["done"]), int(event["total"])
@@ -697,6 +703,16 @@ class BatchRetouchDialog(QDialog):
         self.preview.show_frame(self._after_preview, self._before_preview, origin, full_size)
         if not self._fit:
             self._loaded_region = QRectF(origin[0], origin[1], pixmap.width(), pixmap.height())
+        if event.get("exact") and not self._preview_timer.isActive():
+            # Точный кадр пришёл и новых запросов нет: считать ответы дальше
+            # незачем, иначе рассинхрон счётчика оставляет спиннер над готовым
+            # предпросмотром.
+            self._preview_done()
+
+    def _preview_done(self) -> None:
+        self._pending_previews = 0
+        self.preview.set_loading(False)
+        self.status.setText(_("Предпросмотр готов.") if self.preview.has_preview() else _("Не удалось подготовить предпросмотр."))
 
     def _finished(self, process: QProcess, preview: bool) -> None:
         if preview:
