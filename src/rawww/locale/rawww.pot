@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 03:15+0300\n"
+"POT-Creation-Date: 2026-07-28 10:28+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1589,27 +1589,49 @@ msgstr ""
 msgid "Удалить выбранный файл или папку"
 msgstr ""
 
-msgid ""
-"Модели запускаются в отдельном процессе и выгружаются после каждого "
-"предпросмотра и пакета."
+msgid "Модели работают в отдельном процессе и выгружаются вместе с окном."
 msgstr ""
 
-msgid "Выравнивание тона кожи"
+msgid "РЕТУШЬ КОЖИ"
 msgstr ""
 
-msgid "Матирование кожи"
+msgid "Выравнивание тона"
+msgstr ""
+
+msgid "Матирование"
 msgstr ""
 
 msgid "Dodge & Burn"
 msgstr ""
 
-msgid "Ретушь кожи"
+msgid "Нейроретушь"
 msgstr ""
 
-msgid "Сила ретуши кожи"
+msgid "ЦВЕТ"
 msgstr ""
 
-msgid "Папка результата"
+msgid "Яркость"
+msgstr ""
+
+msgid "Контраст"
+msgstr ""
+
+msgid "ТАБЛИЦА LUT"
+msgstr ""
+
+msgid "Наложить таблицу .cube"
+msgstr ""
+
+msgid "Файл не выбран"
+msgstr ""
+
+msgid "Выбрать таблицу .cube"
+msgstr ""
+
+msgid "Сила таблицы"
+msgstr ""
+
+msgid "СОХРАНИТЬ В ПАПКУ"
 msgstr ""
 
 #, python-brace-format
@@ -1622,14 +1644,19 @@ msgstr ""
 msgid "Следующая"
 msgstr ""
 
-msgid "Вписать"
+msgid "Пиксель в пиксель"
 msgstr ""
 
-msgid "До"
+msgid "Шторка сравнения: слева оригинал, справа результат"
 msgstr ""
 
-#, python-brace-format
-msgid "{current} из {total}: {name}"
+msgid "Вписать в окно"
+msgstr ""
+
+msgid "Таблицы LUT (*.cube)"
+msgstr ""
+
+msgid "Папка результата"
 msgstr ""
 
 msgid "Укажите папку результата."
@@ -1641,13 +1668,6 @@ msgstr ""
 msgid "Не удалось запустить воркер ретуши."
 msgstr ""
 
-msgid "готово"
-msgstr ""
-
-#, python-brace-format
-msgid "Ретушь: {done}/{total}"
-msgstr ""
-
 #, python-brace-format
 msgid "Ошибка ретуши: {error}"
 msgstr ""
@@ -1656,6 +1676,13 @@ msgid "Предпросмотр готов."
 msgstr ""
 
 msgid "Не удалось подготовить предпросмотр."
+msgstr ""
+
+msgid "готово"
+msgstr ""
+
+#, python-brace-format
+msgid "Ретушь: {done}/{total}"
 msgstr ""
 
 msgid "Пакетная ретушь завершена."
