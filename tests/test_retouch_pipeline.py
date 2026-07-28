@@ -334,6 +334,34 @@ class CubeLutTest(unittest.TestCase):
         self.assertLess(float(np.abs(result - expected).max()), 3)
 
 
+class FacialMaskTest(unittest.TestCase):
+    """Мягкий край маски не имеет права наползать на губы, глаза и брови."""
+
+    def test_guarded_classes_stay_outside_the_mask(self) -> None:
+        size = 512
+        labels = np.ones((size, size), dtype=np.int64)
+        # Губы в центре и глаз рядом: вокруг них кожа со всех сторон, поэтому
+        # именно здесь размытие маски и давало вес на запретных классах.
+        labels[300:340, 200:312] = 12
+        labels[180:210, 150:230] = 4
+        logits = np.zeros((19, size, size), dtype=np.float32)
+        np.put_along_axis(logits, labels[None], 10.0, axis=0)
+
+        retoucher = object.__new__(retouch_pipeline.SkinRetoucher)
+        retoucher._face_parser = mock.Mock(run=mock.Mock(return_value=[logits[None]]))
+        retoucher._face_parser_input = "input"
+        rgb = np.full((size, size, 3), 190, dtype=np.uint8)
+        with mock.patch("rawww.face_analysis._detect", return_value=(np.array([[0.0, 0.0, size, size]]), None, None)):
+            skin, _coverage, _area, _scale = retoucher._facial_masks(rgb, (size, size))
+
+        weights = skin.astype(np.float32) / 255
+        self.assertGreater(weights[labels == 1].mean(), .8, "кожа обязана остаться в маске")
+        for label, name in ((12, "губы"), (4, "глаз")):
+            values = weights[labels == label]
+            self.assertLess(values.max(), .25, f"{name}: маска наползает на запретный класс")
+            self.assertLess(values.mean(), .05, f"{name}: слишком большой средний вес")
+
+
 class PipelineOrderTest(unittest.TestCase):
     """Порядок этапов: кожа, затем цвет, затем таблица."""
 

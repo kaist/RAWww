@@ -186,7 +186,17 @@ _MATTE_FLOOR = np.float32(.45)
 # Длинная сторона рабочего холста масок кожи. Сегментатор отвечает сеткой 256,
 # парсинг лица — 512 пикселей, поэтому собирать и размывать маски на полном
 # кадре бессмысленно: результат тот же, а времени и памяти уходит в разы больше.
-_MASK_SIDE = 1600
+MASK_SIDE = 1600
+
+# Классы парсинга лица, которых ретушь не касается: брови (2, 3), глаза и очки
+# (4, 5, 6), серьги (9), рот с губами и зубами (11, 12, 13), ожерелье (15),
+# одежда (16), волосы и головной убор (17, 18).
+_GUARD_LABELS = (2, 3, 4, 5, 6, 9, 11, 12, 13, 15, 16, 17, 18)
+
+
+def _guard_dilation(softness: float) -> int:
+    """Нечётный размер окна расширения запретной зоны под радиус размытия кожи."""
+    return max(3, int(round(softness)) * 2 + 1)
 
 
 def _box_pass(values: np.ndarray, radius: int) -> np.ndarray:
@@ -222,6 +232,32 @@ def _masked_smooth(values: np.ndarray, weight: np.ndarray, sigma: float) -> np.n
 
 def _resize_map(values: np.ndarray, size: tuple[int, int], resample: Image.Resampling) -> np.ndarray:
     return np.asarray(Image.fromarray(values.astype(np.float32), "F").resize(size, resample), dtype=np.float32)
+
+
+def crop_masks(masks: SkinMasks, box: tuple[float, float, float, float], target: tuple[int, int]) -> SkinMasks:
+    """Переносит маски целого кадра на кроп предпросмотра.
+
+    При 100 % обрабатывается только видимый кусок, и считать по нему маски
+    нельзя: когда лицо не влезает в кроп целиком, детектор его не находит,
+    парсинг не запускается и в маске остаются губы с глазами. Поэтому маски
+    считаются по кадру целиком, а сюда приходит прямоугольник `box` в их
+    координатах и размер `target` кропа, к которому маски применят.
+    """
+    left, top, right, bottom = box
+    width = max(1e-3, right - left)
+    skin = np.asarray(
+        Image.fromarray(masks.skin, "L").resize(target, Image.Resampling.BILINEAR, box=box),
+        dtype=np.uint8,
+    )
+    face_area = None
+    if masks.face_area is not None:
+        face_area = np.asarray(
+            Image.fromarray(masks.face_area, "F").resize(target, Image.Resampling.BILINEAR, box=box),
+            dtype=np.float32,
+        )
+    # Размер лица задаёт радиусы фильтров, поэтому он пересчитывается в пиксели
+    # кропа: на увеличенном куске то же лицо занимает больше пикселей.
+    return SkinMasks(skin, face_area, masks.face_scale * target[0] / width)
 
 
 def _reduce_rgb(rgb: np.ndarray, size: tuple[int, int]) -> np.ndarray:
@@ -601,8 +637,8 @@ class SkinRetoucher:
 
     @staticmethod
     def _canvas(width: int, height: int) -> tuple[int, int]:
-        """Размер рабочего холста масок: длинная сторона не больше _MASK_SIDE."""
-        share = min(1.0, _MASK_SIDE / max(width, height))
+        """Размер рабочего холста масок: длинная сторона не больше MASK_SIDE."""
+        share = min(1.0, MASK_SIDE / max(width, height))
         return max(64, round(width * share)), max(64, round(height * share))
 
     def mask(self, rgb: np.ndarray) -> np.ndarray:
@@ -632,8 +668,10 @@ class SkinRetoucher:
         width, height = rgb.shape[1], rgb.shape[0]
         share = min(canvas[0] / width, canvas[1] / height)
         parsed_skin = Image.new("L", canvas, 0)
+        parsed_guard = Image.new("L", canvas, 0)
         coverage = Image.new("L", canvas, 0)
         skin_draw = ImageDraw.Draw(parsed_skin)
+        guard_draw = ImageDraw.Draw(parsed_guard)
         coverage_draw = ImageDraw.Draw(coverage)
         image = Image.fromarray(rgb, "RGB")
         widths: list[float] = []
@@ -657,15 +695,28 @@ class SkinRetoucher:
             # ожерелье, а не шея. Губы, глаза, брови, волосы, зубы и одежда
             # по-прежнему исключаются до смешивания результата.
             crop_skin = np.where(np.isin(labels, (1, 7, 8, 10, 14)), 255, 0).astype(np.uint8)
+            # Запретные классы держим отдельной маской, иначе мягкий край кожи
+            # наползает на них при размытии.
+            crop_guard = np.where(np.isin(labels, _GUARD_LABELS), 255, 0).astype(np.uint8)
             place = (round(x0 * share), round(y0 * share))
             box_size = (max(1, round(x1 * share) - place[0]), max(1, round(y1 * share) - place[1]))
             restored = Image.fromarray(crop_skin).resize(box_size, Image.Resampling.NEAREST)
             skin_draw.bitmap(place, restored, fill=255)
+            guard_draw.bitmap(place, Image.fromarray(crop_guard).resize(box_size, Image.Resampling.NEAREST), fill=255)
             coverage_draw.rectangle((place[0], place[1], place[0] + box_size[0], place[1] + box_size[1]), fill=255)
             widths.append(face_width)
         # Мягкий край маски не даёт заметного контура на стыке лица и тела.
         softness = max(2.0, min(canvas) * .004)
-        skin = np.asarray(parsed_skin.filter(ImageFilter.GaussianBlur(softness)), dtype=np.uint8)
+        # Размытие расползается на соседние пиксели, и вокруг губ, глаз и бровей
+        # кожа со всех сторон: без вычитания запретной зоны на ресницах и кромке
+        # губ оставалось до 0.75 веса. Запретная маска размывается тем же
+        # радиусом и заведомо перекрывает наплыв.
+        guarded = np.asarray(parsed_skin.filter(ImageFilter.GaussianBlur(softness)), dtype=np.float32)
+        guard = np.asarray(
+            parsed_guard.filter(ImageFilter.MaxFilter(_guard_dilation(softness))).filter(ImageFilter.GaussianBlur(softness)),
+            dtype=np.float32,
+        )
+        skin = np.clip(guarded * (1.0 - guard / 255.0), 0, 255).astype(np.uint8)
         return (
             skin,
             np.asarray(coverage.filter(ImageFilter.GaussianBlur(softness)), dtype=np.uint8),
