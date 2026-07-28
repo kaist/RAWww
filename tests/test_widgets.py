@@ -103,8 +103,8 @@ class ScopeButtonsTests(unittest.TestCase):
 
     def test_counts_and_scope_reach_the_signal(self) -> None:
         scope = ScopeButtons("Обработать", 12, 3, "batchResize")
-        self.assertEqual(scope.all_button.text(), "Обработать все (12)")
-        self.assertEqual(scope.selected_button.text(), "Обработать выделенные (3)")
+        self.assertEqual(scope.all_button.text(), "ОБРАБОТАТЬ ВСЕ (12)")
+        self.assertEqual(scope.selected_button.text(), "ОБРАБОТАТЬ ВЫДЕЛЕННЫЕ (3)")
         requested: list[bool] = []
         scope.startRequested.connect(requested.append)
 
