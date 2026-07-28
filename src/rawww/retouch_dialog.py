@@ -175,6 +175,7 @@ class BatchRetouchDialog(QDialog):
         layout.addWidget(hint)
 
         self.tone = self._slider(layout, _("Выравнивание тона кожи"), "retouch/tone_strength", 50)
+        self.matte = self._slider(layout, _("Матирование кожи"), "retouch/matte_strength", 0)
         self.dodge = self._slider(layout, _("Dodge & Burn"), "retouch/dodge_burn", 0)
         self.neural = SettingsCheckBox(_("Ретушь кожи"))
         self.neural.setChecked(self._settings.value("retouch/neural_retouch", True, bool))
@@ -262,6 +263,7 @@ class BatchRetouchDialog(QDialog):
     def _options(self) -> dict:
         values = {
             "tone_strength": self.tone.value() / 100,
+            "matte_strength": self.matte.value() / 100,
             "dodge_burn": self.dodge.value() / 100,
             "neural_retouch": self.neural.isChecked(),
             "neural_strength": self.neural_strength.value() / 100,
@@ -332,7 +334,7 @@ class BatchRetouchDialog(QDialog):
             bottom = min(self._source_size[1], round(visible.bottom()) + margin)
             region = (x, y, max(1, right - x), max(1, bottom - y))
         max_side = None if region is not None else max(1080, max(self.preview.viewport().width(), self.preview.viewport().height()) * 2)
-        fast = any(slider.isSliderDown() for slider in (self.tone, self.dodge, self.neural_strength))
+        fast = any(slider.isSliderDown() for slider in (self.tone, self.matte, self.dodge, self.neural_strength))
         self.status.clear()
         self.preview.set_loading(True)
         task = {"source": str(self._paths[self._index]), "max_side": max_side}

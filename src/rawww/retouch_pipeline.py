@@ -24,6 +24,7 @@ class RetouchSettings:
     """Параметры этапов ретуши, передаваемые воркеру как простые данные."""
 
     tone_strength: float = 0.50
+    matte_strength: float = 0.0
     dodge_burn: float = 0.0
     neural_retouch: bool = True
     neural_strength: float = 0.50
@@ -53,6 +54,16 @@ _LUMA = np.array((.2126729, .7151522, .0721750), dtype=np.float32)
 _LUMA_SHARE = np.float32(.2)
 # Как сильно гасится зональный избыток гемоглобина против медианы кожи.
 _ZONAL_SHARE = np.float32(.7)
+# Матирование. Радиус — доля лица, на которой ищется матовый тон кожи и
+# средний уровень блеска: он обязан быть заметно больше жирного пятна на лбу.
+_MATTE_RADIUS = .35
+# Радиус сглаживания карты блеска в долях лица: срезается только низкая
+# частота, поры и микроблёстки в неё не попадают.
+_MATTE_DETAIL = .03
+# Доля яркости пикселя, которую вообще разрешено считать блеском, и предел
+# затемнения: полностью гасить блик нельзя, иначе на его месте мёртвое пятно.
+_MATTE_CEILING = np.float32(.75)
+_MATTE_FLOOR = np.float32(.45)
 
 
 def _box_pass(values: np.ndarray, radius: int) -> np.ndarray:
@@ -224,6 +235,102 @@ def even_skin_tone(
         target = luminance + _LUMA_SHARE * ((corrected @ _LUMA) - luminance)
         corrected *= (target / np.maximum(corrected @ _LUMA, 1e-5))[..., None]
         result[rows] = np.clip(_linear_to_srgb(corrected) * 255.0 + .5, 0, 255).astype(np.uint8)
+    return result
+
+
+def matte_skin(rgb: np.ndarray, weights: np.ndarray, strength: float, face_scale: float) -> np.ndarray:
+    """Матирует кожу: гасит жирный блеск, сохраняя текстуру и цвет кожи.
+
+    Блик — это нейтральный свет поверх кожи, поэтому пиксель раскладывается по
+    двухцветной модели Клинкера: `наблюдаемое = диффузная кожа * её цвет +
+    блеск * (1,1,1)`. Цвет матовой кожи берётся с соседних пикселей темнее
+    локальной базы — на них блеска почти нет. Из полученной карты блеска
+    вычитается её же средний уровень по коже: ровный общий подсвет трогать
+    нельзя, иначе просто темнеет всё лицо, а гасить надо локальный избыток —
+    лоб, нос, скулы.
+
+    Дальше два шага. Светлота тушится умножением, а не вычитанием света: так
+    локальный контраст сохраняется и шум почти выбитой области не вылезает
+    вместе с блеском. Затем возвращается хроматичность: в блике красный канал
+    уходит в потолок, поэтому одно затемнение оставляет серое пятно — цвет
+    подтягивается к матовой коже рядом при неизменной светлоте.
+
+    `weights` — маска кожи 0..1, `face_scale` — характерный размер лица в
+    пикселях: он задаёт все радиусы, поэтому портрет и ростовой кадр
+    обрабатываются одинаково.
+    """
+    strength = float(np.clip(strength, 0.0, 1.0))
+    if strength <= 0.0:
+        return rgb.copy()
+    height, width = rgb.shape[:2]
+
+    # Блеск и цвет матовой кожи — крупные детали: анализ идёт на уменьшенной
+    # копии, полный размер тратил бы память и время на заведомо сглаживаемое.
+    scale = min(1.0, 160.0 / max(face_scale, 32.0))
+    small = (max(24, min(width, int(round(width * scale)))), max(24, min(height, int(round(height * scale)))))
+    small_scale = min(small[0] / width, small[1] / height)
+    radius = max(3.0, face_scale * small_scale * _MATTE_RADIUS)
+    detail = max(1.0, face_scale * small_scale * _MATTE_DETAIL)
+    small_weight = _resize_map(weights, small, Image.Resampling.BOX)
+    small_rgb = np.stack([_resize_map(rgb[..., channel], small, Image.Resampling.BOX) for channel in range(3)], axis=-1)
+    linear = _srgb_to_linear(small_rgb)
+    luminance = linear @ _LUMA
+    confident = small_weight > .5
+    if np.count_nonzero(confident) <= 24:
+        return rgb.copy()
+
+    base = _masked_smooth(luminance, small_weight, radius)
+    dark = small_weight * np.clip((base - luminance) / np.maximum(base * .12, 1e-4) + .5, 0.0, 1.0)
+    reference = np.stack([_masked_smooth(linear[..., channel], dark, radius) for channel in range(3)], axis=-1)
+    reference /= np.maximum(reference @ _LUMA, 1e-5)[..., None]
+
+    # Наименьшие квадраты для двух неизвестных (диффузная доля и блеск) на три
+    # канала: 2x2 нормальные уравнения решаются в лоб.
+    white = np.float32(3.0)
+    ref_ref = (reference * reference).sum(-1)
+    ref_white = reference.sum(-1)
+    determinant = np.maximum(ref_ref * white - ref_white * ref_white, 1e-6)
+    shine = (ref_ref * linear.sum(-1) - ref_white * (reference * linear).sum(-1)) / determinant
+    shine = _smooth(np.minimum(np.maximum(shine, 0.0), luminance * _MATTE_CEILING) * small_weight, detail)
+    excess = np.maximum(shine - _masked_smooth(shine, small_weight, radius), 0.0)
+    unit = float(np.quantile(excess[confident], .999))
+    if unit <= 1e-4:
+        return rgb.copy()
+    # Мягкое ограничение: у самого сильного блика убирается не всё, иначе на
+    # его месте остаётся плоское пятно без светотени.
+    excess = _smooth(np.float32(unit) * np.tanh(excess / np.float32(unit)) * small_weight, detail * .5) * strength
+
+    # Карта блеска и цвет матовой кожи увеличиваются до кадра: синий канал
+    # цвета восстанавливается из условия единичной яркости, поэтому в памяти
+    # живут три карты вместо четырёх.
+    maps = np.stack(
+        [_resize_map(values, (width, height), Image.Resampling.BICUBIC) for values in (excess, reference[..., 0], reference[..., 1])],
+        axis=-1,
+    )
+
+    result = np.empty(rgb.shape, dtype=np.uint8)
+    for y in range(0, height, 256):
+        rows = slice(y, y + 256)
+        linear = _srgb_to_linear(rgb[rows])
+        luminance = linear @ _LUMA
+        amount = np.maximum(maps[rows, :, 0], 0.0) * weights[rows]
+        gain = np.clip(1.0 - amount / np.maximum(luminance, 1e-4), _MATTE_FLOOR, 1.0)
+        matted = linear * gain[..., None]
+        target = matted @ _LUMA
+        reference = np.stack(
+            (
+                maps[rows, :, 1],
+                maps[rows, :, 2],
+                (1.0 - _LUMA[0] * maps[rows, :, 1] - _LUMA[1] * maps[rows, :, 2]) / _LUMA[2],
+            ),
+            axis=-1,
+        )
+        share = np.clip(amount / np.float32(unit), 0.0, 1.0)
+        mixed = matted + (np.maximum(reference, 0.0) * target[..., None] - matted) * share[..., None]
+        # Возврат светлоты: цвет правится, а тушением занимается только gain.
+        # У нетронутых пикселей и множитель, и доля ровно нулевые.
+        mixed *= (target / np.maximum(mixed @ _LUMA, 1e-5))[..., None]
+        result[rows] = np.clip(_linear_to_srgb(mixed) * 255.0 + .5, 0, 255).astype(np.uint8)
     return result
 
 
@@ -412,8 +519,9 @@ class SkinRetoucher:
             return rgb.copy()
         result = rgb.copy()
         tone = float(np.clip(settings.tone_strength, 0, 1))
+        matte = float(np.clip(settings.matte_strength, 0, 1))
         burn = float(np.clip(settings.dodge_burn, 0, 1))
-        if tone or burn:
+        if tone or matte or burn:
             # Запас вокруг кожи берётся по самому широкому фильтру выравнивания.
             regions = self._regions(mask, math.ceil(max(face_scale * .42, 16.0) * 3))
             if regions:
@@ -427,6 +535,8 @@ class SkinRetoucher:
                         face_scale,
                         None if face_area is None else face_area[y0:y1, x0:x1],
                     )
+                if matte:
+                    result[y0:y1, x0:x1] = matte_skin(result[y0:y1, x0:x1], weights, matte, face_scale)
                 if burn:
                     lab = _rgb_to_lab(result[y0:y1, x0:x1])
                     light = lab[..., 0]

@@ -1597,6 +1597,9 @@ msgstr ""
 msgid "Выравнивание тона кожи"
 msgstr ""
 
+msgid "Матирование кожи"
+msgstr ""
+
 msgid "Dodge & Burn"
 msgstr ""
 
