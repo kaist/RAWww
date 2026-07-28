@@ -29,7 +29,7 @@ from .error_log import clear_error_log, read_error_log
 from .runtime_paths import filesystem_name_key
 from .shotsync_client import ShotSyncClient
 from .theme import _fomantic_icon
-from .widgets import CodeCompletingLineEdit, CodeReplacementsEditor, SettingsCheckBox
+from .widgets import CodeCompletingLineEdit, CodeReplacementsEditor, ScopeButtons, SettingsCheckBox
 from .version import __version__ as APP_VERSION
 from . import i18n
 from .i18n import gettext as _
@@ -1051,9 +1051,14 @@ class BatchRenameDialog(QDialog):
         r"\{counter(?::(\d+))?\}|\{(year|month|day|hour|minute|second|date|time|datetime)\}"
     )
 
-    def __init__(self, paths: list[Path], details: dict[str, dict], settings: QSettings, parent=None) -> None:
+    def __init__(self, paths: list[Path], details: dict[str, dict], settings: QSettings, selected: list[Path] | None = None, parent=None) -> None:
         super().__init__(parent)
-        self.paths = paths
+        # Область работы выбирается кнопкой запуска, поэтому список путей —
+        # изменяемое состояние: предпросмотр и нумерация считаются по нему.
+        self.all_paths = list(paths)
+        chosen = set(selected or ())
+        self.selected_paths = [path for path in paths if path in chosen]
+        self.paths = self.all_paths
         self.details = details
         self.settings = settings
         self._renaming = False
@@ -1177,11 +1182,9 @@ class BatchRenameDialog(QDialog):
         self.cancel_button.setObjectName("batchRenameSecondaryButton")
         self.cancel_button.clicked.connect(self.reject)
         buttons.addWidget(self.cancel_button)
-        self.rename_button = QPushButton(_("Переименовать"))
-        self.rename_button.setObjectName("batchRenamePrimaryButton")
-        self.rename_button.setIcon(_fomantic_icon("edit", 14, "#ffffff"))
-        self.rename_button.clicked.connect(self._request_rename)
-        buttons.addWidget(self.rename_button)
+        self.scope = ScopeButtons(_("Переименовать"), len(self.all_paths), len(self.selected_paths), "batchRename", icon="edit")
+        self.scope.startRequested.connect(self._request_rename)
+        buttons.addWidget(self.scope)
         layout.addLayout(buttons)
         self._names: dict[str, str] = {}
         self._update_preview()
@@ -1232,7 +1235,13 @@ class BatchRenameDialog(QDialog):
     def names(self) -> dict[str, str]:
         return dict(self._names)
 
-    def _request_rename(self) -> None:
+    def _request_rename(self, selected_only: bool = False) -> None:
+        # Нумерация обязана быть непрерывной внутри выбранного набора, поэтому
+        # план пересобирается под область работы прямо перед запуском.
+        scope = self.selected_paths if selected_only else self.all_paths
+        if scope != self.paths:
+            self.paths = scope
+            self._update_preview()
         if self._names:
             self.renameRequested.emit(dict(self._names))
 
@@ -1241,7 +1250,7 @@ class BatchRenameDialog(QDialog):
         self.template_edit.setEnabled(False)
         self.counter_start.setEnabled(False)
         self.counter_digits.setEnabled(False)
-        self.rename_button.setEnabled(False)
+        self.scope.setEnabled(False)
         self.cancel_button.setEnabled(False)
         self.rename_progress.setRange(0, max(1, total))
         self.rename_progress.setValue(0)
@@ -1328,7 +1337,7 @@ class BatchRenameDialog(QDialog):
                     errors.append(_("Файл «{name}» уже существует в папке.").format(name=name))
                     break
         self._names = candidates if not errors else {}
-        self.rename_button.setEnabled(bool(self._names) and any(old != new for old, new in self._names.items()))
+        self.scope.setEnabled(bool(self._names) and any(old != new for old, new in self._names.items()))
         self.validation_label.setText(errors[0] if errors else _("Будет переименовано: {done} из {total}").format(done=sum(old != new for old, new in candidates.items()), total=len(candidates)))
         self.validation_label.setProperty("invalid", bool(errors))
         self.validation_label.style().unpolish(self.validation_label)
@@ -1563,7 +1572,7 @@ class BatchResizeDialog(QDialog):
 
     startRequested = Signal(object)
 
-    def __init__(self, source_dir: Path, settings: QSettings, parent=None) -> None:
+    def __init__(self, source_dir: Path, settings: QSettings, total: int = 0, selected: int = 0, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
         self.setObjectName("batchResizeDialog")
@@ -1691,11 +1700,9 @@ class BatchResizeDialog(QDialog):
         self.cancel_button.setObjectName("batchResizeSecondaryButton")
         self.cancel_button.clicked.connect(self.reject)
         buttons.addWidget(self.cancel_button)
-        self.start_button = QPushButton(_("Старт"))
-        self.start_button.setObjectName("batchResizePrimaryButton")
-        self.start_button.setIcon(_fomantic_icon("play", 13, "#ffffff"))
-        self.start_button.clicked.connect(self._start)
-        buttons.addWidget(self.start_button)
+        self.scope = ScopeButtons(_("Экспортировать"), total, selected, "batchResize")
+        self.scope.startRequested.connect(self._start)
+        buttons.addWidget(self.scope)
         layout.addLayout(buttons)
 
     def _choose_output_folder(self) -> None:
@@ -1703,7 +1710,7 @@ class BatchResizeDialog(QDialog):
         if chosen:
             self.output_edit.setText(chosen)
 
-    def _start(self) -> None:
+    def _start(self, selected_only: bool = False) -> None:
         output_text = self.output_edit.text().strip()
         if not output_text:
             self.status.setText(_("Укажите папку для экспорта."))
@@ -1721,10 +1728,11 @@ class BatchResizeDialog(QDialog):
             "sharpen_amount": self.sharpen_amount.value(), "unsharp": self.unsharp.isChecked(),
             "unsharp_radius": self.unsharp_radius.value(), "unsharp_amount": self.unsharp_amount.value(),
             "unsharp_threshold": self.unsharp_threshold.value(), "keep_exif": self.keep_exif.isChecked(),
+            "selected_only": bool(selected_only),
         })
 
     def set_running(self, total: int) -> None:
-        for widget in (self.output_edit, self.max_side, self.sharpen, self.sharpen_amount, self.unsharp, self.unsharp_radius, self.unsharp_amount, self.unsharp_threshold, self.keep_exif, self.start_button, self.cancel_button):
+        for widget in (self.output_edit, self.max_side, self.sharpen, self.sharpen_amount, self.unsharp, self.unsharp_radius, self.unsharp_amount, self.unsharp_threshold, self.keep_exif, self.scope, self.cancel_button):
             widget.setEnabled(False)
         self.progress.setRange(0, total)
         self.progress.setValue(0)
@@ -1743,7 +1751,7 @@ class ShrinkJpegDialog(QDialog):
 
     startRequested = Signal(object)
 
-    def __init__(self, source_dir: Path, count: int, settings: QSettings, parent=None) -> None:
+    def __init__(self, source_dir: Path, count: int, settings: QSettings, selected: int = 0, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
         self.setObjectName("shrinkJpegDialog")
@@ -1758,7 +1766,7 @@ class ShrinkJpegDialog(QDialog):
         title.setObjectName("batchRenameTitle")
         layout.addWidget(title)
         hint = QLabel(
-            _("Пересохранит все JPG-файлы в папке «{name}» ({count} шт.) с выбранным качеством, поверх исходников без подтверждения.").format(name=source_dir.name, count=count)
+            _("Пересохранит JPG-файлы папки «{name}» с выбранным качеством, поверх исходников без подтверждения. В папке {count} шт., выделено {selected} шт.").format(name=source_dir.name, count=count, selected=selected)
 
         )
         hint.setObjectName("batchRenameHint")
@@ -1805,23 +1813,22 @@ class ShrinkJpegDialog(QDialog):
         self.cancel_button.setObjectName("batchResizeSecondaryButton")
         self.cancel_button.clicked.connect(self.reject)
         buttons.addWidget(self.cancel_button)
-        self.start_button = QPushButton(_("Старт"))
-        self.start_button.setObjectName("batchResizePrimaryButton")
-        self.start_button.setIcon(_fomantic_icon("play", 13, "#ffffff"))
-        self.start_button.clicked.connect(self._start)
-        buttons.addWidget(self.start_button)
+        self.scope = ScopeButtons(_("Уменьшить"), count, selected, "batchResize")
+        self.scope.startRequested.connect(self._start)
+        buttons.addWidget(self.scope)
         layout.addLayout(buttons)
 
-    def _start(self) -> None:
+    def _start(self, selected_only: bool = False) -> None:
         self.settings.setValue("shrink_jpeg/quality", self.quality.value())
         self.settings.setValue("shrink_jpeg/keep_exif", self.keep_exif.isChecked())
         self.startRequested.emit({
             "quality": self.quality.value(),
             "keep_exif": self.keep_exif.isChecked(),
+            "selected_only": bool(selected_only),
         })
 
     def set_running(self, total: int) -> None:
-        for widget in (self.quality, self.keep_exif, self.start_button, self.cancel_button):
+        for widget in (self.quality, self.keep_exif, self.scope, self.cancel_button):
             widget.setEnabled(False)
         self.progress.setRange(0, total)
         self.progress.setValue(0)

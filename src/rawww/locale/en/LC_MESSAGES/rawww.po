@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 10:28+0000\n"
+"POT-Creation-Date: 2026-07-28 11:03+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1556,8 +1556,8 @@ msgstr "Radius"
 msgid "Порог"
 msgstr "Threshold"
 
-msgid "Старт"
-msgstr "Start"
+msgid "Экспортировать"
+msgstr "Export"
 
 msgid "Папка для экспорта"
 msgstr "Export folder"
@@ -1571,14 +1571,19 @@ msgstr "Export: {done}/{total}"
 
 #, python-brace-format
 msgid ""
-"Пересохранит все JPG-файлы в папке «{name}» ({count} шт.) с выбранным "
-"качеством, поверх исходников без подтверждения."
+"Пересохранит JPG-файлы папки «{name}» с выбранным качеством, поверх "
+"исходников без подтверждения. В папке {count} шт., выделено {selected} "
+"шт."
 msgstr ""
-"Re-saves all JPG files in the folder «{name}» ({count} pcs.) with the "
-"chosen quality, over the originals without confirmation."
+"Re-saves JPG files in the «{name}» folder with the chosen quality, over "
+"the originals without confirmation. {count} in the folder, {selected} "
+"selected."
 
 msgid "Качество"
 msgstr "Quality"
+
+msgid "Уменьшить"
+msgstr "Shrink"
 
 #, python-brace-format
 msgid "Сжатие: {done}/{total}"
@@ -1697,11 +1702,8 @@ msgstr "Brightness"
 msgid "Контраст"
 msgstr "Contrast"
 
-msgid "ТАБЛИЦА LUT"
-msgstr "LUT TABLE"
-
-msgid "Наложить таблицу .cube"
-msgstr "Apply a .cube table"
+msgid "Включить"
+msgstr "Enable"
 
 msgid "Файл не выбран"
 msgstr "No file selected"
@@ -1709,15 +1711,11 @@ msgstr "No file selected"
 msgid "Выбрать таблицу .cube"
 msgstr "Choose a .cube table"
 
-msgid "Сила таблицы"
-msgstr "Table strength"
-
 msgid "СОХРАНИТЬ В ПАПКУ"
 msgstr "SAVE TO FOLDER"
 
-#, python-brace-format
-msgid "Обработать {count} фото"
-msgstr "Retouch {count} photos"
+msgid "Обработать"
+msgstr "Process"
 
 msgid "Предыдущая"
 msgstr "Previous"
@@ -1753,18 +1751,18 @@ msgstr "Could not start the retouch worker."
 msgid "Ошибка ретуши: {error}"
 msgstr "Retouch error: {error}"
 
-msgid "Предпросмотр готов."
-msgstr "Preview ready."
-
-msgid "Не удалось подготовить предпросмотр."
-msgstr "Could not prepare preview."
-
 msgid "готово"
 msgstr "done"
 
 #, python-brace-format
 msgid "Ретушь: {done}/{total}"
 msgstr "Retouch: {done}/{total}"
+
+msgid "Предпросмотр готов."
+msgstr "Preview ready."
+
+msgid "Не удалось подготовить предпросмотр."
+msgstr "Could not prepare preview."
 
 msgid "Пакетная ретушь завершена."
 msgstr "Batch retouch finished."
@@ -2018,6 +2016,17 @@ msgstr "queued: {n}"
 msgid "Убрать из очереди"
 msgstr "Remove from queue"
 
+#, python-brace-format
+msgid "{verb} все ({count})"
+msgstr "{verb} all ({count})"
+
+#, python-brace-format
+msgid "{verb} выделенные ({count})"
+msgstr "{verb} selected ({count})"
+
+msgid "В сетке ничего не выделено."
+msgstr "Nothing is selected in the grid."
+
 msgid "+ Набор"
 msgstr "+ Set"
 
@@ -2108,3 +2117,18 @@ msgstr "Fast RAW and JPG viewing and culling"
 
 #~ msgid "После"
 #~ msgstr "After"
+
+#~ msgid "Старт"
+#~ msgstr "Start"
+
+#~ msgid "ТАБЛИЦА LUT"
+#~ msgstr "LUT TABLE"
+
+#~ msgid "Наложить таблицу .cube"
+#~ msgstr "Apply a .cube table"
+
+#~ msgid "Сила таблицы"
+#~ msgstr "Table strength"
+
+#~ msgid "Обработать {count} фото"
+#~ msgstr "Retouch {count} photos"

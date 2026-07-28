@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from .i18n import gettext as _
 from .theme import _fomantic_icon
-from .widgets import SettingsCheckBox
+from .widgets import ScopeButtons, SettingsCheckBox
 
 _FIELD_HEIGHT = 40
 # Задержка дребезга предпросмотра: ползунок успевает доехать, а воркер не
@@ -232,9 +232,13 @@ class BatchRetouchDialog(QDialog):
     пакета, освобождая ONNX-сессии и их нативную память.
     """
 
-    def __init__(self, paths: list[Path], current: Path, settings: QSettings, parent=None) -> None:
+    def __init__(self, paths: list[Path], current: Path, settings: QSettings, selected: list[Path] | None = None, parent=None) -> None:
         super().__init__(parent)
         self._paths = paths
+        # По выделению работает только пакет: листать и смотреть предпросмотр
+        # полезно по всему списку, даже когда обработать надо пару кадров.
+        chosen = set(selected or ())
+        self._selected = [path for path in paths if path in chosen]
         self._index = paths.index(current) if current in paths else 0
         self._settings = settings
         self._preview_process: QProcess | None = None
@@ -317,8 +321,8 @@ class BatchRetouchDialog(QDialog):
         self.contrast = self._slider(colour, _("Контраст"), "retouch/contrast", 0, minimum=-100)
         self.saturation = self._slider(colour, _("Насыщенность"), "retouch/saturation", 0, minimum=-100)
 
-        table = self._group(inner, _("ТАБЛИЦА LUT"))
-        self.lut_enabled = SettingsCheckBox(_("Наложить таблицу .cube"))
+        table = self._group(inner, "LUT")
+        self.lut_enabled = SettingsCheckBox(_("Включить"))
         self.lut_enabled.setObjectName("batchResizeOption")
         self.lut_enabled.setChecked(self._settings.value("retouch/lut_enabled", False, bool))
         table.addWidget(self.lut_enabled)
@@ -339,7 +343,7 @@ class BatchRetouchDialog(QDialog):
         choose_lut.clicked.connect(self._choose_lut)
         lut_row.addWidget(choose_lut)
         table.addLayout(lut_row)
-        self.lut_strength = self._slider(table, _("Сила таблицы"), "retouch/lut_strength", 100)
+        self.lut_strength = self._slider(table, _("Сила"), "retouch/lut_strength", 100)
         for widget in (self.lut_path, choose_lut, self.lut_strength):
             widget.setEnabled(self.lut_enabled.isChecked())
             self.lut_enabled.toggled.connect(widget.setEnabled)
@@ -377,9 +381,8 @@ class BatchRetouchDialog(QDialog):
         self.progress.setObjectName("batchResizeProgress")
         self.progress.hide()
         layout.addWidget(self.progress)
-        self.batch = QPushButton(_("Обработать {count} фото").format(count=len(self._paths)))
-        self.batch.setObjectName("batchResizePrimaryButton")
-        self.batch.clicked.connect(self._start_batch)
+        self.batch = ScopeButtons(_("Обработать"), len(self._paths), len(self._selected), "batchResize", icon="magic", vertical=True)
+        self.batch.startRequested.connect(self._start_batch)
         layout.addWidget(self.batch)
         close = QPushButton(_("Закрыть"))
         close.setObjectName("batchResizeSecondaryButton")
@@ -571,16 +574,19 @@ class BatchRetouchDialog(QDialog):
         self._preview_process = process
         return process
 
-    def _start_batch(self) -> None:
+    def _start_batch(self, selected_only: bool = False) -> None:
         output_text = self.output.text().strip()
         if not output_text:
             self.status.setText(_("Укажите папку результата."))
+            return
+        sources = self._selected if selected_only else self._paths
+        if not sources:
             return
         output = Path(output_text).expanduser()
         self._batch_running = True
         self._batch_started_at = monotonic()
         self.batch.setEnabled(False)
-        self.progress.setRange(0, len(self._paths))
+        self.progress.setRange(0, len(sources))
         self.progress.setValue(0)
         self.progress.show()
         self.status.setText(_("Запущена пакетная ретушь…"))
@@ -589,13 +595,13 @@ class BatchRetouchDialog(QDialog):
         self._stop_preview_process()
         self.preview.set_loading(False)
         self._batch_process = self._start_worker(preview=False)
-        self._send(self._batch_process, {"settings": self._options(), "tasks": self._batch_tasks(output), "preview": False}, last=True)
+        self._send(self._batch_process, {"settings": self._options(), "tasks": self._batch_tasks(output, sources), "preview": False}, last=True)
 
-    def _batch_tasks(self, output: Path) -> list[dict]:
+    def _batch_tasks(self, output: Path, sources: list[Path]) -> list[dict]:
         """Подбирает новые JPEG-имена, не затирая RAW+JPEG-пары и старый экспорт."""
         used: set[str] = set()
         tasks = []
-        for source in self._paths:
+        for source in sources:
             candidate = output / f"{source.stem}.jpg"
             if candidate.name.casefold() in used or candidate.exists():
                 candidate = output / f"{source.stem}_{source.suffix.lstrip('.').lower()}.jpg"

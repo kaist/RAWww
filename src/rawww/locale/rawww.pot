@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 10:28+0000\n"
+"POT-Creation-Date: 2026-07-28 11:03+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1479,7 +1479,7 @@ msgstr ""
 msgid "Порог"
 msgstr ""
 
-msgid "Старт"
+msgid "Экспортировать"
 msgstr ""
 
 msgid "Папка для экспорта"
@@ -1494,11 +1494,15 @@ msgstr ""
 
 #, python-brace-format
 msgid ""
-"Пересохранит все JPG-файлы в папке «{name}» ({count} шт.) с выбранным "
-"качеством, поверх исходников без подтверждения."
+"Пересохранит JPG-файлы папки «{name}» с выбранным качеством, поверх "
+"исходников без подтверждения. В папке {count} шт., выделено {selected} "
+"шт."
 msgstr ""
 
 msgid "Качество"
+msgstr ""
+
+msgid "Уменьшить"
 msgstr ""
 
 #, python-brace-format
@@ -1616,10 +1620,7 @@ msgstr ""
 msgid "Контраст"
 msgstr ""
 
-msgid "ТАБЛИЦА LUT"
-msgstr ""
-
-msgid "Наложить таблицу .cube"
+msgid "Включить"
 msgstr ""
 
 msgid "Файл не выбран"
@@ -1628,14 +1629,10 @@ msgstr ""
 msgid "Выбрать таблицу .cube"
 msgstr ""
 
-msgid "Сила таблицы"
-msgstr ""
-
 msgid "СОХРАНИТЬ В ПАПКУ"
 msgstr ""
 
-#, python-brace-format
-msgid "Обработать {count} фото"
+msgid "Обработать"
 msgstr ""
 
 msgid "Предыдущая"
@@ -1672,17 +1669,17 @@ msgstr ""
 msgid "Ошибка ретуши: {error}"
 msgstr ""
 
-msgid "Предпросмотр готов."
-msgstr ""
-
-msgid "Не удалось подготовить предпросмотр."
-msgstr ""
-
 msgid "готово"
 msgstr ""
 
 #, python-brace-format
 msgid "Ретушь: {done}/{total}"
+msgstr ""
+
+msgid "Предпросмотр готов."
+msgstr ""
+
+msgid "Не удалось подготовить предпросмотр."
 msgstr ""
 
 msgid "Пакетная ретушь завершена."
@@ -1931,6 +1928,17 @@ msgid "в очереди: {n}"
 msgstr ""
 
 msgid "Убрать из очереди"
+msgstr ""
+
+#, python-brace-format
+msgid "{verb} все ({count})"
+msgstr ""
+
+#, python-brace-format
+msgid "{verb} выделенные ({count})"
+msgstr ""
+
+msgid "В сетке ничего не выделено."
 msgstr ""
 
 msgid "+ Набор"

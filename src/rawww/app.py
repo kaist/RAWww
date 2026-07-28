@@ -9342,7 +9342,7 @@ class Workspace(QMainWindow):
             return
         selected = self._selected_paths()
         current = self.current_path if self.current_path in paths else (selected[0] if selected and selected[0] in paths else paths[0])
-        dialog = BatchRetouchDialog(paths, current, self.settings, self)
+        dialog = BatchRetouchDialog(paths, current, self.settings, selected, self)
         dialog.showMaximized()
         dialog.exec()
 
@@ -9361,7 +9361,7 @@ class Workspace(QMainWindow):
         if not paths:
             QMessageBox.information(self, _("Групповое переименование"), _("В текущем списке нет фотографий."))
             return
-        dialog = BatchRenameDialog(paths, self.photo_details, self.settings, self)
+        dialog = BatchRenameDialog(paths, self.photo_details, self.settings, self._selected_paths(), self)
         dialog.renameRequested.connect(lambda names, view=dialog: self._rename_from_dialog(view, names))
         dialog.exec()
 
@@ -9480,8 +9480,13 @@ class Workspace(QMainWindow):
         if not paths:
             QMessageBox.information(self, _("Уменьшить JPG"), _("В текущей папке нет JPG-файлов."))
             return
-        dialog = ShrinkJpegDialog(self.current_dir, len(paths), self.settings, self)
-        dialog.startRequested.connect(lambda options, view=dialog, items=paths: self._start_shrink_jpeg(view, items, options))
+        chosen = set(self._selected_paths())
+        selected = [path for path in paths if path in chosen]
+        dialog = ShrinkJpegDialog(self.current_dir, len(paths), self.settings, len(selected), self)
+        dialog.startRequested.connect(
+            lambda options, view=dialog, items=paths, subset=selected:
+                self._start_shrink_jpeg(view, subset if options["selected_only"] else items, options)
+        )
         dialog.exec()
 
     def _start_shrink_jpeg(self, dialog: ShrinkJpegDialog, paths: list[Path], options: dict) -> None:
@@ -9514,8 +9519,13 @@ class Workspace(QMainWindow):
         if not paths:
             QMessageBox.information(self, _("Групповой резайс"), _("В текущем списке нет фотографий."))
             return
-        dialog = BatchResizeDialog(self.current_dir, self.settings, self)
-        dialog.startRequested.connect(lambda options, view=dialog, items=paths: self._start_batch_resize(view, items, options))
+        chosen = set(self._selected_paths())
+        selected = [path for path in paths if path in chosen]
+        dialog = BatchResizeDialog(self.current_dir, self.settings, len(paths), len(selected), self)
+        dialog.startRequested.connect(
+            lambda options, view=dialog, items=paths, subset=selected:
+                self._start_batch_resize(view, subset if options["selected_only"] else items, options)
+        )
         dialog.exec()
 
     def _start_batch_resize(self, dialog: BatchResizeDialog, paths: list[Path], options: dict) -> None:
