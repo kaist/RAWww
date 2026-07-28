@@ -339,9 +339,10 @@ class BatchPipelineTests(unittest.TestCase):
     def test_frame_workers_grow_with_cores(self) -> None:
         from rawww import retouch_worker
 
-        self.assertEqual(retouch_worker._frame_workers(2), 1)
-        self.assertEqual(retouch_worker._frame_workers(8), 2)
-        self.assertEqual(retouch_worker._frame_workers(16), 3)
+        self.assertEqual(retouch_worker._frame_workers(2, memory_gb=32), 1)
+        self.assertEqual(retouch_worker._frame_workers(8, memory_gb=32), 2)
+        self.assertEqual(retouch_worker._frame_workers(16, memory_gb=32), 4)
+        self.assertEqual(retouch_worker._frame_workers(32, memory_gb=64), 6)
 
     def test_frame_workers_fill_cores_without_neural(self) -> None:
         """Без нейроретуши никакой этап сам по ядрам не растёт — растёт кадрами."""
@@ -355,8 +356,11 @@ class BatchPipelineTests(unittest.TestCase):
         """Потолок ставит память: кадры в работе держат по гигабайту на крупном RAW."""
         from rawww import retouch_worker
 
-        self.assertEqual(retouch_worker._frame_workers(16, neural=False, memory_gb=8), 2)
+        self.assertEqual(retouch_worker._frame_workers(16, neural=False, memory_gb=8), 4)
         self.assertEqual(retouch_worker._frame_workers(16, neural=False, memory_gb=2), 1)
+        # Крупные кадры пакета стоят дороже: та же память даёт меньше окно.
+        self.assertEqual(retouch_worker._frame_workers(16, neural=False, memory_gb=8, megapixels=61), 1)
+        self.assertEqual(retouch_worker._frame_workers(16, neural=True, memory_gb=8, megapixels=45), 2)
         self.assertGreaterEqual(retouch_worker._memory_gb(), 0.5)
 
     def test_batch_asks_for_more_frames_when_neural_is_off(self) -> None:
@@ -367,7 +371,7 @@ class BatchPipelineTests(unittest.TestCase):
         with mock.patch.object(
             retouch_worker,
             "_frame_workers",
-            lambda cpus=None, neural=True: asked.append(neural) or 1,
+            lambda cpus=None, neural=True, **kwargs: asked.append(neural) or 1,
         ):
             retouch_worker._batch(object(), [], RetouchSettings(neural_retouch=False))
             retouch_worker._batch(object(), [], RetouchSettings(neural_retouch=True, neural_strength=.5))
@@ -397,7 +401,7 @@ class BatchPipelineTests(unittest.TestCase):
 
         tasks = [{"source": f"{index}.jpg", "target": f"{index}_out.jpg"} for index in range(4)]
         capture = _Capture()
-        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True: 2), \
+        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True, **kwargs: 2), \
                 mock.patch.object(retouch_worker, "_read", lambda path, max_side: (b"", (0, 0), (1, 1))), \
                 mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
             worker = threading.Thread(
@@ -444,7 +448,7 @@ class BatchPipelineTests(unittest.TestCase):
 
         tasks = [{"source": f"{index}.jpg", "target": f"{index}_out.jpg"} for index in range(8)]
         capture = _Capture()
-        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True: 3), \
+        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True, **kwargs: 3), \
                 mock.patch.object(retouch_worker, "_read", lambda path, max_side: (path.name, (0, 0), (1, 1))), \
                 mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
             with redirect_stdout(capture):
@@ -472,7 +476,7 @@ class BatchPipelineTests(unittest.TestCase):
 
         tasks = [{"source": f"{index}.jpg", "target": f"{index}_out.jpg"} for index in range(3)]
         capture = _Capture()
-        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True: 2), \
+        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True, **kwargs: 2), \
                 mock.patch.object(retouch_worker, "_read", lambda path, max_side: (path.name, (0, 0), (1, 1))), \
                 mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
             with redirect_stdout(capture):
@@ -497,7 +501,7 @@ class BatchPipelineTests(unittest.TestCase):
 
         tasks = [{"source": f"{index}.jpg", "target": f"{index}_out.jpg"} for index in range(6)]
         capture = _Capture()
-        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True: 1), \
+        with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True, **kwargs: 1), \
                 mock.patch.object(retouch_worker, "_read", lambda path, max_side: (b"", (0, 0), (1, 1))), \
                 mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
             with redirect_stdout(capture):
