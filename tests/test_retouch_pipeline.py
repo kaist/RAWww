@@ -363,6 +363,38 @@ class FacialMaskTest(unittest.TestCase):
             self.assertLess(values.mean(), .05, f"{name}: слишком большой средний вес")
 
 
+class NeuralRegionTest(unittest.TestCase):
+    """Нейроэтап живёт в прямоугольнике кожи, а не на целом кадре."""
+
+    def test_neural_blend_stays_inside_skin_region(self) -> None:
+        retoucher = retouch_pipeline.SkinRetoucher.__new__(retouch_pipeline.SkinRetoucher)
+        shapes: list[tuple[int, ...]] = []
+
+        def fake_neural(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:
+            shapes.append(crop.shape)
+            return np.zeros_like(crop)
+
+        retoucher._neural = fake_neural  # type: ignore[method-assign]
+        rgb = np.full((600, 800, 3), 200, dtype=np.uint8)
+        mask = np.zeros((600, 800), dtype=np.uint8)
+        mask[200:320, 300:460] = 255
+        result = retoucher.neural_retouch(rgb, mask, 1.0)
+
+        # Сетке отдан кроп с запасом, а не кадр целиком.
+        self.assertLess(shapes[0][0], 600)
+        self.assertLess(shapes[0][1], 800)
+        # Глубоко в маске результат сетки, далеко за прямоугольником — оригинал.
+        self.assertTrue((result[250:300, 350:420] == 0).all())
+        self.assertTrue((result[:40] == 200).all())
+        self.assertTrue((result[:, :40] == 200).all())
+
+    def test_empty_mask_leaves_frame_untouched(self) -> None:
+        retoucher = retouch_pipeline.SkinRetoucher.__new__(retouch_pipeline.SkinRetoucher)
+        rgb = np.full((64, 64, 3), 120, dtype=np.uint8)
+        result = retoucher.neural_retouch(rgb, np.zeros((64, 64), dtype=np.uint8), 1.0)
+        self.assertTrue((result == 120).all())
+
+
 class PipelineOrderTest(unittest.TestCase):
     """Порядок этапов: кожа, затем цвет, затем таблица."""
 
