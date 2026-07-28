@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 11:03+0000\n"
+"POT-Creation-Date: 2026-07-28 12:24+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -126,18 +126,6 @@ msgstr "Keine Internetverbindung."
 
 msgid "Не удалось подключиться к ShotSync."
 msgstr "Verbindung zu ShotSync fehlgeschlagen."
-
-#, python-brace-format
-msgid "≈ {h} ч {m} мин"
-msgstr "≈ {h} Std. {m} Min."
-
-#, python-brace-format
-msgid "≈ {m} мин {s} с"
-msgstr "≈ {m} Min. {s} Sek."
-
-#, python-brace-format
-msgid "≈ {s} с"
-msgstr "≈ {s} Sek."
 
 msgid "Выполняется файловая операция"
 msgstr "Dateivorgang läuft"
@@ -735,19 +723,23 @@ msgid "В текущей папке нет JPG-файлов."
 msgstr "Im aktuellen Ordner gibt es keine JPG-Dateien."
 
 #, python-brace-format
+msgid "Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}"
+msgstr "Mit Fehlern abgeschlossen ({count}). {mb} MB eingespart. {first}"
+
+#, python-brace-format
 msgid "Готово. Сэкономлено {mb} МБ."
 msgstr "Fertig. {mb} MB eingespart."
 
 #, python-brace-format
-msgid "Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}"
-msgstr "Mit Fehlern abgeschlossen ({count}). {mb} MB eingespart. {first}"
-
-msgid "Закрыть"
-msgstr "Schließen"
+msgid "Остановлено. Сэкономлено {mb} МБ."
+msgstr "Angehalten. {mb} MB eingespart."
 
 #, python-brace-format
 msgid "Готово с ошибками ({count}): {first}"
 msgstr "Mit Fehlern abgeschlossen ({count}): {first}"
+
+msgid "Экспорт остановлен."
+msgstr "Export angehalten."
 
 #, python-brace-format
 msgid "В папке экспорта уже есть «{name}»."
@@ -836,6 +828,9 @@ msgstr "Gesicht zum Set hinzugefügt."
 
 msgid "Наборы лиц"
 msgstr "Gesichts-Sets"
+
+msgid "Закрыть"
+msgstr "Schließen"
 
 msgid "Добавьте лицо, нажав «В набор» на фотографии."
 msgstr ""
@@ -1002,13 +997,25 @@ msgstr "Tastenkürzel"
 msgid "Папка связана с ShotSync"
 msgstr "Ordner mit ShotSync verknüpft"
 
-msgid "Файловые операции не завершены"
-msgstr "Dateivorgänge sind nicht abgeschlossen"
-
 msgid ""
 "Копирование или перемещение ещё выполняется. Выйти и отменить все "
 "операции?"
 msgstr "Kopieren oder Verschieben läuft noch. Beenden und alle Vorgänge abbrechen?"
+
+#, python-brace-format
+msgid ""
+"Ещё выполняются файловые операции и утилиты ({names}). Выйти и остановить"
+" их?"
+msgstr ""
+"Es laufen noch Dateivorgänge und Werkzeuge ({names}). Beenden und "
+"anhalten?"
+
+#, python-brace-format
+msgid "Ещё выполняются утилиты ({names}). Выйти и остановить их?"
+msgstr "Es laufen noch Werkzeuge ({names}). Beenden und anhalten?"
+
+msgid "Операции не завершены"
+msgstr "Vorgänge nicht abgeschlossen"
 
 #, python-brace-format
 msgid "Не удалось подобрать свободное имя для {name}"
@@ -1482,6 +1489,9 @@ msgstr "Umbenennen: {done}/{total}"
 msgid "Обновляю кэш…"
 msgstr "Cache wird aktualisiert…"
 
+msgid "Переименование ещё выполняется. Остановить его?"
+msgstr "Die Umbenennung läuft noch. Anhalten?"
+
 #, python-brace-format
 msgid "… ещё {n} файлов"
 msgstr "… {n} weitere Dateien"
@@ -1593,9 +1603,15 @@ msgstr "Exportordner"
 msgid "Укажите папку для экспорта."
 msgstr "Geben Sie den Exportordner an."
 
+msgid "Подготовка…"
+msgstr "Vorbereitung…"
+
 #, python-brace-format
 msgid "Экспорт: {done}/{total}"
 msgstr "Export: {done}/{total}"
+
+msgid "Экспорт ещё выполняется. Остановить его?"
+msgstr "Der Export läuft noch. Anhalten?"
 
 #, python-brace-format
 msgid ""
@@ -1616,6 +1632,9 @@ msgstr "Verkleinern"
 #, python-brace-format
 msgid "Сжатие: {done}/{total}"
 msgstr "Komprimierung: {done}/{total}"
+
+msgid "Пересжатие ещё выполняется. Остановить его?"
+msgstr "Die Neukomprimierung läuft noch. Anhalten?"
 
 msgid "Полный просмотр"
 msgstr "Vollansicht"
@@ -1775,9 +1794,24 @@ msgstr "Stapelretusche gestartet…"
 msgid "Не удалось запустить воркер ретуши."
 msgstr "Der Retusche-Worker konnte nicht gestartet werden."
 
+msgid "Пакетная ретушь остановлена."
+msgstr "Stapel-Retusche angehalten."
+
 #, python-brace-format
 msgid "Ошибка ретуши: {error}"
 msgstr "Retuschefehler: {error}"
+
+msgid "Пауза."
+msgstr "Pausiert."
+
+msgid "Пакетная ретушь продолжается…"
+msgstr "Stapel-Retusche läuft weiter…"
+
+msgid "Ретушь ещё выполняется. Остановить её?"
+msgstr "Die Retusche läuft noch. Anhalten?"
+
+msgid "Останавливаю после текущего кадра…"
+msgstr "Halte nach dem aktuellen Bild an…"
 
 msgid "готово"
 msgstr "fertig"
@@ -2049,6 +2083,18 @@ msgid "Убрать из очереди"
 msgstr "Aus Warteschlange entfernen"
 
 #, python-brace-format
+msgid "≈ {h} ч {m} мин {s} с"
+msgstr "≈ {h} Std. {m} Min. {s} Sek."
+
+#, python-brace-format
+msgid "≈ {m} мин {s} с"
+msgstr "≈ {m} Min. {s} Sek."
+
+#, python-brace-format
+msgid "≈ {s} с"
+msgstr "≈ {s} Sek."
+
+#, python-brace-format
 msgid "{verb} все ({count})"
 msgstr "{verb}: alle ({count})"
 
@@ -2058,6 +2104,12 @@ msgstr "{verb}: Auswahl ({count})"
 
 msgid "В сетке ничего не выделено."
 msgstr "Im Raster ist nichts ausgewählt."
+
+msgid "Остановить операцию"
+msgstr "Vorgang anhalten"
+
+msgid "Останавливаю…"
+msgstr "Halte an…"
 
 msgid "+ Набор"
 msgstr "+ Set"
@@ -2164,3 +2216,6 @@ msgstr "Schnelle Sichtung und Auswahl von RAW- und JPG-Fotos"
 
 #~ msgid "Обработать {count} фото"
 #~ msgstr "{count} Fotos retuschieren"
+
+#~ msgid "≈ {h} ч {m} мин"
+#~ msgstr "≈ {h} Std. {m} Min."

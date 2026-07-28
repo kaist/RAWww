@@ -165,8 +165,43 @@ class _Preview:
         _event("preview", **values)
 
 
-def _batch(retoucher: SkinRetoucher, tasks: list[dict], settings: RetouchSettings) -> None:
+class _BatchControl:
+    """Пауза и остановка пакета, пришедшие в поток ввода по ходу работы.
+
+    Команду читает поток-читатель, а видит её обработка кадров на своей
+    границе: убивать процесс ради остановки нельзя, иначе в папке останется
+    недописанный ``.tmp`` вместо кадра.
+    """
+
+    def __init__(self) -> None:
+        self._running = threading.Event()
+        self._running.set()
+        self._stopped = False
+
+    def apply(self, command: str) -> None:
+        if command == "pause":
+            self._running.clear()
+        elif command == "resume":
+            self._running.set()
+        elif command == "stop":
+            self._stopped = True
+            self._running.set()
+
+    def wait_while_paused(self) -> bool:
+        self._running.wait()
+        return not self._stopped
+
+
+def _batch(
+    retoucher: SkinRetoucher,
+    tasks: list[dict],
+    settings: RetouchSettings,
+    control: _BatchControl | None = None,
+) -> None:
     for index, task in enumerate(tasks, 1):
+        if control is not None and not control.wait_while_paused():
+            _event("stopped", done=index - 1, total=len(tasks))
+            return
         source = Path(task["source"])
         original, _origin, _full_size = _read(source, task.get("max_side"))
         target = Path(task["target"])
@@ -174,16 +209,30 @@ def _batch(retoucher: SkinRetoucher, tasks: list[dict], settings: RetouchSetting
         _event("progress", done=index, total=len(tasks), source=str(source), target=str(target))
 
 
-def _jobs() -> queue.Queue:
-    """Читает задачи из stdin отдельным потоком: select на трубе не работает в Windows."""
+def _jobs(control: _BatchControl) -> queue.Queue:
+    """Читает задачи из stdin отдельным потоком: select на трубе не работает в Windows.
+
+    Команды управления разбираются здесь же и в очередь не попадают:
+    обработка пакета до своего конца не вернётся к чтению очереди, а пауза
+    нужна именно во время работы.
+    """
     incoming: queue.Queue = queue.Queue()
 
     def reader() -> None:
         # QProcess передаёт JSON в UTF-8, а ``sys.stdin`` на Windows может быть
         # обёрнут в cp1251/cp866 и испортить путь с кириллицей.
         for line in sys.stdin.buffer:
-            if line.strip():
-                incoming.put(line)
+            if not line.strip():
+                continue
+            try:
+                message = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            command = message.get("command") if isinstance(message, dict) else None
+            if command:
+                control.apply(str(command))
+                continue
+            incoming.put(message)
         incoming.put(None)
 
     threading.Thread(target=reader, daemon=True).start()
@@ -199,11 +248,12 @@ def main(argv: list[str] | None = None) -> int:
         retoucher: SkinRetoucher | None = None
         preview: _Preview | None = None
         if args.stdin:
-            incoming = _jobs()
+            control = _BatchControl()
+            incoming = _jobs(control)
             closed = False
             while True:
-                line = incoming.get()
-                if line is None:
+                job = incoming.get()
+                if job is None:
                     return 0
                 while not incoming.empty():
                     # Пока считался старый предпросмотр, ползунок уехал дальше:
@@ -218,8 +268,7 @@ def main(argv: list[str] | None = None) -> int:
                     # За брошенную задачу всё равно отчитываемся: интерфейс
                     # считает ответы, и без этого спиннер висел бы до конца.
                     _event("finished")
-                    line = newer
-                job = json.loads(line.decode("utf-8"))
+                    job = newer
                 if retoucher is None:
                     retoucher = SkinRetoucher(data_path("models") / "retouch")
                 settings = RetouchSettings(**job["settings"])
@@ -236,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
                     if closed:
                         return 0
                     continue
-                _batch(retoucher, job["tasks"], settings)
+                _batch(retoucher, job["tasks"], settings, control)
                 _event("finished")
                 return 0
         if args.job is None:

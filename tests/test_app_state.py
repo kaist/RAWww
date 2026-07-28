@@ -20,7 +20,8 @@ from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMenu, QStackedWidget, QVBoxLayout, QWidget
 
-from rawww.app import ChromeTabBar, FullView, MainWindow, VideoThumbnailer, Workspace, _application_settings, _delete_materialized_burst_files, _drive_key, _format_remaining_time, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_xmp_task
+from rawww.app import ChromeTabBar, FullView, MainWindow, VideoThumbnailer, Workspace, _application_settings, _delete_materialized_burst_files, _drive_key, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_xmp_task
+from rawww.widgets import format_remaining_time
 from rawww.canon_burst import BurstFrame
 from rawww.hotkeys import FIXED_HOTKEYS
 from rawww.theme import apply_theme
@@ -929,9 +930,9 @@ class AppStateTests(unittest.TestCase):
         workspace.deleteLater()
 
     def test_remaining_time_format_is_compact(self) -> None:
-        self.assertEqual(_format_remaining_time(12.4), "≈ 12 с")
-        self.assertEqual(_format_remaining_time(75), "≈ 1 мин 15 с")
-        self.assertEqual(_format_remaining_time(7_250), "≈ 2 ч 0 мин")
+        self.assertEqual(format_remaining_time(12.4), "≈ 12 с")
+        self.assertEqual(format_remaining_time(75), "≈ 1 мин 15 с")
+        self.assertEqual(format_remaining_time(7_250), "≈ 2 ч 0 мин 50 с")
 
     def test_cancel_ai_analysis_stops_pipeline_and_auto_restart(self) -> None:
         pipeline = Mock()

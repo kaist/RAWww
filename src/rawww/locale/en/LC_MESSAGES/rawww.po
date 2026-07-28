@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 11:03+0000\n"
+"POT-Creation-Date: 2026-07-28 12:24+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -126,18 +126,6 @@ msgstr "No internet connection."
 
 msgid "Не удалось подключиться к ShotSync."
 msgstr "Could not connect to ShotSync."
-
-#, python-brace-format
-msgid "≈ {h} ч {m} мин"
-msgstr "≈ {h} h {m} min"
-
-#, python-brace-format
-msgid "≈ {m} мин {s} с"
-msgstr "≈ {m} min {s} s"
-
-#, python-brace-format
-msgid "≈ {s} с"
-msgstr "≈ {s} s"
 
 msgid "Выполняется файловая операция"
 msgstr "File operation in progress"
@@ -724,19 +712,23 @@ msgid "В текущей папке нет JPG-файлов."
 msgstr "There are no JPG files in the current folder."
 
 #, python-brace-format
+msgid "Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}"
+msgstr "Done with errors ({count}). Saved {mb} MB. {first}"
+
+#, python-brace-format
 msgid "Готово. Сэкономлено {mb} МБ."
 msgstr "Done. Saved {mb} MB."
 
 #, python-brace-format
-msgid "Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}"
-msgstr "Done with errors ({count}). Saved {mb} MB. {first}"
-
-msgid "Закрыть"
-msgstr "Close"
+msgid "Остановлено. Сэкономлено {mb} МБ."
+msgstr "Stopped. Saved {mb} MB."
 
 #, python-brace-format
 msgid "Готово с ошибками ({count}): {first}"
 msgstr "Done with errors ({count}): {first}"
+
+msgid "Экспорт остановлен."
+msgstr "Export stopped."
 
 #, python-brace-format
 msgid "В папке экспорта уже есть «{name}»."
@@ -825,6 +817,9 @@ msgstr "Face added to the set."
 
 msgid "Наборы лиц"
 msgstr "Face sets"
+
+msgid "Закрыть"
+msgstr "Close"
 
 msgid "Добавьте лицо, нажав «В набор» на фотографии."
 msgstr "Add a face by clicking «To set» on a photo."
@@ -985,13 +980,25 @@ msgstr "Hotkeys"
 msgid "Папка связана с ShotSync"
 msgstr "Folder linked to ShotSync"
 
-msgid "Файловые операции не завершены"
-msgstr "File operations are not finished"
-
 msgid ""
 "Копирование или перемещение ещё выполняется. Выйти и отменить все "
 "операции?"
 msgstr "Copying or moving is still in progress. Exit and cancel all operations?"
+
+#, python-brace-format
+msgid ""
+"Ещё выполняются файловые операции и утилиты ({names}). Выйти и остановить"
+" их?"
+msgstr ""
+"File operations and utilities are still running ({names}). Quit and stop "
+"them?"
+
+#, python-brace-format
+msgid "Ещё выполняются утилиты ({names}). Выйти и остановить их?"
+msgstr "Utilities are still running ({names}). Quit and stop them?"
+
+msgid "Операции не завершены"
+msgstr "Operations are not finished"
 
 #, python-brace-format
 msgid "Не удалось подобрать свободное имя для {name}"
@@ -1454,6 +1461,9 @@ msgstr "Renaming: {done}/{total}"
 msgid "Обновляю кэш…"
 msgstr "Updating cache…"
 
+msgid "Переименование ещё выполняется. Остановить его?"
+msgstr "Renaming is still running. Stop it?"
+
 #, python-brace-format
 msgid "… ещё {n} файлов"
 msgstr "… {n} more files"
@@ -1565,9 +1575,15 @@ msgstr "Export folder"
 msgid "Укажите папку для экспорта."
 msgstr "Specify the export folder."
 
+msgid "Подготовка…"
+msgstr "Preparing…"
+
 #, python-brace-format
 msgid "Экспорт: {done}/{total}"
 msgstr "Export: {done}/{total}"
+
+msgid "Экспорт ещё выполняется. Остановить его?"
+msgstr "Export is still running. Stop it?"
 
 #, python-brace-format
 msgid ""
@@ -1588,6 +1604,9 @@ msgstr "Shrink"
 #, python-brace-format
 msgid "Сжатие: {done}/{total}"
 msgstr "Compression: {done}/{total}"
+
+msgid "Пересжатие ещё выполняется. Остановить его?"
+msgstr "Recompression is still running. Stop it?"
 
 msgid "Полный просмотр"
 msgstr "Full view"
@@ -1747,9 +1766,24 @@ msgstr "Batch retouch started…"
 msgid "Не удалось запустить воркер ретуши."
 msgstr "Could not start the retouch worker."
 
+msgid "Пакетная ретушь остановлена."
+msgstr "Batch retouch stopped."
+
 #, python-brace-format
 msgid "Ошибка ретуши: {error}"
 msgstr "Retouch error: {error}"
+
+msgid "Пауза."
+msgstr "Paused."
+
+msgid "Пакетная ретушь продолжается…"
+msgstr "Batch retouch continues…"
+
+msgid "Ретушь ещё выполняется. Остановить её?"
+msgstr "Retouch is still running. Stop it?"
+
+msgid "Останавливаю после текущего кадра…"
+msgstr "Stopping after the current frame…"
 
 msgid "готово"
 msgstr "done"
@@ -2017,6 +2051,18 @@ msgid "Убрать из очереди"
 msgstr "Remove from queue"
 
 #, python-brace-format
+msgid "≈ {h} ч {m} мин {s} с"
+msgstr "≈ {h} h {m} min {s} s"
+
+#, python-brace-format
+msgid "≈ {m} мин {s} с"
+msgstr "≈ {m} min {s} s"
+
+#, python-brace-format
+msgid "≈ {s} с"
+msgstr "≈ {s} s"
+
+#, python-brace-format
 msgid "{verb} все ({count})"
 msgstr "{verb} all ({count})"
 
@@ -2026,6 +2072,12 @@ msgstr "{verb} selected ({count})"
 
 msgid "В сетке ничего не выделено."
 msgstr "Nothing is selected in the grid."
+
+msgid "Остановить операцию"
+msgstr "Stop the operation"
+
+msgid "Останавливаю…"
+msgstr "Stopping…"
 
 msgid "+ Набор"
 msgstr "+ Set"
@@ -2132,3 +2184,6 @@ msgstr "Fast RAW and JPG viewing and culling"
 
 #~ msgid "Обработать {count} фото"
 #~ msgstr "Retouch {count} photos"
+
+#~ msgid "≈ {h} ч {m} мин"
+#~ msgstr "≈ {h} h {m} min"
