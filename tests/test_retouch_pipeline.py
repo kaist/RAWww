@@ -14,7 +14,7 @@ from unittest import mock
 import numpy as np
 
 from rawww import retouch_pipeline
-from rawww.retouch_pipeline import _pigments, _smooth, even_skin_tone
+from rawww.retouch_pipeline import _linear_to_srgb, _pigments, _smooth, _srgb_to_linear, even_skin_tone, matte_skin
 
 
 def _skin(size: int = 320, blotches: bool = True, zone: bool = False) -> np.ndarray:
@@ -23,7 +23,7 @@ def _skin(size: int = 320, blotches: bool = True, zone: bool = False) -> np.ndar
     Изображение строится прямо из карт пигментов, поэтому у теста есть
     достоверная «правда» о том, что должно исчезнуть, а что остаться.
     """
-    from rawww.retouch_pipeline import _PIGMENT_BASIS, _linear_to_srgb
+    from rawww.retouch_pipeline import _PIGMENT_BASIS
 
     rng = np.random.default_rng(3)
     yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
@@ -42,6 +42,19 @@ def _skin(size: int = 320, blotches: bool = True, zone: bool = False) -> np.ndar
     density = np.stack((melanin, hemoglobin, shading), axis=-1) @ _PIGMENT_BASIS.T
     density += rng.normal(0, .012, (size, size, 1)).astype(np.float32)
     return np.clip(_linear_to_srgb(np.exp(-density)) * 255 + .5, 0, 255).astype(np.uint8)
+
+
+def _shiny(size: int = 320, spread: float = .12, amount: float = .32) -> np.ndarray:
+    """Кожа с жирным блеском: нейтральный свет поверх матовой кожи.
+
+    Блик добавляется в линейном свете ровно так, как его описывает двухцветная
+    модель, поэтому у теста есть достоверная «правда»: сколько света лишнее,
+    какой под ним цвет кожи и какая текстура должна остаться.
+    """
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    linear = _srgb_to_linear(_skin(size, blotches=False))
+    blob = np.exp(-(((xx - size * .5) ** 2 + (yy - size * .42) ** 2) / (2 * (size * spread) ** 2)))
+    return np.clip(_linear_to_srgb(linear + (blob * amount)[..., None]) * 255 + .5, 0, 255).astype(np.uint8)
 
 
 class SmoothTest(unittest.TestCase):
@@ -138,6 +151,61 @@ class EvenSkinToneTest(unittest.TestCase):
         rgb[:40] = 0
         result = even_skin_tone(rgb, self.weights, 1.0, self.face_scale)
         self.assertTrue(np.array_equal(result[:30], rgb[:30]))
+
+
+class MatteSkinTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.rgb = _shiny()
+        self.weights = np.ones(self.rgb.shape[:2], np.float32)
+        self.face_scale = 220.0
+        size = self.rgb.shape[0]
+        self.shine = (slice(int(size * .34), int(size * .50)), slice(int(size * .42), int(size * .58)))
+        self.matte = (slice(int(size * .78), size), slice(int(size * .10), int(size * .40)))
+
+    def _luma(self, rgb: np.ndarray) -> np.ndarray:
+        return rgb.astype(np.float32) @ retouch_pipeline._LUMA
+
+    def _saturation(self, rgb: np.ndarray) -> float:
+        values = rgb.astype(np.float32)
+        return float((1.0 - values.min(-1) / np.maximum(values.max(-1), 1.0)).mean())
+
+    def test_zero_strength_keeps_pixels(self) -> None:
+        self.assertTrue(np.array_equal(matte_skin(self.rgb, self.weights, 0.0, self.face_scale), self.rgb))
+
+    def test_shine_fades_and_grows_with_strength(self) -> None:
+        excess = lambda rgb: float(self._luma(rgb)[self.shine].mean() - self._luma(rgb)[self.matte].mean())
+        half = matte_skin(self.rgb, self.weights, .5, self.face_scale)
+        full = matte_skin(self.rgb, self.weights, 1.0, self.face_scale)
+        self.assertLess(excess(half), excess(self.rgb) * .8)
+        self.assertLess(excess(full), excess(half) * .8)
+
+    def test_skin_colour_returns_under_shine(self) -> None:
+        """Одно затемнение оставляет серое пятно: цвет обязан вернуться."""
+        result = matte_skin(self.rgb, self.weights, 1.0, self.face_scale)
+        target = self._saturation(self.rgb[self.matte])
+        self.assertLess(self._saturation(self.rgb[self.shine]), target * .8)
+        self.assertGreater(self._saturation(result[self.shine]), self._saturation(self.rgb[self.shine]) * 1.2)
+        self.assertLess(self._saturation(result[self.shine]), target * 1.2)
+
+    def test_texture_survives_under_shine(self) -> None:
+        result = matte_skin(self.rgb, self.weights, 1.0, self.face_scale)
+        texture = lambda rgb: float((self._luma(rgb) - _smooth(self._luma(rgb), 2))[self.shine].std())
+        self.assertGreater(texture(result), texture(self.rgb) * .7)
+
+    def test_even_sheen_is_left_alone(self) -> None:
+        """Ровный общий подсвет — это освещение кадра, а не жирный блеск."""
+        flat = _shiny(spread=8.0)
+        peak = lambda rgb, out: float(np.abs(out.astype(np.float32) - rgb).max())
+        even = peak(flat, matte_skin(flat, self.weights, 1.0, self.face_scale))
+        spot = peak(self.rgb, matte_skin(self.rgb, self.weights, 1.0, self.face_scale))
+        self.assertLess(even, spot * .35)
+
+    def test_mask_limits_correction(self) -> None:
+        weights = self.weights.copy()
+        weights[:, :100] = 0.0
+        result = matte_skin(self.rgb, weights, 1.0, self.face_scale)
+        self.assertTrue(np.array_equal(result[:, :100], self.rgb[:, :100]))
+        self.assertFalse(np.array_equal(result[self.shine], self.rgb[self.shine]))
 
 
 if __name__ == "__main__":

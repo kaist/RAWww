@@ -1635,6 +1635,9 @@ msgstr "模型在独立进程中运行，并会在每次预览和整批处理后
 msgid "Выравнивание тона кожи"
 msgstr "肤色均匀"
 
+msgid "Матирование кожи"
+msgstr "皮肤去油光"
+
 msgid "Dodge & Burn"
 msgstr "加深减淡"
 
