@@ -1424,15 +1424,6 @@ def apply_theme(app: QApplication) -> None:
         QListWidget#batchRenameList::item { padding: 3px 5px; }
         QLabel#batchRenameValidation { background: transparent; color: #9eb7ce; min-height: 18px; }
         QLabel#batchRenameValidation[invalid="true"] { color: #f08b8b; }
-        QProgressBar#batchRenameProgress {
-            min-height: 20px;
-            border: 1px solid #46576a;
-            border-radius: 5px;
-            background: #181818;
-            color: #e7f0fb;
-            text-align: center;
-        }
-        QProgressBar#batchRenameProgress::chunk { background: #386f9e; border-radius: 4px; }
         QPushButton#batchRenameSecondaryButton, QPushButton#batchRenamePrimaryButton {
             min-height: 31px;
             padding: 3px 13px;
@@ -1574,7 +1565,7 @@ def apply_theme(app: QApplication) -> None:
         QCheckBox#batchResizeOption:disabled, QLabel#batchResizeSettingLabel:disabled { background: transparent; color: #727982; }
         QLabel#batchResizeSettingLabel { color: #9fabb8; font-size: 11px; }
         QLabel#batchResizeStatus { min-height: 18px; color: #9eb7ce; font-size: 11px; }
-        QProgressBar#batchResizeProgress {
+        QProgressBar#batchProgress {
             min-height: 20px;
             border: 1px solid #46576a;
             border-radius: 5px;
@@ -1582,7 +1573,23 @@ def apply_theme(app: QApplication) -> None:
             color: #e7f0fb;
             text-align: center;
         }
-        QProgressBar#batchResizeProgress::chunk { background: #386f9e; border-radius: 4px; }
+        QProgressBar#batchProgress::chunk { background: #386f9e; border-radius: 4px; }
+        QToolButton#batchProgressAction, QToolButton#batchProgressStop {
+            min-width: 22px;
+            max-width: 22px;
+            min-height: 22px;
+            max-height: 22px;
+            padding: 0;
+            border: 1px solid #46576a;
+            border-radius: 4px;
+            background: transparent;
+            color: #e8e8e8;
+        }
+        QToolButton#batchProgressAction:hover { background: #3c4a5a; }
+        QToolButton#batchProgressStop:hover { background: #633536; border-color: #a65c5d; }
+        QToolButton#batchProgressAction:disabled, QToolButton#batchProgressStop:disabled {
+            border-color: #3a3f46;
+        }
         QPushButton#batchResizeSecondaryButton, QPushButton#batchResizePrimaryButton {
             min-height: 31px;
             padding: 3px 13px;

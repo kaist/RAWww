@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 11:03+0000\n"
+"POT-Creation-Date: 2026-07-28 12:24+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -126,18 +126,6 @@ msgstr "无网络连接。"
 
 msgid "Не удалось подключиться к ShotSync."
 msgstr "无法连接到 ShotSync。"
-
-#, python-brace-format
-msgid "≈ {h} ч {m} мин"
-msgstr "≈ {h} 小时 {m} 分"
-
-#, python-brace-format
-msgid "≈ {m} мин {s} с"
-msgstr "≈ {m} 分 {s} 秒"
-
-#, python-brace-format
-msgid "≈ {s} с"
-msgstr "≈ {s} 秒"
 
 msgid "Выполняется файловая операция"
 msgstr "正在执行文件操作"
@@ -717,19 +705,23 @@ msgid "В текущей папке нет JPG-файлов."
 msgstr "当前文件夹中没有 JPG 文件。"
 
 #, python-brace-format
+msgid "Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}"
+msgstr "完成但有错误（{count}）。已节省 {mb} MB。{first}"
+
+#, python-brace-format
 msgid "Готово. Сэкономлено {mb} МБ."
 msgstr "完成。已节省 {mb} MB。"
 
 #, python-brace-format
-msgid "Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}"
-msgstr "完成但有错误（{count}）。已节省 {mb} MB。{first}"
-
-msgid "Закрыть"
-msgstr "关闭"
+msgid "Остановлено. Сэкономлено {mb} МБ."
+msgstr "已停止。已节省 {mb} MB。"
 
 #, python-brace-format
 msgid "Готово с ошибками ({count}): {first}"
 msgstr "完成但有错误（{count}）：{first}"
+
+msgid "Экспорт остановлен."
+msgstr "导出已停止。"
 
 #, python-brace-format
 msgid "В папке экспорта уже есть «{name}»."
@@ -818,6 +810,9 @@ msgstr "已将人脸加入集合。"
 
 msgid "Наборы лиц"
 msgstr "人脸集合"
+
+msgid "Закрыть"
+msgstr "关闭"
 
 msgid "Добавьте лицо, нажав «В набор» на фотографии."
 msgstr "在照片上点击「加入集合」以添加人脸。"
@@ -974,13 +969,23 @@ msgstr "快捷键"
 msgid "Папка связана с ShotSync"
 msgstr "文件夹已关联 ShotSync"
 
-msgid "Файловые операции не завершены"
-msgstr "文件操作尚未完成"
-
 msgid ""
 "Копирование или перемещение ещё выполняется. Выйти и отменить все "
 "операции?"
 msgstr "复制或移动仍在进行中。退出并取消所有操作？"
+
+#, python-brace-format
+msgid ""
+"Ещё выполняются файловые операции и утилиты ({names}). Выйти и остановить"
+" их?"
+msgstr "文件操作和工具仍在运行（{names}）。退出并停止它们？"
+
+#, python-brace-format
+msgid "Ещё выполняются утилиты ({names}). Выйти и остановить их?"
+msgstr "工具仍在运行（{names}）。退出并停止它们？"
+
+msgid "Операции не завершены"
+msgstr "操作尚未完成"
 
 #, python-brace-format
 msgid "Не удалось подобрать свободное имя для {name}"
@@ -1417,6 +1422,9 @@ msgstr "重命名：{done}/{total}"
 msgid "Обновляю кэш…"
 msgstr "正在更新缓存…"
 
+msgid "Переименование ещё выполняется. Остановить его?"
+msgstr "重命名仍在进行。要停止吗？"
+
 #, python-brace-format
 msgid "… ещё {n} файлов"
 msgstr "… 还有 {n} 个文件"
@@ -1526,9 +1534,15 @@ msgstr "导出文件夹"
 msgid "Укажите папку для экспорта."
 msgstr "请指定导出文件夹。"
 
+msgid "Подготовка…"
+msgstr "准备中…"
+
 #, python-brace-format
 msgid "Экспорт: {done}/{total}"
 msgstr "导出：{done}/{total}"
+
+msgid "Экспорт ещё выполняется. Остановить его?"
+msgstr "导出仍在进行。要停止吗？"
 
 #, python-brace-format
 msgid ""
@@ -1548,6 +1562,9 @@ msgstr "压缩"
 #, python-brace-format
 msgid "Сжатие: {done}/{total}"
 msgstr "压缩：{done}/{total}"
+
+msgid "Пересжатие ещё выполняется. Остановить его?"
+msgstr "重新压缩仍在进行。要停止吗？"
 
 msgid "Полный просмотр"
 msgstr "全屏查看"
@@ -1705,9 +1722,24 @@ msgstr "已开始批量修图…"
 msgid "Не удалось запустить воркер ретуши."
 msgstr "无法启动修图工作进程。"
 
+msgid "Пакетная ретушь остановлена."
+msgstr "批量修饰已停止。"
+
 #, python-brace-format
 msgid "Ошибка ретуши: {error}"
 msgstr "修图错误：{error}"
+
+msgid "Пауза."
+msgstr "已暂停。"
+
+msgid "Пакетная ретушь продолжается…"
+msgstr "批量修饰继续…"
+
+msgid "Ретушь ещё выполняется. Остановить её?"
+msgstr "修饰仍在进行。要停止吗？"
+
+msgid "Останавливаю после текущего кадра…"
+msgstr "将在当前照片后停止…"
 
 msgid "готово"
 msgstr "完成"
@@ -1971,6 +2003,18 @@ msgid "Убрать из очереди"
 msgstr "从队列中移除"
 
 #, python-brace-format
+msgid "≈ {h} ч {m} мин {s} с"
+msgstr "≈ {h} 小时 {m} 分 {s} 秒"
+
+#, python-brace-format
+msgid "≈ {m} мин {s} с"
+msgstr "≈ {m} 分 {s} 秒"
+
+#, python-brace-format
+msgid "≈ {s} с"
+msgstr "≈ {s} 秒"
+
+#, python-brace-format
 msgid "{verb} все ({count})"
 msgstr "{verb}全部（{count}）"
 
@@ -1980,6 +2024,12 @@ msgstr "{verb}所选（{count}）"
 
 msgid "В сетке ничего не выделено."
 msgstr "网格中没有选中的照片。"
+
+msgid "Остановить операцию"
+msgstr "停止操作"
+
+msgid "Останавливаю…"
+msgstr "正在停止…"
 
 msgid "+ Набор"
 msgstr "+ 集合"
@@ -2086,3 +2136,6 @@ msgstr "快速查看和筛选 RAW 与 JPG 照片"
 
 #~ msgid "Обработать {count} фото"
 #~ msgstr "修饰 {count} 张照片"
+
+#~ msgid "≈ {h} ч {m} мин"
+#~ msgstr "≈ {h} 小时 {m} 分"

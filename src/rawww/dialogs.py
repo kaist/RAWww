@@ -10,7 +10,7 @@ import sys
 
 from PySide6.QtCore import QEvent, QKeyCombination, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import QApplication, QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar, QPushButton, QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QTextEdit
+from PySide6.QtWidgets import QApplication, QButtonGroup, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QKeySequenceEdit, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget, QTextEdit
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -29,7 +29,14 @@ from .error_log import clear_error_log, read_error_log
 from .runtime_paths import filesystem_name_key
 from .shotsync_client import ShotSyncClient
 from .theme import _fomantic_icon
-from .widgets import CodeCompletingLineEdit, CodeReplacementsEditor, ScopeButtons, SettingsCheckBox
+from .widgets import (
+    BatchProgressBar,
+    CodeCompletingLineEdit,
+    CodeReplacementsEditor,
+    ScopeButtons,
+    SettingsCheckBox,
+    ask_stop_running_operation,
+)
 from .version import __version__ as APP_VERSION
 from . import i18n
 from .i18n import gettext as _
@@ -1046,6 +1053,8 @@ class BatchRenameDialog(QDialog):
     """
 
     renameRequested = Signal(object)
+    pauseToggled = Signal(bool)
+    stopRequested = Signal()
     _preview_limit = 300
     _token_pattern = re.compile(
         r"\{counter(?::(\d+))?\}|\{(year|month|day|hour|minute|second|date|time|datetime)\}"
@@ -1170,10 +1179,7 @@ class BatchRenameDialog(QDialog):
         self.validation_label.setObjectName("batchRenameValidation")
         self.validation_label.setWordWrap(True)
         layout.addWidget(self.validation_label)
-        self.rename_progress = QProgressBar()
-        self.rename_progress.setObjectName("batchRenameProgress")
-        self.rename_progress.setTextVisible(True)
-        self.rename_progress.hide()
+        self.rename_progress = BatchProgressBar()
         layout.addWidget(self.rename_progress)
 
         buttons = QHBoxLayout()
@@ -1182,6 +1188,8 @@ class BatchRenameDialog(QDialog):
         self.cancel_button.setObjectName("batchRenameSecondaryButton")
         self.cancel_button.clicked.connect(self.reject)
         buttons.addWidget(self.cancel_button)
+        self.rename_progress.pauseToggled.connect(self.pauseToggled)
+        self.rename_progress.stopRequested.connect(self._ask_stop)
         self.scope = ScopeButtons(_("Переименовать"), len(self.all_paths), len(self.selected_paths), "batchRename", icon="edit")
         self.scope.startRequested.connect(self._request_rename)
         buttons.addWidget(self.scope)
@@ -1252,20 +1260,22 @@ class BatchRenameDialog(QDialog):
         self.counter_digits.setEnabled(False)
         self.scope.setEnabled(False)
         self.cancel_button.setEnabled(False)
-        self.rename_progress.setRange(0, max(1, total))
-        self.rename_progress.setValue(0)
-        self.rename_progress.setFormat(_("Переименование: 0/%m"))
-        self.rename_progress.show()
+        self.rename_progress.start(total, _("Переименование: 0/%m"))
 
     def update_rename_progress(self, completed: int, total: int) -> None:
-        self.rename_progress.setRange(0, max(1, total))
-        self.rename_progress.setValue(completed)
-        self.rename_progress.setFormat(_("Переименование: {done}/{total}").format(done=completed, total=total))
+        self.rename_progress.set_progress(
+            completed, total,
+            _("Переименование: {done}/{total}").format(done=completed, total=total),
+        )
 
     def set_cache_updating(self) -> None:
         """Объясняет паузу после файловой части, пока в фоне переносится SQLite-кэш."""
-        self.rename_progress.setRange(0, 0)
-        self.rename_progress.setFormat(_("Обновляю кэш…"))
+        self.rename_progress.set_indeterminate(_("Обновляю кэш…"))
+        self.rename_progress.finish()
+
+    def set_stopping(self) -> None:
+        """Показывает, что остановка ждёт границы файла, а не рвёт переименование."""
+        self.rename_progress.set_stopping()
 
     def rename_failed(self, message: str) -> None:
         self._renaming = False
@@ -1281,8 +1291,26 @@ class BatchRenameDialog(QDialog):
         self.validation_label.style().polish(self.validation_label)
 
     def reject(self) -> None:
-        if not self._renaming:
-            super().reject()
+        if self._renaming:
+            self._ask_stop()
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        """Не закрывает окно молча: незаданный вопрос стоил бы половины плана."""
+        if self._renaming:
+            event.ignore()
+            self._ask_stop()
+            return
+        super().closeEvent(event)
+
+    def _ask_stop(self) -> None:
+        if ask_stop_running_operation(
+            self,
+            _("Групповое переименование"),
+            _("Переименование ещё выполняется. Остановить его?"),
+        ):
+            self.stopRequested.emit()
 
     def accept(self) -> None:
         self.settings.setValue("batch_rename/template", self.template_edit.text())
@@ -1571,10 +1599,13 @@ class BatchResizeDialog(QDialog):
     """
 
     startRequested = Signal(object)
+    pauseToggled = Signal(bool)
+    stopRequested = Signal()
 
     def __init__(self, source_dir: Path, settings: QSettings, total: int = 0, selected: int = 0, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
+        self._running = False
         self.setObjectName("batchResizeDialog")
         self.setWindowTitle(_("Групповой резайс"))
         self.setModal(True)
@@ -1689,10 +1720,9 @@ class BatchResizeDialog(QDialog):
         self.status = QLabel()
         self.status.setObjectName("batchResizeStatus")
         layout.addWidget(self.status)
-        self.progress = QProgressBar()
-        self.progress.setObjectName("batchResizeProgress")
-        self.progress.setFixedHeight(0)
-        self.progress.hide()
+        self.progress = BatchProgressBar()
+        self.progress.pauseToggled.connect(self.pauseToggled)
+        self.progress.stopRequested.connect(self._ask_stop)
         layout.addWidget(self.progress)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
@@ -1732,28 +1762,56 @@ class BatchResizeDialog(QDialog):
         })
 
     def set_running(self, total: int) -> None:
+        self._running = True
         for widget in (self.output_edit, self.max_side, self.sharpen, self.sharpen_amount, self.unsharp, self.unsharp_radius, self.unsharp_amount, self.unsharp_threshold, self.keep_exif, self.scope, self.cancel_button):
             widget.setEnabled(False)
-        self.progress.setRange(0, total)
-        self.progress.setValue(0)
-        self.progress.setFixedHeight(20)
-        self.progress.show()
+        self.progress.start(total, _("Подготовка…"))
 
     def update_progress(self, value: int, total: int) -> None:
-        self.progress.setRange(0, total)
-        self.progress.setValue(value)
-        self.progress.setFormat(_("Экспорт: {done}/{total}").format(done=value, total=total))
-        QApplication.processEvents()
+        self.progress.set_progress(value, total, _("Экспорт: {done}/{total}").format(done=value, total=total))
+
+    def set_finished(self, summary: str) -> None:
+        """Переводит окно в состояние отчёта: больше нет ни паузы, ни остановки."""
+        self._running = False
+        self.progress.finish()
+        self.status.setText(summary)
+        self.cancel_button.setEnabled(True)
+        self.cancel_button.setText(_("Закрыть"))
+
+    def reject(self) -> None:
+        if self._running:
+            self._ask_stop()
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._running:
+            event.ignore()
+            self._ask_stop()
+            return
+        super().closeEvent(event)
+
+    def _ask_stop(self) -> None:
+        if ask_stop_running_operation(
+            self,
+            _("Групповой резайс"),
+            _("Экспорт ещё выполняется. Остановить его?"),
+        ):
+            self.progress.set_stopping()
+            self.stopRequested.emit()
 
 
 class ShrinkJpegDialog(QDialog):
     """Настраивает пересжатие JPEG текущей папки с выбранным качеством."""
 
     startRequested = Signal(object)
+    pauseToggled = Signal(bool)
+    stopRequested = Signal()
 
     def __init__(self, source_dir: Path, count: int, settings: QSettings, selected: int = 0, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
+        self._running = False
         self.setObjectName("shrinkJpegDialog")
         self.setWindowTitle(_("Уменьшить JPG"))
         self.setModal(True)
@@ -1801,10 +1859,9 @@ class ShrinkJpegDialog(QDialog):
         self.status.setObjectName("batchResizeStatus")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        self.progress = QProgressBar()
-        self.progress.setObjectName("batchResizeProgress")
-        self.progress.setFixedHeight(0)
-        self.progress.hide()
+        self.progress = BatchProgressBar()
+        self.progress.pauseToggled.connect(self.pauseToggled)
+        self.progress.stopRequested.connect(self._ask_stop)
         layout.addWidget(self.progress)
 
         buttons = QHBoxLayout()
@@ -1828,15 +1885,39 @@ class ShrinkJpegDialog(QDialog):
         })
 
     def set_running(self, total: int) -> None:
+        self._running = True
         for widget in (self.quality, self.keep_exif, self.scope, self.cancel_button):
             widget.setEnabled(False)
-        self.progress.setRange(0, total)
-        self.progress.setValue(0)
-        self.progress.setFixedHeight(20)
-        self.progress.show()
+        self.progress.start(total, _("Подготовка…"))
 
     def update_progress(self, value: int, total: int) -> None:
-        self.progress.setRange(0, total)
-        self.progress.setValue(value)
-        self.progress.setFormat(_("Сжатие: {done}/{total}").format(done=value, total=total))
-        QApplication.processEvents()
+        self.progress.set_progress(value, total, _("Сжатие: {done}/{total}").format(done=value, total=total))
+
+    def set_finished(self, summary: str) -> None:
+        self._running = False
+        self.progress.finish()
+        self.status.setText(summary)
+        self.cancel_button.setEnabled(True)
+        self.cancel_button.setText(_("Закрыть"))
+
+    def reject(self) -> None:
+        if self._running:
+            self._ask_stop()
+            return
+        super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._running:
+            event.ignore()
+            self._ask_stop()
+            return
+        super().closeEvent(event)
+
+    def _ask_stop(self) -> None:
+        if ask_stop_running_operation(
+            self,
+            _("Уменьшить JPG"),
+            _("Пересжатие ещё выполняется. Остановить его?"),
+        ):
+            self.progress.set_stopping()
+            self.stopRequested.emit()

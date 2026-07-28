@@ -16,12 +16,16 @@ from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QFileDialog, QFrame, QGraphicsPixmapItem, QGraphicsScene,
     QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QProgressBar, QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget,
+    QScrollArea, QSlider, QToolButton, QVBoxLayout, QWidget,
 )
 
+from .batch_jobs import CallbackJobControl, UtilityJob, utility_progress_hub
 from .i18n import gettext as _
 from .theme import _fomantic_icon
-from .widgets import ScopeButtons, SettingsCheckBox
+from .widgets import (
+    BatchProgressBar, ScopeButtons, SettingsCheckBox, ask_stop_running_operation,
+    format_remaining_time,
+)
 
 _FIELD_HEIGHT = 40
 # Задержка дребезга предпросмотра: ползунок успевает доехать, а воркер не
@@ -246,6 +250,13 @@ class BatchRetouchDialog(QDialog):
         self._streams = {"preview": b"", "batch": b""}
         self._pending_previews = 0
         self._batch_running = False
+        # Колбэки QProcess приходят и после удаления виджетов окна, поэтому
+        # закрытие сначала помечается флагом, а потом гасит процессы.
+        self._closed = False
+        self._batch_entry: UtilityJob | None = None
+        self._batch_control: CallbackJobControl | None = None
+        self._batch_paused_at: float | None = None
+        self._batch_paused_total = 0.0
         self._sliders: list[QSlider] = []
         self._before_preview = QPixmap()
         self._after_preview = QPixmap()
@@ -377,9 +388,9 @@ class BatchRetouchDialog(QDialog):
         self.status.setObjectName("batchResizeStatus")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        self.progress = QProgressBar()
-        self.progress.setObjectName("batchResizeProgress")
-        self.progress.hide()
+        self.progress = BatchProgressBar()
+        self.progress.pauseToggled.connect(self._set_batch_paused)
+        self.progress.stopRequested.connect(self._ask_stop_batch)
         layout.addWidget(self.progress)
         self.batch = ScopeButtons(_("Обработать"), len(self._paths), len(self._selected), "batchResize", icon="magic", vertical=True)
         self.batch.startRequested.connect(self._start_batch)
@@ -585,17 +596,27 @@ class BatchRetouchDialog(QDialog):
         output = Path(output_text).expanduser()
         self._batch_running = True
         self._batch_started_at = monotonic()
+        self._batch_paused_at = None
+        self._batch_paused_total = 0.0
         self.batch.setEnabled(False)
-        self.progress.setRange(0, len(sources))
-        self.progress.setValue(0)
-        self.progress.show()
+        self.progress.start(len(sources), _("Подготовка…"))
         self.status.setText(_("Запущена пакетная ретушь…"))
         # Пакет получает всю машину: процесс предпросмотра с его моделями и
         # кэшем кадра на это время закрывается.
         self._stop_preview_process()
         self.preview.set_loading(False)
         self._batch_process = self._start_worker(preview=False)
-        self._send(self._batch_process, {"settings": self._options(), "tasks": self._batch_tasks(output, sources), "preview": False}, last=True)
+        self._batch_control = CallbackJobControl(
+            lambda: self._command("pause"),
+            lambda: self._command("resume"),
+            lambda: self._command("stop"),
+        )
+        hub = utility_progress_hub()
+        self._batch_entry = hub.register(_("Пакетная ретушь"), self._batch_control)
+        hub.update(self._batch_entry, 0, len(sources))
+        # Канал записи остаётся открытым: по нему воркер получает паузу и
+        # остановку, а завершается он всё равно сам после последнего кадра.
+        self._send(self._batch_process, {"settings": self._options(), "tasks": self._batch_tasks(output, sources), "preview": False})
 
     def _batch_tasks(self, output: Path, sources: list[Path]) -> list[dict]:
         """Подбирает новые JPEG-имена, не затирая RAW+JPEG-пары и старый экспорт."""
@@ -632,17 +653,33 @@ class BatchRetouchDialog(QDialog):
         if last:
             process.closeWriteChannel()
 
+    @staticmethod
+    def _detach(process: QProcess) -> None:
+        """Снимает подписки перед завершением процесса.
+
+        Сигнал «процесс завершён» приходит и после того, как Qt удалил виджеты
+        окна, а обработчик тогда падает на уже мёртвом ``QLabel``.
+        """
+        for signal in (process.readyReadStandardOutput, process.finished, process.errorOccurred):
+            try:
+                signal.disconnect()
+            except RuntimeError:
+                pass
+
     def _stop_preview_process(self) -> None:
         process, self._preview_process = self._preview_process, None
         self._pending_previews = 0
         self._streams["preview"] = b""
         if process is not None:
+            self._detach(process)
             process.closeWriteChannel()
             if not process.waitForFinished(1500):
                 process.kill()
                 process.waitForFinished(1000)
 
     def _worker_start_error(self, process: QProcess) -> None:
+        if self._closed:
+            return
         if process is self._preview_process:
             self._preview_process = None
             self._pending_previews = 0
@@ -651,6 +688,8 @@ class BatchRetouchDialog(QDialog):
             self.status.setText(_("Не удалось запустить воркер ретуши."))
 
     def _read_events(self, process: QProcess, preview: bool) -> None:
+        if self._closed:
+            return
         # Кадр предпросмотра — это сотни килобайт base64, и труба отдаёт его
         # кусками: собираем буфер и разбираем только целые строки.
         key = "preview" if preview else "batch"
@@ -665,6 +704,8 @@ class BatchRetouchDialog(QDialog):
             kind = event.get("event")
             if kind == "progress" and not preview:
                 self._show_progress(event)
+            elif kind == "stopped" and not preview:
+                self.status.setText(_("Пакетная ретушь остановлена."))
             elif kind == "error":
                 self.status.setText(_("Ошибка ретуши: {error}").format(error=event.get("message", "")))
             elif kind == "preview" and preview:
@@ -674,13 +715,62 @@ class BatchRetouchDialog(QDialog):
                 if not self._pending_previews:
                     self._preview_done()
 
+    def _command(self, command: str) -> None:
+        """Отправляет воркеру команду управления пакетом без новых задач."""
+        process = self._batch_process
+        if process is not None and process.state() != QProcess.ProcessState.NotRunning:
+            process.write(json.dumps({"command": command}).encode("utf-8") + b"\n")
+
+    def _set_batch_paused(self, paused: bool) -> None:
+        control = self._batch_control
+        if control is None:
+            return
+        control.pause() if paused else control.resume()
+        # Пауза не должна участвовать в оценке времени: иначе после перерыва
+        # на обед оставшееся время выглядит катастрофическим.
+        if paused:
+            self._batch_paused_at = monotonic()
+        elif self._batch_paused_at is not None:
+            self._batch_paused_total += monotonic() - self._batch_paused_at
+            self._batch_paused_at = None
+        self.status.setText(_("Пауза.") if paused else _("Пакетная ретушь продолжается…"))
+        utility_progress_hub().notify_changed()
+
+    def _ask_stop_batch(self) -> bool:
+        """Спрашивает подтверждение и просит воркер закончить на границе кадра."""
+        if not self._batch_running:
+            return True
+        if not ask_stop_running_operation(
+            self,
+            _("Пакетная ретушь"),
+            _("Ретушь ещё выполняется. Остановить её?"),
+        ):
+            return False
+        if self._batch_control is not None:
+            self._batch_control.stop()
+        self.progress.set_stopping()
+        self.status.setText(_("Останавливаю после текущего кадра…"))
+        utility_progress_hub().notify_changed()
+        return True
+
     def _show_progress(self, event: dict) -> None:
         done, total = int(event["done"]), int(event["total"])
-        self.progress.setValue(done)
-        elapsed = max(0.001, monotonic() - self._batch_started_at)
-        remaining = round(elapsed / done * (total - done)) if done else 0
-        suffix = _("≈ {s} с").format(s=remaining) if done < total else _("готово")
-        self.progress.setFormat(_("Ретушь: {done}/{total}").format(done=done, total=total) + f" · {suffix}")
+        if self._batch_entry is not None:
+            utility_progress_hub().update(self._batch_entry, done, total)
+        if not done:
+            # По нулю кадров оценивать нечего: честнее сказать о подготовке.
+            self.progress.set_progress(0, total, _("Подготовка…"))
+            return
+        elapsed = max(0.001, monotonic() - self._batch_started_at - self._batch_paused_total)
+        suffix = (
+            format_remaining_time(elapsed / done * (total - done))
+            if done < total
+            else _("готово")
+        )
+        self.progress.set_progress(
+            done, total,
+            _("Ретушь: {done}/{total}").format(done=done, total=total) + f" · {suffix}",
+        )
 
     def _show_preview(self, event: dict) -> None:
         pixmap = QPixmap()
@@ -721,6 +811,8 @@ class BatchRetouchDialog(QDialog):
         self.status.setText(_("Предпросмотр готов.") if self.preview.has_preview() else _("Не удалось подготовить предпросмотр."))
 
     def _finished(self, process: QProcess, preview: bool) -> None:
+        if self._closed:
+            return
         if preview:
             if process is self._preview_process:
                 self._preview_process = None
@@ -731,12 +823,54 @@ class BatchRetouchDialog(QDialog):
             return
         self._batch_process = None
         self._batch_running = False
+        stopped = self._batch_control is not None and self._batch_control.stopped
+        self._release_batch_entry()
         self.batch.setEnabled(True)
+        self.progress.finish()
+        if stopped:
+            self.status.setText(_("Пакетная ретушь остановлена."))
+            return
         self.status.setText(_("Пакетная ретушь завершена.") if process.exitCode() == 0 else _("Пакетная ретушь завершилась с ошибкой."))
 
-    def closeEvent(self, event) -> None:  # noqa: N802
+    def _release_batch_entry(self) -> None:
+        entry, self._batch_entry = self._batch_entry, None
+        self._batch_control = None
+        if entry is not None:
+            utility_progress_hub().finish(entry)
+
+    def _shutdown_workers(self) -> None:
+        """Гасит воркеры до удаления виджетов окна.
+
+        Окно закрывают и крестиком, и «Закрыть», и Escape, а Qt удаляет виджеты
+        сразу за выходом из ``exec()``. Пока процессы живы, их сигналы приходят
+        в уже мёртвые кнопки, поэтому владелец помечается закрытым первым.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._batch_running = False
         self._stop_preview_process()
         if self._batch_process is not None:
-            self._batch_process.kill()
-            self._batch_process.waitForFinished(1000)
+            self._detach(self._batch_process)
+            # Остановка уже отправлена, осталось дать воркеру дописать кадр
+            # в работе; только молчаливый процесс снимается жёстко.
+            self._batch_process.closeWriteChannel()
+            if not self._batch_process.waitForFinished(15000):
+                self._batch_process.kill()
+                self._batch_process.waitForFinished(1000)
+            self._batch_process = None
+        self._release_batch_entry()
+
+    def reject(self) -> None:
+        """Закрывает окно только после согласия остановить незаконченный пакет."""
+        if self._batch_running and not self._ask_stop_batch():
+            return
+        self._shutdown_workers()
+        super().reject()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._batch_running and not self._ask_stop_batch():
+            event.ignore()
+            return
+        self._shutdown_workers()
         super().closeEvent(event)

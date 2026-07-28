@@ -185,7 +185,7 @@ class TransferQueueTests(unittest.TestCase):
 
         Workspace._set_taskbar_progress(workspace, 2, 3)
 
-        taskbar.set_progress.assert_called_once_with(42, 7, 9)
+        taskbar.set_progress.assert_called_once_with(42, 7, 9, False)
         dock.set_progress.assert_called_once_with(7, 9)
 
     def test_parallel_card_tasks_share_slots_when_regular_queue_is_serial(self) -> None:
@@ -273,6 +273,7 @@ class TransferQueueTests(unittest.TestCase):
         window = SimpleNamespace(
             _closing=False,
             transfer_manager=SimpleNamespace(active={"running": object()}, pending=[]),
+            _unfinished_operations_question=lambda _utilities: "?",
         )
         event = SimpleNamespace(ignore=lambda: setattr(event, "ignored", True))
         event.ignored = False

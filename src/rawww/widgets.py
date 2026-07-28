@@ -7,14 +7,30 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QEvent, QRect, QSettings, QStringListModel, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QRect, QSettings, QSize, QStringListModel, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QCheckBox, QComboBox, QCompleter, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox, QPushButton, QStyle, QStyleOptionButton, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QCompleter, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox, QProgressBar, QPushButton, QStyle, QStyleOptionButton, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
 from typing import Callable
 from uuid import uuid4
 from .shotsync_client import ShotSyncClient
 from .theme import _fomantic_icon
 from .i18n import gettext as _
+
+
+def format_remaining_time(seconds: float) -> str:
+    """Возвращает короткую оценку оставшегося времени для строки прогресса.
+
+    Единицы растут вместе с ожиданием: «≈ 4200 с» формально верно, но требует от
+    пользователя делить в голове, а долгие пакеты идут часами.
+    """
+    total_seconds = max(1, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return _("≈ {h} ч {m} мин {s} с").format(h=hours, m=minutes, s=seconds)
+    if minutes:
+        return _("≈ {m} мин {s} с").format(m=minutes, s=seconds)
+    return _("≈ {s} с").format(s=seconds)
 
 
 class SettingsCheckBox(QCheckBox):
@@ -81,6 +97,121 @@ class ScopeButtons(QWidget):
         """Блокирует обе кнопки, не включая обратно недоступный запуск по выделению."""
         self.all_button.setEnabled(enabled)
         self.selected_button.setEnabled(enabled and bool(self.selected_button.toolTip() == ""))
+
+
+class BatchProgressBar(QWidget):
+    """Прогресс долгой операции утилиты вместе с кнопками паузы и остановки.
+
+    Виджет ничего не выполняет и не знает, чем занята утилита: он сообщает
+    сигналами о нажатиях, а владелец решает, что делать с процессом или пулом.
+    Кнопки живут рядом с полосой, потому что во всех четырёх утилитах место под
+    прогресс одно и то же — низ окна над кнопками запуска.
+    """
+
+    pauseToggled = Signal(bool)
+    stopRequested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._paused = False
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self.bar = QProgressBar()
+        self.bar.setObjectName("batchProgress")
+        self.bar.setTextVisible(True)
+        layout.addWidget(self.bar, 1)
+        self.pause_button = QToolButton()
+        self.pause_button.setObjectName("batchProgressAction")
+        self.pause_button.setIconSize(QSize(12, 12))
+        self.pause_button.clicked.connect(self._toggle_pause)
+        layout.addWidget(self.pause_button)
+        self.stop_button = QToolButton()
+        self.stop_button.setObjectName("batchProgressStop")
+        self.stop_button.setIcon(_fomantic_icon("close", 12, "#e8e8e8"))
+        self.stop_button.setIconSize(QSize(12, 12))
+        self.stop_button.setToolTip(_("Остановить операцию"))
+        self.stop_button.clicked.connect(self._request_stop)
+        layout.addWidget(self.stop_button)
+        self._refresh_pause_button()
+        self.hide()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
+    def start(self, total: int, text: str = "") -> None:
+        """Показывает полосу перед запуском, включая обе кнопки управления."""
+        self._paused = False
+        self.bar.setRange(0, max(1, total))
+        self.bar.setValue(0)
+        if text:
+            self.bar.setFormat(text)
+        self.pause_button.setEnabled(True)
+        self.stop_button.setEnabled(True)
+        self._refresh_pause_button()
+        self.show()
+
+    def set_progress(self, value: int, total: int, text: str = "") -> None:
+        self.bar.setRange(0, max(1, total))
+        self.bar.setValue(value)
+        if text:
+            self.bar.setFormat(self._with_pause_prefix(text))
+        self.bar.setToolTip(self.bar.format())
+
+    def set_indeterminate(self, text: str) -> None:
+        """Показывает фазу без известного объёма, например перенос кэша папки."""
+        self.bar.setRange(0, 0)
+        self.bar.setFormat(self._with_pause_prefix(text))
+
+    def set_paused(self, paused: bool) -> None:
+        """Синхронизирует вид с настоящим состоянием операции, а не с кликом."""
+        self._paused = paused
+        self._refresh_pause_button()
+        self.bar.setFormat(self._with_pause_prefix(self._plain_format()))
+
+    def set_stopping(self, text: str = "") -> None:
+        """Объясняет ожидание после остановки: начатые задачи ещё дописываются."""
+        self.pause_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self.bar.setFormat(text or _("Останавливаю…"))
+
+    def finish(self) -> None:
+        self.pause_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+
+    def _toggle_pause(self) -> None:
+        self.set_paused(not self._paused)
+        self.pauseToggled.emit(self._paused)
+
+    def _request_stop(self) -> None:
+        # Вид не меняется до подтверждения: владелец сначала спрашивает, и отказ
+        # не должен оставлять кнопки выключенными посреди работающей операции.
+        self.stopRequested.emit()
+
+    def _refresh_pause_button(self) -> None:
+        self.pause_button.setIcon(_fomantic_icon("play" if self._paused else "pause", 12, "#e8e8e8"))
+        self.pause_button.setToolTip(_("Продолжить") if self._paused else _("Пауза"))
+
+    def _plain_format(self) -> str:
+        prefix = _("Пауза · ")
+        text = self.bar.format()
+        return text[len(prefix):] if text.startswith(prefix) else text
+
+    def _with_pause_prefix(self, text: str) -> str:
+        return _("Пауза · ") + text if self._paused else text
+
+
+def ask_stop_running_operation(parent: QWidget, title: str, question: str) -> bool:
+    """Спрашивает про остановку незавершённой операции перед закрытием окна."""
+    answer = QMessageBox.question(
+        parent,
+        title,
+        question,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+    )
+    return answer == QMessageBox.StandardButton.Yes
 
 
 class CodeReplacementsEditor(QWidget):

@@ -10,18 +10,21 @@ import json
 import os
 from pathlib import Path
 import queue
+import threading
 import unittest
 from contextlib import redirect_stdout
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QProcess
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication
 
-from rawww.retouch_dialog import RetouchPreviewView
+from rawww.retouch_dialog import BatchRetouchDialog, RetouchPreviewView
 from rawww.retouch_pipeline import RetouchSettings, SkinMasks
 from rawww.retouch_worker import _Preview
 
@@ -234,7 +237,7 @@ class WorkerStreamTests(unittest.TestCase):
         ]
         incoming: queue.Queue = queue.Queue()
         for job in jobs:
-            incoming.put(json.dumps(job).encode("utf-8"))
+            incoming.put(job)
         incoming.put(None)
         served: list[dict] = []
         capture = _Capture()
@@ -243,7 +246,7 @@ class WorkerStreamTests(unittest.TestCase):
             def run(self, task: dict, settings: RetouchSettings, stale) -> None:
                 served.append(task)
 
-        with mock.patch.object(retouch_worker, "_jobs", side_effect=lambda: incoming), \
+        with mock.patch.object(retouch_worker, "_jobs", side_effect=lambda _control: incoming), \
              mock.patch.object(retouch_worker, "SkinRetoucher", return_value=object()), \
              mock.patch.object(retouch_worker, "_Preview", return_value=_Stub()), \
              redirect_stdout(capture):
@@ -266,9 +269,12 @@ class WorkerStreamTests(unittest.TestCase):
         capture = _Capture()
         # Интерфейс пишет строку и сразу закрывает канал, поэтому задача и
         # признак конца потока лежат в очереди одновременно.
-        with mock.patch.object(retouch_worker, "_jobs", side_effect=lambda: _filled_queue(job)), \
+        with mock.patch.object(retouch_worker, "_jobs", side_effect=lambda _control: _filled_queue(job)), \
              mock.patch.object(retouch_worker, "SkinRetoucher", return_value=object()), \
-             mock.patch.object(retouch_worker, "_batch", side_effect=lambda _r, tasks, _s: done.append(tasks)), \
+             mock.patch.object(
+                 retouch_worker, "_batch",
+                 side_effect=lambda _r, tasks, _s, _control: done.append(tasks),
+             ), \
              redirect_stdout(capture):
             code = retouch_worker.main(["--stdin"])
 
@@ -277,9 +283,87 @@ class WorkerStreamTests(unittest.TestCase):
         self.assertIn("finished", [event.get("event") for event in capture.events()])
 
 
+class BatchControlTests(unittest.TestCase):
+    """Команды управления пакетом идут мимо очереди задач."""
+
+    def test_stop_ends_batch_on_frame_boundary(self) -> None:
+        """Остановленный пакет не берёт следующий кадр и сообщает об этом."""
+        from rawww import retouch_worker
+
+        control = retouch_worker._BatchControl()
+        control.apply("stop")
+        capture = _Capture()
+        with redirect_stdout(capture):
+            retouch_worker._batch(object(), [{"source": "a.jpg", "target": "b.jpg"}], RetouchSettings(), control)
+
+        events = capture.events()
+        self.assertEqual([event.get("event") for event in events], ["stopped"])
+        self.assertEqual(events[0]["done"], 0)
+
+    def test_pause_holds_batch_until_resume(self) -> None:
+        from rawww import retouch_worker
+
+        control = retouch_worker._BatchControl()
+        control.apply("pause")
+        released: list[bool] = []
+
+        def resume() -> None:
+            released.append(True)
+            control.apply("resume")
+
+        threading.Timer(0.05, resume).start()
+        self.assertTrue(control.wait_while_paused())
+        self.assertEqual(released, [True])
+
+    def test_reader_applies_commands_without_queueing_them(self) -> None:
+        """Команда должна дойти до управления, пока пакет ещё считает кадры."""
+        from rawww import retouch_worker
+
+        job = {"settings": {}, "tasks": [], "preview": False}
+        stream = io.BytesIO(
+            json.dumps(job).encode("utf-8") + b"\n"
+            + json.dumps({"command": "stop"}).encode("utf-8") + b"\n"
+        )
+        control = retouch_worker._BatchControl()
+        with mock.patch.object(retouch_worker.sys, "stdin", mock.Mock(buffer=stream)):
+            incoming = retouch_worker._jobs(control)
+            self.assertEqual(incoming.get(timeout=2), job)
+            self.assertIsNone(incoming.get(timeout=2))
+        self.assertFalse(control.wait_while_paused())
+
+
+class ClosedDialogCallbackTests(unittest.TestCase):
+    """Поздние сигналы процесса не должны трогать удалённые виджеты окна."""
+
+    def test_closed_dialog_ignores_process_callbacks(self) -> None:
+        # Виджетов в заглушке нет намеренно: любое обращение к ним провалит тест
+        # так же, как падало бы на уже удалённом C++-объекте.
+        closed = SimpleNamespace(_closed=True, _streams={"batch": b""})
+        process = SimpleNamespace()
+
+        BatchRetouchDialog._finished(closed, process, False)
+        BatchRetouchDialog._worker_start_error(closed, process)
+        BatchRetouchDialog._read_events(closed, process, False)
+
+    def test_detach_removes_every_subscription(self) -> None:
+        self.app = QApplication.instance() or QApplication([])
+        process = QProcess()
+        calls: list[str] = []
+        process.readyReadStandardOutput.connect(lambda: calls.append("read"))
+        process.finished.connect(lambda _code, _status: calls.append("finished"))
+        process.errorOccurred.connect(lambda _error: calls.append("error"))
+
+        BatchRetouchDialog._detach(process)
+        process.readyReadStandardOutput.emit()
+        process.finished.emit(0, QProcess.ExitStatus.NormalExit)
+        process.errorOccurred.emit(QProcess.ProcessError.FailedToStart)
+
+        self.assertEqual(calls, [])
+
+
 def _filled_queue(job: dict) -> queue.Queue:
     incoming: queue.Queue = queue.Queue()
-    incoming.put(json.dumps(job).encode("utf-8"))
+    incoming.put(job)
     incoming.put(None)
     return incoming
 

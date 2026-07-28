@@ -27,7 +27,7 @@ import plistlib
 import subprocess
 import webbrowser
 from collections import deque
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
 from time import monotonic, sleep, time_ns
@@ -119,7 +119,8 @@ from .theme import (
     _title_bar_icon,
 )
 from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence
-from .widgets import SettingsCheckBox
+from .batch_jobs import BatchJobControl, PoolBatchJob, UtilityJob, utility_progress_hub
+from .widgets import SettingsCheckBox, format_remaining_time
 from .transfer_queue import TransferEntry, TransferManager, TransferQueuePanel, TransferTask
 from .card_import import CardImportScan, build_backup_entries, build_import_entries, merge_scans, scan_card
 from .canon_burst import (
@@ -289,6 +290,14 @@ def _resize_export_worker(job: tuple[str, str, int, bool, int, bool, float, int,
     except Exception as exc:
         temporary.unlink(missing_ok=True)
         return source_text, output_text, str(exc)
+
+
+class _ShrinkTotals:
+    """Копит итог пересжатия: задачи пула отчитываются по одной, итог нужен один."""
+
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+        self.saved = 0
 
 
 def _recompress_jpeg_worker(job: tuple[str, int, bool]) -> tuple[str, int, int, str | None]:
@@ -497,13 +506,26 @@ def _scan_xmp_task(
     return results
 
 
-def _plan_xmp_sidecar_relocation(directory: Path, names: dict[str, str]) -> dict[Path, tuple[Path, ...]]:
-    """Строит безопасное соответствие sidecar после переименования фото и пар."""
-    photos = []
+def _photos_for_xmp_plan(directory: Path) -> list[Path]:
+    """Снимает список фотографий папки до переименования для планов sidecar."""
     try:
-        photos = [path for path in directory.iterdir() if path.is_file() and is_supported_image(path)]
+        return [path for path in directory.iterdir() if path.is_file() and is_supported_image(path)]
     except OSError:
-        return {}
+        return []
+
+
+def _plan_xmp_sidecar_relocation(
+    directory: Path, names: dict[str, str], photos: list[Path] | None = None
+) -> dict[Path, tuple[Path, ...]]:
+    """Строит безопасное соответствие sidecar после переименования фото и пар.
+
+    Готовый список фотографий передаётся, когда план нужно пересобрать после
+    остановки: на диске уже новые имена, а решение принимается по прежним.
+    """
+    if photos is None:
+        photos = _photos_for_xmp_plan(directory)
+        if not photos:
+            return {}
     targets: dict[Path, set[Path]] = {}
     for photo in photos:
         old_sidecar = sidecar_path(photo)
@@ -4268,6 +4290,7 @@ class WindowsTaskbarProgress:
 
     _TBPF_NORMAL = 0x2
     _TBPF_NOPROGRESS = 0x0
+    _TBPF_PAUSED = 0x8
 
     def __init__(self) -> None:
         self._taskbar = None
@@ -4329,7 +4352,7 @@ class WindowsTaskbarProgress:
             ctypes.OleDLL("ole32").CoUninitialize()
             self._com_initialized = False
 
-    def set_progress(self, window_id: int, value: int, total: int) -> None:
+    def set_progress(self, window_id: int, value: int, total: int, paused: bool = False) -> None:
         if self._taskbar is None or not window_id:
             return
         try:
@@ -4342,7 +4365,7 @@ class WindowsTaskbarProgress:
             )(vtable[10])
             window = ctypes.c_void_p(window_id)
             if total > 0:
-                set_state(self._taskbar, window, self._TBPF_NORMAL)
+                set_state(self._taskbar, window, self._TBPF_PAUSED if paused else self._TBPF_NORMAL)
                 set_value(self._taskbar, window, max(0, value), total)
             else:
                 set_state(self._taskbar, window, self._TBPF_NOPROGRESS)
@@ -4391,18 +4414,6 @@ def _humanize_shotsync_network_error(error: str) -> str:
     return _("Не удалось подключиться к ShotSync.")
 
 
-def _format_remaining_time(seconds: float) -> str:
-    """Возвращает короткую оценку оставшегося времени для строки прогресса."""
-    total_seconds = max(1, round(seconds))
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours:
-        return _("≈ {h} ч {m} мин").format(h=hours, m=minutes)
-    if minutes:
-        return _("≈ {m} мин {s} с").format(m=minutes, s=seconds)
-    return _("≈ {s} с").format(s=seconds)
-
-
 class Workspace(QMainWindow):
     """Одна независимая рабочая вкладка с папкой фотографий.
 
@@ -4445,11 +4456,18 @@ class Workspace(QMainWindow):
         self.single_photo_mode = False
         self._taskbar_progress = WindowsTaskbarProgress()
         self._dock_progress = MacDockProgress()
+        # Утилиты живут в своих окнах, но индикатор приложения один: реестр
+        # операций сообщает об изменениях, а вкладка перерисовывает индикатор.
+        utility_progress_hub().changed.connect(self._on_utility_progress_changed)
 
         self.directory_scan_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_load_executor = ThreadPoolExecutor(max_workers=1)
         self.cache_flush_executor = ThreadPoolExecutor(max_workers=1)
         self.rename_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="batch-rename")
+        # Переименование идёт одно на вкладку: диалог модальный, поэтому хватает
+        # одной пары «управление + запись в общем индикаторе приложения».
+        self._rename_control: BatchJobControl | None = None
+        self._rename_entry: UtilityJob | None = None
         self.file_mutation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="file-mutation")
         self.burst_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-materialize")
         self.face_search_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="face-search")
@@ -4773,6 +4791,12 @@ class Workspace(QMainWindow):
             return
         self.closing = True
         self._cancel_face_search()
+        try:
+            utility_progress_hub().changed.disconnect(self._on_utility_progress_changed)
+        except (RuntimeError, TypeError):
+            # Вкладку могли закрыть дважды: повторное отключение сигнала не беда.
+            pass
+        self._release_rename_job()
         self._set_taskbar_progress(0, 0)
         self._taskbar_progress.close()
         self._save_folder_grid_context()
@@ -9370,6 +9394,12 @@ class Workspace(QMainWindow):
         if not changes:
             return
         dialog.set_renaming(changes)
+        control = BatchJobControl()
+        self._rename_control = control
+        self._rename_entry = utility_progress_hub().register(_("Групповое переименование"), control)
+        utility_progress_hub().update(self._rename_entry, 0, changes)
+        dialog.pauseToggled.connect(lambda paused, job=control: self._set_rename_paused(job, paused))
+        dialog.stopRequested.connect(lambda view=dialog, job=control: self._stop_rename(view, job))
         paths = [
             self.current_dir / old
             for old, new in names.items()
@@ -9377,26 +9407,50 @@ class Workspace(QMainWindow):
         ]
         self._run_after_file_consumers_release(
             paths,
-            lambda view=dialog, plan=dict(names): self._submit_file_rename(view, plan),
+            lambda view=dialog, plan=dict(names), job=control: self._submit_file_rename(view, plan, job),
             restart_consumers=False,
             loading_text=_("Выполняется переименование"),
         )
 
-    def _submit_file_rename(self, dialog: BatchRenameDialog, names: dict[str, str]) -> None:
+    @staticmethod
+    def _set_rename_paused(control: BatchJobControl, paused: bool) -> None:
+        control.pause() if paused else control.resume()
+        utility_progress_hub().notify_changed()
+
+    @staticmethod
+    def _stop_rename(dialog: BatchRenameDialog, control: BatchJobControl) -> None:
+        """Просит закончить на границе файла: переименованное остаётся на месте."""
+        control.stop()
+        dialog.set_stopping()
+        utility_progress_hub().notify_changed()
+
+    def _submit_file_rename(
+        self, dialog: BatchRenameDialog, names: dict[str, str], control: BatchJobControl
+    ) -> None:
         """Запускает переименование после освобождения исходников воркерами."""
         cache = self.folder_cache
-        future = self.rename_executor.submit(self._rename_files_with_cache, names, cache, dialog)
+        future = self.rename_executor.submit(self._rename_files_with_cache, names, cache, dialog, control)
         future.add_done_callback(
             lambda done, view=dialog, plan=dict(names): self.bridge.renameFinished.emit(view, plan, done)
         )
 
     def _rename_files_with_cache(
-        self, names: dict[str, str], cache: FolderCache | None, dialog: BatchRenameDialog
-    ) -> str | None:
-        """Переименовывает файлы и кэш вне Qt-потока, сохраняя отзывчивость диалога."""
+        self,
+        names: dict[str, str],
+        cache: FolderCache | None,
+        dialog: BatchRenameDialog,
+        control: BatchJobControl,
+    ) -> tuple[str | None, bool]:
+        """Переименовывает файлы и кэш вне Qt-потока, сохраняя отзывчивость диалога.
+
+        При остановке возвращается признак неполного плана, а XMP и кэш правятся
+        только для фактически переименованных файлов: иначе sidecar уехал бы к имени,
+        которого на диске так и не появилось.
+        """
         changes = sum(old != new for old, new in names.items())
-        xmp_plan = _plan_xmp_sidecar_relocation(self.current_dir, names)
-        self._rename_files_safely(
+        photos = _photos_for_xmp_plan(self.current_dir)
+        xmp_plan = _plan_xmp_sidecar_relocation(self.current_dir, names, photos)
+        applied = self._rename_files_safely(
             names,
             lambda completed, total: (
                 self.bridge.renameProgress.emit(
@@ -9407,23 +9461,29 @@ class Workspace(QMainWindow):
                 if completed % 16 == 0 or completed == total
                 else None
             ),
+            control,
         )
+        stopped = len(applied) < changes
+        if stopped:
+            xmp_plan = _plan_xmp_sidecar_relocation(self.current_dir, applied, photos)
         _relocate_xmp_sidecars(xmp_plan)
         if cache is None:
-            return None
+            return None, stopped
         self.bridge.renameCacheUpdating.emit(dialog)
         try:
-            cache.rename_photo_names(names)
+            cache.rename_photo_names(applied)
             cache.relocate_xmp_states({
                 source.name: tuple(target.name for target in targets)
                 for source, targets in xmp_plan.items()
             })
         except Exception as exc:
-            return str(exc)
-        return None
+            return str(exc), stopped
+        return None, stopped
 
     def _on_rename_progress(self, dialog: BatchRenameDialog, completed: int, total: int) -> None:
         """Обновляет Qt-виджет только в главном потоке по сигналу фоновой операции."""
+        if self._rename_entry is not None:
+            utility_progress_hub().update(self._rename_entry, completed, total)
         if not self.closing:
             dialog.update_rename_progress(completed, total)
 
@@ -9436,15 +9496,23 @@ class Workspace(QMainWindow):
         self, dialog: BatchRenameDialog, _names: dict[str, str], future: Future
     ) -> None:
         """Завершает диалог после файловой операции и обновления кэша."""
+        self._release_rename_job()
         if self.closing:
             return
         try:
-            cache_error = future.result()
+            cache_error, stopped = future.result()
         except OSError as exc:
             dialog.rename_failed(_("Не удалось переименовать файлы: {error}").format(error=exc))
             return
         except Exception as exc:
             dialog.rename_failed(_("Не удалось переименовать файлы: {error}").format(error=exc))
+            return
+        if stopped:
+            # Часть файлов уже получила новые имена, и прежний предпросмотр
+            # описывает уже не ту папку: честнее закрыть окно и перечитать папку.
+            self.folder_change_timer.stop()
+            self.load_directory(self.current_dir)
+            dialog.accept()
             return
         if cache_error:
             QMessageBox.warning(dialog, _("Групповое переименование"), _("Файлы переименованы, но кэш не обновлён:\n{error}").format(error=cache_error))
@@ -9490,29 +9558,50 @@ class Workspace(QMainWindow):
         dialog.exec()
 
     def _start_shrink_jpeg(self, dialog: ShrinkJpegDialog, paths: list[Path], options: dict) -> None:
+        """Отдаёт пересжатие в фон: окно остаётся живым для паузы и остановки."""
         dialog.set_running(len(paths))
         jobs = [(str(path), int(options["quality"]), bool(options["keep_exif"])) for path in paths]
-        errors: list[str] = []
-        saved_bytes = 0
-        workers = min(8, max(1, os.cpu_count() or 1), len(jobs))
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(_recompress_jpeg_worker, job) for job in jobs]
-            for completed, future in enumerate(as_completed(futures), 1):
-                source, original_size, new_size, error = future.result()
-                if error:
-                    errors.append(f"{Path(source).name}: {error}")
-                else:
-                    saved_bytes += max(0, original_size - new_size)
-                dialog.update_progress(completed, len(jobs))
-        self.folder_change_timer.stop()
-        self.load_directory(self.current_dir)
-        saved_mb = saved_bytes / (1024 * 1024)
-        summary = _("Готово. Сэкономлено {mb} МБ.").format(mb=f"{saved_mb:.1f}")
+        totals = _ShrinkTotals()
+        job = PoolBatchJob(
+            _recompress_jpeg_worker, jobs,
+            label=_("Уменьшить JPG"),
+            max_workers=min(8, max(1, os.cpu_count() or 1)),
+            parent=dialog,
+        )
+        job.itemFinished.connect(lambda result, box=totals: self._collect_shrink_result(box, result))
+        job.progress.connect(dialog.update_progress)
+        job.finished.connect(
+            lambda whole, view=dialog, box=totals: self._finish_shrink_jpeg(view, box, whole)
+        )
+        dialog.pauseToggled.connect(job.set_paused)
+        dialog.stopRequested.connect(job.stop)
+        job.start()
+
+    @staticmethod
+    def _collect_shrink_result(totals: _ShrinkTotals, result: object) -> None:
+        if isinstance(result, Exception):
+            totals.errors.append(str(result))
+            return
+        source, original_size, new_size, error = result
+        if error:
+            totals.errors.append(f"{Path(source).name}: {error}")
+        else:
+            totals.saved += max(0, original_size - new_size)
+
+    def _finish_shrink_jpeg(self, dialog: ShrinkJpegDialog, totals: _ShrinkTotals, whole: bool) -> None:
+        """Подводит итог пересжатия, включая остановленный пакет: файлы уже на диске."""
+        if not self.closing:
+            self.folder_change_timer.stop()
+            self.load_directory(self.current_dir)
+        errors = totals.errors
+        saved = f"{totals.saved / (1024 * 1024):.1f}"
         if errors:
-            summary = _("Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}").format(count=len(errors), mb=f"{saved_mb:.1f}", first=errors[0])
-        dialog.status.setText(summary)
-        dialog.cancel_button.setEnabled(True)
-        dialog.cancel_button.setText(_("Закрыть"))
+            summary = _("Готово с ошибками ({count}). Сэкономлено {mb} МБ. {first}").format(count=len(errors), mb=saved, first=errors[0])
+        elif whole:
+            summary = _("Готово. Сэкономлено {mb} МБ.").format(mb=saved)
+        else:
+            summary = _("Остановлено. Сэкономлено {mb} МБ.").format(mb=saved)
+        dialog.set_finished(summary)
 
     def _show_batch_resize_dialog(self) -> None:
         paths = [path for path in self.view_paths if path.is_file() and is_supported_image(path)]
@@ -9550,18 +9639,38 @@ class Workspace(QMainWindow):
             for source, target in targets
         ]
         errors: list[str] = []
-        workers = min(8, max(1, os.cpu_count() or 1), len(jobs))
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(_resize_export_worker, job) for job in jobs]
-            for completed, future in enumerate(as_completed(futures), 1):
-                source, _output, error = future.result()
-                if error:
-                    errors.append(f"{Path(source).name}: {error}")
-                dialog.update_progress(completed, len(jobs))
+        job = PoolBatchJob(
+            _resize_export_worker, jobs,
+            label=_("Групповой резайс"),
+            max_workers=min(8, max(1, os.cpu_count() or 1)),
+            parent=dialog,
+        )
+        job.itemFinished.connect(lambda result, box=errors: self._collect_resize_result(box, result))
+        job.progress.connect(dialog.update_progress)
+        job.finished.connect(
+            lambda whole, view=dialog, box=errors: self._finish_batch_resize(view, box, whole)
+        )
+        dialog.pauseToggled.connect(job.set_paused)
+        dialog.stopRequested.connect(job.stop)
+        job.start()
+
+    @staticmethod
+    def _collect_resize_result(errors: list[str], result: object) -> None:
+        if isinstance(result, Exception):
+            errors.append(str(result))
+            return
+        source, _output, error = result
+        if error:
+            errors.append(f"{Path(source).name}: {error}")
+
+    @staticmethod
+    def _finish_batch_resize(dialog: BatchResizeDialog, errors: list[str], whole: bool) -> None:
+        """Закрывает окно только после полного успешного экспорта."""
         if errors:
-            dialog.status.setText(_("Готово с ошибками ({count}): {first}").format(count=len(errors), first=errors[0]))
-            dialog.cancel_button.setEnabled(True)
-            dialog.cancel_button.setText(_("Закрыть"))
+            dialog.set_finished(_("Готово с ошибками ({count}): {first}").format(count=len(errors), first=errors[0]))
+            return
+        if not whole:
+            dialog.set_finished(_("Экспорт остановлен."))
             return
         dialog.accept()
 
@@ -9604,13 +9713,28 @@ class Workspace(QMainWindow):
                 return candidate
         raise OSError(_("Не удалось подобрать свободное имя"))
 
+    def _release_rename_job(self) -> None:
+        """Снимает переименование с общего индикатора приложения."""
+        entry, self._rename_entry = self._rename_entry, None
+        self._rename_control = None
+        if entry is not None:
+            utility_progress_hub().finish(entry)
+
     def _rename_files_safely(
-        self, names: dict[str, str], progress: Callable[[int, int], None] | None = None
-    ) -> None:
-        """Переименовывает через временные соседние файлы без потерь при обмене имён."""
+        self,
+        names: dict[str, str],
+        progress: Callable[[int, int], None] | None = None,
+        control: BatchJobControl | None = None,
+    ) -> dict[str, str]:
+        """Переименовывает через временные соседние файлы без потерь при обмене имён.
+
+        Возвращает фактически применённые пары имён: остановка возможна только на
+        границе файла, а обмен имён через временные имена либо выполняется целиком,
+        либо откатывается: скрытые временные файлы в папке пользователя недопустимы.
+        """
         changes = {old: new for old, new in names.items() if old != new}
         if not changes:
-            return
+            return {}
         directory = self.current_dir
         if len({filesystem_name_key(name) for name in changes.values()}) != len(changes):
             raise OSError(_("Шаблон создаёт одинаковые имена"))
@@ -9630,10 +9754,14 @@ class Workspace(QMainWindow):
         target_keys = {filesystem_name_key(new) for new in changes.values()}
         if source_keys.isdisjoint(target_keys):
             completed: list[str] = []
+            step = 0
             try:
-                for step, (old, new) in enumerate(changes.items(), start=1):
+                for old, new in changes.items():
+                    if control is not None and not control.wait_while_paused():
+                        break
                     (directory / old).rename(directory / new)
                     completed.append(old)
+                    step += 1
                     if progress is not None:
                         progress(step, total_steps)
             except OSError:
@@ -9642,7 +9770,7 @@ class Workspace(QMainWindow):
                     if target.exists():
                         target.rename(source)
                 raise
-            return
+            return {old: changes[old] for old in completed}
 
         token = uuid4().hex
         temporary = {old: directory / f".__rawww_rename_{token}_{index}" for index, old in enumerate(changes)}
@@ -9651,6 +9779,13 @@ class Workspace(QMainWindow):
         step = 0
         try:
             for old, temporary_path in temporary.items():
+                if control is not None and not control.wait_while_paused():
+                    # Остановка до второй фазы обязана вернуть исходные имена:
+                    # иначе в папке остались бы служебные файлы без расширений.
+                    for reverted in reversed(moved):
+                        if temporary[reverted].exists():
+                            temporary[reverted].rename(directory / reverted)
+                    return {}
                 (directory / old).rename(temporary_path)
                 moved.append(old)
                 step += 1
@@ -9672,6 +9807,7 @@ class Workspace(QMainWindow):
                 if temporary_path.exists():
                     temporary_path.rename(source)
             raise
+        return dict(changes)
 
     @staticmethod
     def _rename_step_count(names: dict[str, str]) -> int:
@@ -9898,7 +10034,7 @@ class Workspace(QMainWindow):
             if ai_completed > 0 and self._ai_progress_started_at is not None:
                 elapsed = monotonic() - self._ai_progress_started_at
                 remaining = (ai_total - ai_completed) * elapsed / ai_completed
-                eta = f" ({_format_remaining_time(remaining)})"
+                eta = f" ({format_remaining_time(remaining)})"
             self.status_progress.setFormat(_("Анализ: {done}/{total}{eta}").format(done=ai_completed, total=ai_total, eta=eta))
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
@@ -9926,6 +10062,15 @@ class Workspace(QMainWindow):
         self.status_progress.hide()
         self._set_taskbar_progress(0, 0)
 
+    def _on_utility_progress_changed(self) -> None:
+        """Перерисовывает индикатор приложения после изменения операций утилит.
+
+        Сигнал приходит из фонового потока, но Qt доставляет его в очереди главного
+        потока, поэтому виджеты трогать безопасно.
+        """
+        if not self.closing:
+            self._refresh_status_panel()
+
     def _fit_status_text(self) -> None:
         if not hasattr(self, "status_label"):
             return
@@ -9935,11 +10080,21 @@ class Workspace(QMainWindow):
         ))
 
     def _set_taskbar_progress(self, value: int, total: int) -> None:
-        if self.transfer_manager is not None:
+        """Дублирует прогресс долгих операций в панель задач и Dock.
+
+        Индикатор у окна один, а кандидатов три: утилиты, общая очередь файловых
+        операций и фоновые задачи вкладки. Утилита запущена вручную и ждётся
+        пользователем, поэтому её прогресс важнее автоматического фона.
+        """
+        paused = False
+        utility_value, utility_total, utility_paused = utility_progress_hub().progress()
+        if utility_total:
+            value, total, paused = utility_value, utility_total, utility_paused
+        elif self.transfer_manager is not None:
             transfer_value, transfer_total = self.transfer_manager.progress()
             if transfer_total:
                 value, total = transfer_value, transfer_total
-        self._taskbar_progress.set_progress(int(self.window().winId()), value, total)
+        self._taskbar_progress.set_progress(int(self.window().winId()), value, total, paused)
         self._dock_progress.set_progress(value, total)
 
     def _reload_photo_details(self) -> None:
@@ -12711,21 +12866,37 @@ class MainWindow(QMainWindow):
         else:
             self._update_tab_geometry()
 
+    def _unfinished_operations_question(self, utilities: list[str]) -> str:
+        """Собирает вопрос при выходе, перечисляя незавершённые утилиты по именам."""
+        if not utilities:
+            return _("Копирование или перемещение ещё выполняется. Выйти и отменить все операции?")
+        listed = ", ".join(utilities)
+        if self.transfer_manager.active or self.transfer_manager.pending:
+            return _(
+                "Ещё выполняются файловые операции и утилиты ({names}). "
+                "Выйти и остановить их?"
+            ).format(names=listed)
+        return _("Ещё выполняются утилиты ({names}). Выйти и остановить их?").format(names=listed)
+
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._closing:
             super().closeEvent(event)
             return
-        if self.transfer_manager.active or self.transfer_manager.pending:
+        hub = utility_progress_hub()
+        if self.transfer_manager.active or self.transfer_manager.pending or hub.is_busy():
             answer = QMessageBox.question(
                 self,
-                _("Файловые операции не завершены"),
-                _("Копирование или перемещение ещё выполняется. Выйти и отменить все операции?"),
+                _("Операции не завершены"),
+                self._unfinished_operations_question(hub.busy_labels()),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if answer != QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
+            # Остановка кооперативная: уже начатые файлы дописываются, поэтому
+            # выход не оставляет обрезанный JPEG вместо кадра.
+            hub.stop_all()
         self._closing = True
         directories = [
             str(workspace.current_dir)
