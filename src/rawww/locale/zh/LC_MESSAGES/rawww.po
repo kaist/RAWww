@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 10:28+0000\n"
+"POT-Creation-Date: 2026-07-28 11:03+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -1517,8 +1517,8 @@ msgstr "半径"
 msgid "Порог"
 msgstr "阈值"
 
-msgid "Старт"
-msgstr "开始"
+msgid "Экспортировать"
+msgstr "导出"
 
 msgid "Папка для экспорта"
 msgstr "导出文件夹"
@@ -1532,12 +1532,18 @@ msgstr "导出：{done}/{total}"
 
 #, python-brace-format
 msgid ""
-"Пересохранит все JPG-файлы в папке «{name}» ({count} шт.) с выбранным "
-"качеством, поверх исходников без подтверждения."
-msgstr "以所选质量重新保存文件夹 «{name}» 中的所有 JPG 文件（共 {count} 个），直接覆盖原文件且不再确认。"
+"Пересохранит JPG-файлы папки «{name}» с выбранным качеством, поверх "
+"исходников без подтверждения. В папке {count} шт., выделено {selected} "
+"шт."
+msgstr ""
+"将按所选质量重新保存「{name}」文件夹中的 JPG 文件，直接覆盖原文件，无需确认。文件夹内 {count} 张，已选中 {selected}"
+" 张。"
 
 msgid "Качество"
 msgstr "质量"
+
+msgid "Уменьшить"
+msgstr "压缩"
 
 #, python-brace-format
 msgid "Сжатие: {done}/{total}"
@@ -1654,11 +1660,8 @@ msgstr "亮度"
 msgid "Контраст"
 msgstr "对比度"
 
-msgid "ТАБЛИЦА LUT"
-msgstr "LUT 表"
-
-msgid "Наложить таблицу .cube"
-msgstr "应用 .cube 表"
+msgid "Включить"
+msgstr "启用"
 
 msgid "Файл не выбран"
 msgstr "未选择文件"
@@ -1666,15 +1669,11 @@ msgstr "未选择文件"
 msgid "Выбрать таблицу .cube"
 msgstr "选择 .cube 表"
 
-msgid "Сила таблицы"
-msgstr "表强度"
-
 msgid "СОХРАНИТЬ В ПАПКУ"
 msgstr "保存到文件夹"
 
-#, python-brace-format
-msgid "Обработать {count} фото"
-msgstr "修饰 {count} 张照片"
+msgid "Обработать"
+msgstr "处理"
 
 msgid "Предыдущая"
 msgstr "上一张"
@@ -1710,18 +1709,18 @@ msgstr "无法启动修图工作进程。"
 msgid "Ошибка ретуши: {error}"
 msgstr "修图错误：{error}"
 
-msgid "Предпросмотр готов."
-msgstr "预览已准备好。"
-
-msgid "Не удалось подготовить предпросмотр."
-msgstr "无法准备预览。"
-
 msgid "готово"
 msgstr "完成"
 
 #, python-brace-format
 msgid "Ретушь: {done}/{total}"
 msgstr "修图：{done}/{total}"
+
+msgid "Предпросмотр готов."
+msgstr "预览已准备好。"
+
+msgid "Не удалось подготовить предпросмотр."
+msgstr "无法准备预览。"
 
 msgid "Пакетная ретушь завершена."
 msgstr "批量修图已完成。"
@@ -1971,6 +1970,17 @@ msgstr "队列中：{n}"
 msgid "Убрать из очереди"
 msgstr "从队列中移除"
 
+#, python-brace-format
+msgid "{verb} все ({count})"
+msgstr "{verb}全部（{count}）"
+
+#, python-brace-format
+msgid "{verb} выделенные ({count})"
+msgstr "{verb}所选（{count}）"
+
+msgid "В сетке ничего не выделено."
+msgstr "网格中没有选中的照片。"
+
 msgid "+ Набор"
 msgstr "+ 集合"
 
@@ -2061,3 +2071,18 @@ msgstr "快速查看和筛选 RAW 与 JPG 照片"
 
 #~ msgid "После"
 #~ msgstr "之后"
+
+#~ msgid "Старт"
+#~ msgstr "开始"
+
+#~ msgid "ТАБЛИЦА LUT"
+#~ msgstr "LUT 表"
+
+#~ msgid "Наложить таблицу .cube"
+#~ msgstr "应用 .cube 表"
+
+#~ msgid "Сила таблицы"
+#~ msgstr "表强度"
+
+#~ msgid "Обработать {count} фото"
+#~ msgstr "修饰 {count} 张照片"

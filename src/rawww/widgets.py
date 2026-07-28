@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from PySide6.QtCore import QEvent, QRect, QSettings, QStringListModel, QTimer, Qt
+from PySide6.QtCore import QEvent, QRect, QSettings, QStringListModel, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QCheckBox, QComboBox, QCompleter, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox, QPushButton, QStyle, QStyleOptionButton, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout, QWidget
 from typing import Callable
@@ -36,6 +36,49 @@ class SettingsCheckBox(QCheckBox):
         painter.drawLine(indicator.left() + 3, indicator.center().y(), indicator.left() + 7, indicator.bottom() - 4)
         painter.drawLine(indicator.left() + 7, indicator.bottom() - 4, indicator.right() - 3, indicator.top() + 4)
         painter.end()
+
+
+class ScopeButtons(QWidget):
+    """Две кнопки запуска утилиты: ко всем фотографиям и только к выделенным.
+
+    Виджет ничего не выполняет: он лишь сообщает сигналом, какой набор выбрал
+    пользователь, а списки файлов остаются у владельца утилиты. Числа на
+    кнопках берутся из счётчиков, поэтому кто угодно видит объём работы до
+    нажатия. Без выделения вторая кнопка отключена: пустой запуск бесполезен.
+    """
+
+    startRequested = Signal(bool)
+
+    def __init__(self, verb: str, total: int, selected: int, prefix: str, icon: str = "play", vertical: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        # В узкой панели ретуши две кнопки в строку не помещаются, поэтому
+        # направление задаётся владельцем, а не угадывается по ширине.
+        layout = QVBoxLayout(self) if vertical else QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.all_button = QPushButton()
+        self.all_button.setObjectName(f"{prefix}PrimaryButton")
+        self.all_button.setIcon(_fomantic_icon(icon, 13, "#ffffff"))
+        self.all_button.clicked.connect(lambda: self.startRequested.emit(False))
+        layout.addWidget(self.all_button)
+        self.selected_button = QPushButton()
+        self.selected_button.setObjectName(f"{prefix}SecondaryButton")
+        self.selected_button.setIcon(_fomantic_icon(icon, 13, "#d6dce4"))
+        self.selected_button.clicked.connect(lambda: self.startRequested.emit(True))
+        layout.addWidget(self.selected_button)
+        self._verb = verb
+        self.set_counts(total, selected)
+
+    def set_counts(self, total: int, selected: int) -> None:
+        self.all_button.setText(_("{verb} все ({count})").format(verb=self._verb, count=total))
+        self.selected_button.setText(_("{verb} выделенные ({count})").format(verb=self._verb, count=selected))
+        self.selected_button.setEnabled(bool(selected))
+        self.selected_button.setToolTip("" if selected else _("В сетке ничего не выделено."))
+
+    def setEnabled(self, enabled: bool) -> None:  # noqa: N802
+        """Блокирует обе кнопки, не включая обратно недоступный запуск по выделению."""
+        self.all_button.setEnabled(enabled)
+        self.selected_button.setEnabled(enabled and bool(self.selected_button.toolTip() == ""))
 
 
 class CodeReplacementsEditor(QWidget):

@@ -15,7 +15,8 @@ from PySide6.QtWidgets import QApplication, QLineEdit
 
 from rawww.app import ViewerStrip
 from rawww.shotsync_client import ShotSyncClient
-from rawww.widgets import CodeReplacementsEditor
+from rawww.dialogs import BatchRenameDialog
+from rawww.widgets import CodeReplacementsEditor, ScopeButtons
 
 
 class ViewerStripExtendTests(unittest.TestCase):
@@ -91,6 +92,69 @@ class CodeReplacementsEditorTests(unittest.TestCase):
             self.assertFalse(editor.commit_pending_code())
             self.assertEqual(editor.status.text(), "Заполните код и значение.")
             editor.deleteLater()
+
+
+class ScopeButtonsTests(unittest.TestCase):
+    """Две кнопки запуска: числа на обеих и запрет пустого запуска."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_counts_and_scope_reach_the_signal(self) -> None:
+        scope = ScopeButtons("Обработать", 12, 3, "batchResize")
+        self.assertEqual(scope.all_button.text(), "Обработать все (12)")
+        self.assertEqual(scope.selected_button.text(), "Обработать выделенные (3)")
+        requested: list[bool] = []
+        scope.startRequested.connect(requested.append)
+
+        scope.all_button.click()
+        scope.selected_button.click()
+
+        self.assertEqual(requested, [False, True])
+        scope.deleteLater()
+
+    def test_empty_selection_blocks_the_second_button(self) -> None:
+        scope = ScopeButtons("Уменьшить", 5, 0, "batchResize")
+        self.assertFalse(scope.selected_button.isEnabled())
+
+        # Общая блокировка на время работы не имеет права включить запуск по
+        # пустому выделению обратно.
+        scope.setEnabled(False)
+        scope.setEnabled(True)
+
+        self.assertTrue(scope.all_button.isEnabled())
+        self.assertFalse(scope.selected_button.isEnabled())
+        scope.deleteLater()
+
+
+class BatchRenameScopeTests(unittest.TestCase):
+    """План переименования пересобирается под выбранный набор файлов."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_selected_scope_numbers_only_chosen_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for index in range(4):
+                path = Path(directory) / f"src_{index}.jpg"
+                path.write_bytes(b"")
+                paths.append(path)
+            settings = QSettings(str(Path(directory) / "settings.ini"), QSettings.Format.IniFormat)
+            settings.setValue("batch_rename/template", "IMG_{counter:03}")
+            settings.setValue("batch_rename/counter_start", 1)
+            dialog = BatchRenameDialog(paths, {}, settings, [paths[1], paths[3]])
+            plans: list[dict] = []
+            dialog.renameRequested.connect(plans.append)
+
+            dialog.scope.selected_button.click()
+
+            # Нумерация непрерывна внутри выбранного набора, а невыделенные
+            # файлы в плане не участвуют вовсе.
+            self.assertEqual(plans, [{"src_1.jpg": "IMG_001.jpg", "src_3.jpg": "IMG_002.jpg"}])
+            dialog.deleteLater()
 
 
 if __name__ == "__main__":
