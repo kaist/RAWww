@@ -16,6 +16,7 @@ import base64
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import ctypes
 from dataclasses import replace
+import gc
 import json
 import os
 import queue
@@ -285,10 +286,16 @@ def _batch(
 
     Остановка и пауза срабатывают на границе подачи нового кадра: кадры в
     работе дописываются, иначе в папке остался бы недописанный ``.tmp``.
+
+    Кончившаяся память не должна уносить весь пакет: кадр откладывается, окно
+    сужается до одного кадра, и отложенное досчитывается в конце, когда
+    параллельные кадры уже освободили свои копии.
     """
     total = len(tasks)
     counted = 0
     counter = threading.Lock()
+    postponed: list[dict] = []
+    tight = threading.Event()
 
     def render(task: dict) -> None:
         nonlocal counted
@@ -303,6 +310,18 @@ def _batch(
         # общее число сделанного, а не номер задачи в списке.
         _event("progress", done=done, total=total, source=str(source), target=str(target))
 
+    def attempt(task: dict) -> None:
+        """Считает кадр, а нехватку памяти превращает в отложенную задачу."""
+        try:
+            render(task)
+        except MemoryError:
+            # Освобождать надо сразу: следующий кадр уже стоит в очереди пула, и
+            # без сборки он упрётся в те же несколько float32-копий.
+            gc.collect()
+            tight.set()
+            with counter:
+                postponed.append(task)
+
     workers = _frame_workers(neural=bool(settings.neural_retouch and settings.neural_strength > 0))
     stopped = False
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="retouch-frame") as executor:
@@ -311,15 +330,27 @@ def _batch(
             if control is not None and not control.wait_while_paused():
                 stopped = True
                 break
-            while len(pending) >= workers:
+            while len(pending) >= (1 if tight.is_set() else workers):
                 # Окно поданных задач ограниченное: иначе пауза и остановка
                 # увидели бы уже всю очередь в работе.
                 finished, pending = wait(pending, return_when=FIRST_COMPLETED)
                 for future in finished:
                     future.result()
-            pending.add(executor.submit(render, task))
+            pending.add(executor.submit(attempt, task))
         for future in pending:
             future.result()
+    for task in postponed:
+        # Второй заход строго по одному кадру и уже без соседей в памяти. Если
+        # не хватило и теперь, кадр честно объявляется пропущенным: остальной
+        # пакет от одного тяжёлого снимка страдать не должен.
+        if control is not None and not control.wait_while_paused():
+            stopped = True
+            break
+        try:
+            render(task)
+        except MemoryError:
+            gc.collect()
+            _event("error", message=f"Не хватило памяти на кадр {Path(task['source']).name}")
     if stopped:
         _event("stopped", done=counted, total=total)
 
