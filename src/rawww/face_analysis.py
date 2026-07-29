@@ -20,6 +20,9 @@ DETECTOR_MODEL = MODEL_DIR / "det_500m.onnx"
 RECOGNITION_MODEL = MODEL_DIR / "w600k_mbf.onnx"
 LANDMARK_MODEL = MODEL_DIR / "2d106det.onnx"
 DETECTOR_SIZE = (640, 640)
+# Во сколько ужимается кадр во второй попытке детектора: лицо во весь кадр
+# должно уместиться в якорь самого крупного шага сетки.
+_DETECTOR_RETRY_SHRINK = 0.5
 LANDMARK_SIZE = 192
 # Сторона квадратного кропа лица как доля большей стороны рамки: так
 # insightface выравнивает лицо под модель 106 точек (без поворота).
@@ -159,9 +162,9 @@ def _classify_eyes(image: Image.Image, boxes: np.ndarray) -> list[float | None]:
     return result
 
 
-def _detector_input(image: Image.Image) -> tuple[np.ndarray, float]:
+def _detector_input(image: Image.Image, shrink: float = 1.0) -> tuple[np.ndarray, float]:
     width, height = image.size
-    scale = min(DETECTOR_SIZE[0] / width, DETECTOR_SIZE[1] / height)
+    scale = min(DETECTOR_SIZE[0] / width, DETECTOR_SIZE[1] / height) * shrink
     resized_size = (max(1, int(width * scale)), max(1, int(height * scale)))
     resized = image.resize(resized_size, Image.Resampling.BILINEAR)
     canvas = np.zeros((DETECTOR_SIZE[1], DETECTOR_SIZE[0], 3), dtype=np.float32)
@@ -196,8 +199,21 @@ def _nms(detections: np.ndarray, threshold: float = 0.4) -> np.ndarray:
 
 
 def _detect(image: Image.Image, threshold: float = 0.5) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Запускает детектор и возвращает рамки, ориентиры и уверенность после NMS."""
-    values, scale = _detector_input(image)
+    """Ищет лица и возвращает рамки, ориентиры и уверенность после NMS.
+
+    Портрет крупным планом детектор берёт плохо: самый большой шаг сетки — 32,
+    и лицо во весь кадр перестаёт помещаться в якорь, уверенность падает до
+    долей порога. Поэтому пустой ответ повторяется на уменьшенной копии: лицо
+    садится в якорь, а координаты всё равно возвращаются в пикселях кадра.
+    """
+    found = _detect_once(image, threshold, 1.0)
+    if len(found[0]):
+        return found
+    return _detect_once(image, threshold, _DETECTOR_RETRY_SHRINK)
+
+
+def _detect_once(image: Image.Image, threshold: float, shrink: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    values, scale = _detector_input(image, shrink)
     session = _detector()
     outputs = session.run(None, {session.get_inputs()[0].name: values})
     boxes, landmarks, scores = [], [], []
