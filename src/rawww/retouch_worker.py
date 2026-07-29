@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps
 
-from .imaging import RAW_EXTENSIONS, _rawpy, decode_original_pixels, decode_pixels
+from .imaging import RAW_EXTENSIONS, _rawpy, decode_original_pixels, decode_pixels, read_export_metadata
 from .retouch_pipeline import MASK_SIDE, RetouchSettings, SkinMasks, SkinRetoucher, crop_masks
 from .runtime_paths import data_path
 
@@ -71,11 +71,23 @@ def _read(path: Path, max_side: int | None, region: tuple[int, int, int, int] | 
     return np.asarray(image, dtype=np.uint8), (0, 0), native
 
 
-def _write(path: Path, rgb: np.ndarray) -> None:
+def _write(path: Path, rgb: np.ndarray, source: Path) -> None:
+    """Сохраняет результат ретуши в JPEG, перенося EXIF и ICC исходника.
+
+    Метаданные берутся из ``source``: сам массив пикселей их не несёт. EXIF
+    идёт без тега ориентации, а профилем служит sRGB — пиксели пришли уже
+    повёрнутыми и приведёнными к sRGB (см. ``read_export_metadata``).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     image = Image.fromarray(rgb, "RGB")
-    image.save(temporary, format="JPEG", quality=95, subsampling=0)
+    exif, icc_profile = read_export_metadata(source)
+    options = {"format": "JPEG", "quality": 95, "subsampling": 0}
+    if exif:
+        options["exif"] = exif
+    if icc_profile:
+        options["icc_profile"] = icc_profile
+    image.save(temporary, **options)
     os.replace(temporary, path)
 
 
@@ -338,7 +350,7 @@ def _batch(
         source = Path(task["source"])
         original, _origin, _full_size = _read(source, task.get("max_side"))
         target = Path(task["target"])
-        _write(target, retoucher.process(original, settings))
+        _write(target, retoucher.process(original, settings), source)
         with counter:
             counted += 1
             done = counted
