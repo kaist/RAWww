@@ -749,6 +749,13 @@ class AppStateTests(unittest.TestCase):
                 self.assertEqual(workspace.grid_restore_loader_label.text(), "Выполняется удаление")
                 self.assertEqual(workspace.grid_restore_loader_progress.maximum(), 3)
                 self.assertEqual(workspace.grid_restore_loader_progress.value(), 1)
+                progress = workspace.grid_restore_loader_progress
+                self.assertTrue(progress.isTextVisible())
+                self.assertTrue(progress.property("hasText"))
+                self.assertGreaterEqual(
+                    progress.maximumHeight(),
+                    progress.fontMetrics().height(),
+                )
 
                 release.set()
                 QTest.qWait(60)
@@ -756,6 +763,44 @@ class AppStateTests(unittest.TestCase):
             self.assertTrue(workspace.grid_restore_loader.isHidden())
             workspace.close()
             workspace.deleteLater()
+
+    def test_preview_progress_names_cache_read_and_generation(self) -> None:
+        """Строка состояния различает чтение готовых превью и их генерацию."""
+        workspace = Workspace(defer_initial_scan=True)
+        paths = {Path("/photos/a.jpg"), Path("/photos/b.jpg")}
+        workspace.preview_paths = set(paths)
+        workspace.preview_progress_total = len(paths)
+        workspace.preview_finished_paths = {Path("/photos/a.jpg")}
+
+        workspace.scheduler.preview_decode_pending.clear()
+        workspace._refresh_status_panel()
+        self.assertEqual(workspace.status_progress.format(), "Чтение превью: 1/2")
+
+        workspace.scheduler.preview_decode_pending.add(Path("/photos/b.jpg"))
+        workspace._refresh_status_panel()
+        self.assertEqual(workspace.status_progress.format(), "Генерация превью: 1/2")
+
+        workspace.close()
+        workspace.deleteLater()
+
+    def test_leaving_full_view_without_stored_geometry_frees_taskbar(self) -> None:
+        """Открытый из Проводника кадр не оставляет окно в полном экране после сетки."""
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "single.jpg"
+            photo.touch()
+            window = MainWindow(photo)
+            window.show()
+            self.app.processEvents()
+
+            window._leave_full_view()
+            self.app.processEvents()
+
+            self.assertFalse(window.isFullScreen())
+            screen = window.screen() or QGuiApplication.primaryScreen()
+            available = screen.availableGeometry()
+            self.assertTrue(available.contains(window.geometry()) or window.isMaximized())
+            window.close()
+            window.deleteLater()
 
     def test_return_from_full_view_replaces_stale_grid_selection(self) -> None:
         workspace = Workspace(defer_initial_scan=True)

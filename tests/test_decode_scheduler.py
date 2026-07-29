@@ -139,6 +139,10 @@ class _Host:
         self.video_thumbnailer = _VideoThumbnailer()
         self.cache_writes: list[tuple] = []
         self.cache_write_saw_publish = False
+        self.status_refreshes = 0
+
+    def schedule_status_refresh(self) -> None:
+        self.status_refreshes += 1
 
     def queue_preview_cache_write(self, cache, pixel: PixelImage, size: int) -> None:
         self.cache_write_saw_publish = bool(self.bridge.decoded.emitted)
@@ -211,6 +215,28 @@ class DecodeSchedulerTests(unittest.TestCase):
         self.assertEqual(len(scheduler.visible_thumb_decode_executor.calls), 1)
         self.assertIs(scheduler.visible_thumb_decode_executor.calls[0][0], decode_pixels)
         self.assertIn((path, THUMB_SIZE), scheduler.visible_thumb_pending)
+
+    def test_cache_miss_marks_preview_as_generated(self) -> None:
+        """Промах кэша переводит превью в список генерируемых до конца декодирования."""
+        path = Path("/photos/a.jpg")
+        scheduler, host = _make(_FolderCache(loads={}))
+        scheduler.visible_thumb_decode_executor = _PendingExecutor()
+        scheduler.submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=True)
+
+        self.assertIn(path, scheduler.preview_decode_pending)
+        self.assertGreater(host.status_refreshes, 0)
+
+        future: Future = Future()
+        future.set_exception(FileNotFoundError())
+        scheduler._decode_done(path, THUMB_SIZE, host.directory_generation, future)
+        self.assertNotIn(path, scheduler.preview_decode_pending)
+
+    def test_cache_hit_keeps_preview_out_of_generation(self) -> None:
+        path = Path("/photos/a.jpg")
+        decoded = _decoded(str(path))
+        scheduler, _host = _make(_FolderCache(loads={(path, THUMB_SIZE): decoded}))
+        scheduler.submit_decode(path, THUMB_SIZE, full_priority=False)
+        self.assertEqual(scheduler.preview_decode_pending, set())
 
     def test_decoded_preview_is_published_before_cache_write_is_queued(self) -> None:
         path = Path("/photos/a.jpg")

@@ -4985,7 +4985,7 @@ class Workspace(QMainWindow):
         if show_loading:
             self.grid_restore_loader_label.setText(loading_text)
             self.grid_restore_loader_progress.setRange(0, 0)
-            self.grid_restore_loader_progress.setTextVisible(False)
+            self._set_grid_restore_progress_text_visible(False)
             self._set_grid_restore_loader_visible(True)
             self.full_view.set_busy_loading(loading_text)
 
@@ -5875,8 +5875,23 @@ class Workspace(QMainWindow):
                 self.grid_restore_loader_label.text()
             )
         )
-        # По 22 px слева и справа совпадают с отступами layout оверлея.
-        self.grid_restore_loader.setFixedSize(max(220, text_width + 44), 76)
+        # По 22 px слева и справа совпадают с отступами layout оверлея, а полоса
+        # со счётчиком выше тонкой на разницу их высот из темы.
+        height = 87 if self.grid_restore_loader_progress.isTextVisible() else 76
+        self.grid_restore_loader.setFixedSize(max(220, text_width + 44), height)
+
+    def _set_grid_restore_progress_text_visible(self, visible: bool) -> None:
+        """Включает счётчик внутри полосы вместе с её высотой под текст.
+
+        Тонкая полоса неопределённого прогресса обрезала бы надпись по высоте,
+        поэтому вид со счётчиком описан в теме отдельным свойством.
+        """
+        progress = self.grid_restore_loader_progress
+        progress.setTextVisible(visible)
+        progress.setProperty("hasText", visible)
+        progress.style().unpolish(progress)
+        progress.style().polish(progress)
+        self._fit_grid_restore_loader()
 
     def _schedule_grid_restore_loader(self) -> None:
         """Откладывает оверлей, чтобы быстрый переход между папками не мигал."""
@@ -6798,7 +6813,10 @@ class Workspace(QMainWindow):
             self.grid_restore_loader_progress.setRange(0, len(targets))
             self.grid_restore_loader_progress.setValue(0)
             self.grid_restore_loader_progress.setFormat("%v / %m")
-            self.grid_restore_loader_progress.setTextVisible(True)
+            self._set_grid_restore_progress_text_visible(True)
+            if not self.grid_restore_loader.isHidden():
+                # Полоса со счётчиком выше, поэтому оверлей заново центрируется.
+                self._set_grid_restore_loader_visible(True)
         future = self.file_mutation_executor.submit(
             _delete_paths_task,
             targets,
@@ -9927,6 +9945,10 @@ class Workspace(QMainWindow):
         if not self.closing and not self.status_refresh_timer.isActive():
             self.status_refresh_timer.start()
 
+    def schedule_status_refresh(self) -> None:
+        """Даёт планировщику сообщить о смене вида работы с превью."""
+        self._schedule_status_refresh()
+
     def _refresh_status_panel(self) -> None:
         """Показывает активную операцию и счётчики папки или выделения."""
         if not hasattr(self, "status_label"):
@@ -10045,7 +10067,14 @@ class Workspace(QMainWindow):
         if self.preview_progress_total and loaded < self.preview_progress_total:
             self.status_progress.setRange(0, self.preview_progress_total)
             self.status_progress.setValue(loaded)
-            self.status_progress.setFormat(_("Превью: {done}/{total}").format(done=loaded, total=self.preview_progress_total))
+            # Промах кэша запускает декодирование: пока оно идёт, цена ожидания
+            # совсем другая, чем у чтения готовых миниатюр из кэша папки.
+            template = (
+                _("Генерация превью: {done}/{total}")
+                if self.scheduler.preview_decode_pending
+                else _("Чтение превью: {done}/{total}")
+            )
+            self.status_progress.setFormat(template.format(done=loaded, total=self.preview_progress_total))
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
             self._set_taskbar_progress(loaded, self.preview_progress_total)
@@ -12984,7 +13013,9 @@ class MainWindow(QMainWindow):
             return
         self._fast_full_view = True
         self._was_maximized_before_full_view = self.isMaximized()
-        self._geometry_before_full_view = self.geometry()
+        # Запуск с файлом из Проводника открывает кадр до первого показа окна:
+        # тогда geometry() ещё не относится к экрану и восстанавливать её нельзя.
+        self._geometry_before_full_view = self.geometry() if self.isVisible() else None
         self.title_bar.hide()
         has_full_view = workspace.stack.currentWidget() is workspace.full_view
         if has_full_view:
@@ -12997,11 +13028,10 @@ class MainWindow(QMainWindow):
         if not getattr(self, "_fast_full_view", False):
             return
         self._fast_full_view = False
-        self.showNormal()
-        if getattr(self, "_was_maximized_before_full_view", False):
-            self.showMaximized()
-        elif getattr(self, "_geometry_before_full_view", None) is not None:
-            self.setGeometry(self._geometry_before_full_view)
+        self._restore_from_fullscreen(
+            maximized=getattr(self, "_was_maximized_before_full_view", False),
+            geometry=getattr(self, "_geometry_before_full_view", None),
+        )
         self.title_bar.show()
 
     def _commit_full_view(self, workspace: Workspace, has_full_view: bool) -> None:
@@ -13025,11 +13055,30 @@ class MainWindow(QMainWindow):
 
     def _leave_grid_fullscreen(self) -> None:
         self._grid_fullscreen = False
+        self._restore_from_fullscreen(
+            maximized=getattr(self, "_was_maximized_before_grid_fullscreen", False),
+            geometry=getattr(self, "_geometry_before_grid_fullscreen", None),
+        )
+
+    def _restore_from_fullscreen(self, *, maximized: bool, geometry: QRect | None) -> None:
+        """Возвращает окно в оконный режим, не оставляя его поверх панели задач.
+
+        Без запомненной или помещающейся на экран геометрии окно разворачивается
+        по рабочей области: иначе безрамочное окно легко перекрывает таскбар и
+        выглядит как всё ещё включённый полный экран.
+        """
         self.showNormal()
-        if getattr(self, "_was_maximized_before_grid_fullscreen", False):
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else None
+        if maximized:
             self.showMaximized()
-        elif getattr(self, "_geometry_before_grid_fullscreen", None) is not None:
-            self.setGeometry(self._geometry_before_grid_fullscreen)
+            return
+        if geometry is not None and (available is None or available.contains(geometry)):
+            self.setGeometry(geometry)
+            return
+        if available is not None:
+            self.setGeometry(available)
+        self.showMaximized()
 
 
 def _drive_key(path: Path) -> str:

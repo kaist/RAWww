@@ -1132,6 +1132,18 @@ def apply_theme(app: QApplication) -> None:
             border-radius: 2px;
             background: #8a8a8a;
         }
+        QProgressBar#gridRestoreLoaderProgress[hasText="true"] {
+            min-height: 16px;
+            max-height: 16px;
+            border-radius: 5px;
+            color: #f0f0f0;
+            font-size: 10px;
+            padding: 0;
+        }
+        QProgressBar#gridRestoreLoaderProgress[hasText="true"]::chunk {
+            border-radius: 5px;
+            background: #8a8a8a;
+        }
         QFrame#faceSearchLoader {
             background: rgba(24, 24, 24, 0.94);
             border: 1px solid rgba(255, 255, 255, 0.14);
