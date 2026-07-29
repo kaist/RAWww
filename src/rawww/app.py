@@ -194,6 +194,7 @@ THUMB_SUBMIT_BATCH = 8
 WORK_PUMP_INTERVAL_MS = 16
 FLUSH_INTERVAL_MS = 30_000
 FOLDER_CHANGE_DEBOUNCE_MS = 1_000
+FOLDER_POLL_INTERVAL_MS = 3_000
 VOLUME_REFRESH_INTERVAL_MS = 2_000
 SHOTSYNC_BASE_URL = "https://shotsync.ru"
 SHOTSYNC_VOLUME_KEY = "__shotsync__"
@@ -4579,6 +4580,9 @@ class Workspace(QMainWindow):
         self._status_total_count = 0
         self._status_positions: dict[Path, int] = {}
         self._file_time_cache: dict[Path, float] = {}
+        # Отпечатки файлов папки: по ним видно правку сторонней программой,
+        # когда состав папки прежний, а содержимое кадра уже другое.
+        self._media_stamps: dict[Path, tuple[int, int]] = {}
         self._metadata_view_refresh_needed = False
         self.settings = _application_settings()
         self.transfer_manager = transfer_manager
@@ -4663,6 +4667,13 @@ class Workspace(QMainWindow):
         self.folder_change_timer = QTimer(self)
         self.folder_change_timer.setSingleShot(True)
         self.folder_change_timer.timeout.connect(self._reload_changed_folder)
+        # Правка файла «на месте» не даёт directoryChanged, поэтому активная
+        # вкладка изредка сама сверяет отпечатки файлов открытой папки.
+        self.folder_poll_timer = QTimer(self)
+        self.folder_poll_timer.setInterval(FOLDER_POLL_INTERVAL_MS)
+        self.folder_poll_timer.timeout.connect(self._poll_folder_changes)
+        self.folder_poll_timer.start()
+        self._folder_check_pending = False
         self.current_path: Path | None = None
         self.workspace_active = False
         self._folder_context_active = False
@@ -4811,6 +4822,7 @@ class Workspace(QMainWindow):
         self.status_refresh_timer.stop()
         self.metadata_ui_timer.stop()
         self.folder_change_timer.stop()
+        self.folder_poll_timer.stop()
         self.volume_refresh_timer.stop()
         self.preview_cache_write_timer.stop()
         self.xmp_cache_write_timer.stop()
@@ -8178,6 +8190,7 @@ class Workspace(QMainWindow):
         self._xmp_bulk_queue.clear()
         self._xmp_bulk_queued.clear()
         self._file_time_cache.clear()
+        self._media_stamps.clear()
         self.ai_progress_total = 0
         self.items_by_path.clear()
         self._restoring_view_context = False
@@ -8202,7 +8215,7 @@ class Workspace(QMainWindow):
             
         request = self.workspace_state.begin_directory(directory)
         self._refresh_status_panel()
-        future = self.directory_scan_executor.submit(_scan_directory, directory)
+        future = self.directory_scan_executor.submit(_scan_directory_state, directory)
         future.add_done_callback(lambda done, r=request, d=directory: self._directory_scanned(r, d, done))
 
     def _rotate_folder_request_executors(self) -> None:
@@ -8466,7 +8479,7 @@ class Workspace(QMainWindow):
         self._directory_scan_pending = False
         self._folder_context_active = True
         try:
-            self.all_paths = future.result()
+            self.all_paths, self._media_stamps = future.result()
             subfolders = [p for p in self.all_paths if p.is_dir()]
             images = [p for p in self.all_paths if p.is_file()]
             sorted_subfolders = sorted(subfolders, key=lambda p: p.name.lower())
@@ -8481,6 +8494,7 @@ class Workspace(QMainWindow):
         except Exception as exc:
             self.bridge.failed.emit(str(directory), str(exc))
             self.all_paths = []
+            self._media_stamps = {}
             self.view_paths = []
             self.paths = []
             self.preview_progress_total = 0
@@ -9882,14 +9896,40 @@ class Workspace(QMainWindow):
             monotonic() + FOLDER_CHANGE_DEBOUNCE_MS / 1_000 + 0.5,
         )
 
-    def _reload_changed_folder(self) -> None:
+    def _poll_folder_changes(self) -> None:
+        """Сверяет отпечатки файлов активной папки, когда watcher промолчал.
+
+        Редактор, пишущий поверх существующего файла, не меняет состав каталога,
+        и `directoryChanged` о такой правке не сообщает. Опрос идёт только для
+        видимой вкладки и только когда ни одна собственная операция не занята
+        файлами, иначе он подрался бы с собственными изменениями приложения.
+        """
+        if (
+            self.closing
+            or not self.workspace_active
+            or not self._media_stamps
+            or self._folder_check_pending
+            or self.folder_change_timer.isActive()
+            or self._file_mutation_waiting
+            or self._burst_pending_changes
+            or self._burst_removing
+            or self._selection_progress is not None
+            or self._upload_progress is not None
+            or monotonic() < self._ignore_folder_changes_until
+        ):
+            return
+        self._reload_changed_folder(rescan_xmp=False)
+
+    def _reload_changed_folder(self, *, rescan_xmp: bool = True) -> None:
         if self._selection_progress is not None or self._upload_progress is not None:
             return
         if not self.closing and self.current_dir.is_dir():
-            self._scan_xmp_changes(force=True)
+            if rescan_xmp:
+                self._scan_xmp_changes(force=True)
+            self._folder_check_pending = True
             generation = self.cache_load_generation
             directory = self.current_dir
-            future = self.directory_scan_executor.submit(_scan_directory, directory)
+            future = self.directory_scan_executor.submit(_scan_directory_state, directory)
             future.add_done_callback(
                 lambda done, g=generation, d=directory: self.bridge.folderChecked.emit((g, d, done))
             )
@@ -9897,6 +9937,7 @@ class Workspace(QMainWindow):
     def _on_folder_checked(self, payload: object) -> None:
         """Перезагружает папку лишь при изменении фото, а не после записи XMP."""
         generation, directory, future = payload
+        self._folder_check_pending = False
         if self.closing or generation != self.cache_load_generation or directory != self.current_dir:
             return
         if (
@@ -9907,12 +9948,64 @@ class Workspace(QMainWindow):
         ):
             return
         try:
-            paths = future.result()
+            paths, stamps = future.result()
         except Exception:
             self.load_directory(self.current_dir)
             return
         if set(paths) != set(self.all_paths):
             self.load_directory(self.current_dir)
+            return
+        changed = [
+            path
+            for path, stamp in stamps.items()
+            if path in self._media_stamps and self._media_stamps[path] != stamp
+        ]
+        self._media_stamps = stamps
+        if changed:
+            self._refresh_changed_media(changed)
+
+    def _refresh_changed_media(self, paths: list[Path]) -> None:
+        """Перечитывает кадры, перезаписанные сторонней программой.
+
+        Дисковый кэш сам отбрасывает записи с чужим размером и mtime, поэтому
+        достаточно забыть путь в оперативных кэшах и заново попросить превью:
+        иначе отредактированное в соседнем приложении фото так и висит старой
+        картинкой до перехода в другую папку и обратно.
+        """
+        changed = set(paths)
+        for key, future in list(self.pending.items()):
+            if key[0] in changed:
+                future.cancel()
+        for path in paths:
+            self.decode_cache.remove_path(path)
+            self._file_time_cache.pop(path, None)
+            self.preview_finished_paths.discard(path)
+            item = self.items_by_path.get(path)
+            if item is not None:
+                item.setData(PREVIEW_ROLE, None)
+        # Последовательный обход начинается заново: карточки за пределами
+        # экрана тоже должны получить свежую миниатюру, а не только видимые.
+        self.thumb_index = 0
+        self._schedule_visible_thumb_priority()
+        if not self.thumb_timer.isActive():
+            self.thumb_timer.start()
+        if ENABLE_EXIF_METADATA and self.folder_cache is not None and self.cache_ready:
+            self.metadata_pipeline.scan(
+                [path for path in paths if is_supported_image(path)],
+                self.folder_cache,
+                self.bridge.metadataUpdated.emit,
+            )
+        current = self.current_path
+        if (
+            self.stack.currentWidget() is self.full_view
+            and current is not None
+            and current in changed
+            and is_supported_image(current)
+        ):
+            full_size = self._full_preview_size()
+            self._show_best_cached_full(current, full_size)
+            self._promote_current_full_task(current, full_size)
+            self._submit_decode(current, full_size, full_priority=True)
 
     def _refresh_ai_status(self) -> None:
         if self.folder_cache is None or not self.cache_ready:
@@ -13268,6 +13361,25 @@ def _scan_directory(directory: Path) -> list[Path]:
         return entries
     except OSError:
         return []
+
+
+def _scan_directory_state(directory: Path) -> tuple[list[Path], dict[Path, tuple[int, int]]]:
+    """Возвращает содержимое папки вместе с отпечатками файлов.
+
+    Размер и mtime собираются здесь же, в фоновом потоке обхода: сравнение
+    отпечатков ловит правку файла сторонним редактором, когда список имён
+    остался прежним и обычная проверка состава папки ничего не замечает.
+    """
+    entries = _scan_directory(directory)
+    stamps: dict[Path, tuple[int, int]] = {}
+    for entry in entries:
+        try:
+            info = entry.stat()
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            stamps[entry] = (info.st_size, info.st_mtime_ns)
+    return entries, stamps
 
 
 def _is_hidden_directory(path: Path) -> bool:
