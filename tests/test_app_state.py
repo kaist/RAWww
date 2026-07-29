@@ -1480,6 +1480,29 @@ class AppStateTests(unittest.TestCase):
             workspace.close()
             workspace.deleteLater()
 
+    def test_folder_poll_checks_stamps_only_for_active_workspace(self) -> None:
+        """Опрос отпечатков идёт лишь у видимой вкладки и не трогает XMP-очередь."""
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            photo = folder / "photo.jpg"
+            photo.write_bytes(b"image")
+            workspace = Workspace(folder, defer_initial_scan=True)
+            workspace._media_stamps = {photo: (1, 1)}
+
+            with patch.object(Workspace, "_reload_changed_folder") as reload_changed:
+                workspace._poll_folder_changes()
+                reload_changed.assert_not_called()
+
+                workspace.workspace_active = True
+                workspace._poll_folder_changes()
+                reload_changed.assert_called_once_with(rescan_xmp=False)
+
+                workspace._folder_check_pending = True
+                workspace._poll_folder_changes()
+                reload_changed.assert_called_once_with(rescan_xmp=False)
+            workspace.close()
+            workspace.deleteLater()
+
     def test_rename_uses_one_pass_when_names_do_not_intersect(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             folder = Path(temporary)

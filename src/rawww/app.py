@@ -194,6 +194,7 @@ THUMB_SUBMIT_BATCH = 8
 WORK_PUMP_INTERVAL_MS = 16
 FLUSH_INTERVAL_MS = 30_000
 FOLDER_CHANGE_DEBOUNCE_MS = 1_000
+FOLDER_POLL_INTERVAL_MS = 3_000
 VOLUME_REFRESH_INTERVAL_MS = 2_000
 SHOTSYNC_BASE_URL = "https://shotsync.ru"
 SHOTSYNC_VOLUME_KEY = "__shotsync__"
@@ -4666,6 +4667,13 @@ class Workspace(QMainWindow):
         self.folder_change_timer = QTimer(self)
         self.folder_change_timer.setSingleShot(True)
         self.folder_change_timer.timeout.connect(self._reload_changed_folder)
+        # Правка файла «на месте» не даёт directoryChanged, поэтому активная
+        # вкладка изредка сама сверяет отпечатки файлов открытой папки.
+        self.folder_poll_timer = QTimer(self)
+        self.folder_poll_timer.setInterval(FOLDER_POLL_INTERVAL_MS)
+        self.folder_poll_timer.timeout.connect(self._poll_folder_changes)
+        self.folder_poll_timer.start()
+        self._folder_check_pending = False
         self.current_path: Path | None = None
         self.workspace_active = False
         self._folder_context_active = False
@@ -4814,6 +4822,7 @@ class Workspace(QMainWindow):
         self.status_refresh_timer.stop()
         self.metadata_ui_timer.stop()
         self.folder_change_timer.stop()
+        self.folder_poll_timer.stop()
         self.volume_refresh_timer.stop()
         self.preview_cache_write_timer.stop()
         self.xmp_cache_write_timer.stop()
@@ -9887,11 +9896,37 @@ class Workspace(QMainWindow):
             monotonic() + FOLDER_CHANGE_DEBOUNCE_MS / 1_000 + 0.5,
         )
 
-    def _reload_changed_folder(self) -> None:
+    def _poll_folder_changes(self) -> None:
+        """Сверяет отпечатки файлов активной папки, когда watcher промолчал.
+
+        Редактор, пишущий поверх существующего файла, не меняет состав каталога,
+        и `directoryChanged` о такой правке не сообщает. Опрос идёт только для
+        видимой вкладки и только когда ни одна собственная операция не занята
+        файлами, иначе он подрался бы с собственными изменениями приложения.
+        """
+        if (
+            self.closing
+            or not self.workspace_active
+            or not self._media_stamps
+            or self._folder_check_pending
+            or self.folder_change_timer.isActive()
+            or self._file_mutation_waiting
+            or self._burst_pending_changes
+            or self._burst_removing
+            or self._selection_progress is not None
+            or self._upload_progress is not None
+            or monotonic() < self._ignore_folder_changes_until
+        ):
+            return
+        self._reload_changed_folder(rescan_xmp=False)
+
+    def _reload_changed_folder(self, *, rescan_xmp: bool = True) -> None:
         if self._selection_progress is not None or self._upload_progress is not None:
             return
         if not self.closing and self.current_dir.is_dir():
-            self._scan_xmp_changes(force=True)
+            if rescan_xmp:
+                self._scan_xmp_changes(force=True)
+            self._folder_check_pending = True
             generation = self.cache_load_generation
             directory = self.current_dir
             future = self.directory_scan_executor.submit(_scan_directory_state, directory)
@@ -9902,6 +9937,7 @@ class Workspace(QMainWindow):
     def _on_folder_checked(self, payload: object) -> None:
         """Перезагружает папку лишь при изменении фото, а не после записи XMP."""
         generation, directory, future = payload
+        self._folder_check_pending = False
         if self.closing or generation != self.cache_load_generation or directory != self.current_dir:
             return
         if (
