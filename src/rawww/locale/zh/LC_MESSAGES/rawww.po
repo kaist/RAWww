@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 12:24+0000\n"
+"POT-Creation-Date: 2026-07-29 09:33+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -788,9 +788,15 @@ msgstr "正在准备 AI…"
 msgid "Анализ: {done}/{total}{eta}"
 msgstr "分析：{done}/{total}{eta}"
 
+msgid "Генерация превью"
+msgstr "生成预览"
+
+msgid "Чтение превью"
+msgstr "读取预览"
+
 #, python-brace-format
-msgid "Превью: {done}/{total}"
-msgstr "预览：{done}/{total}"
+msgid "{phase}: {done}/{total}"
+msgstr "{phase}：{done}/{total}"
 
 #, python-brace-format
 msgid "Закрытые глаза  {n}"
@@ -2139,3 +2145,6 @@ msgstr "快速查看和筛选 RAW 与 JPG 照片"
 
 #~ msgid "≈ {h} ч {m} мин"
 #~ msgstr "≈ {h} 小时 {m} 分"
+
+#~ msgid "Превью: {done}/{total}"
+#~ msgstr "预览：{done}/{total}"

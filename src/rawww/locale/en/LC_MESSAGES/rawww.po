@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 12:24+0000\n"
+"POT-Creation-Date: 2026-07-29 09:33+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -795,9 +795,15 @@ msgstr "Preparing AI…"
 msgid "Анализ: {done}/{total}{eta}"
 msgstr "Analysis: {done}/{total}{eta}"
 
+msgid "Генерация превью"
+msgstr "Generating previews"
+
+msgid "Чтение превью"
+msgstr "Reading previews"
+
 #, python-brace-format
-msgid "Превью: {done}/{total}"
-msgstr "Previews: {done}/{total}"
+msgid "{phase}: {done}/{total}"
+msgstr "{phase}: {done}/{total}"
 
 #, python-brace-format
 msgid "Закрытые глаза  {n}"
@@ -2187,3 +2193,6 @@ msgstr "Fast RAW and JPG viewing and culling"
 
 #~ msgid "≈ {h} ч {m} мин"
 #~ msgstr "≈ {h} h {m} min"
+
+#~ msgid "Превью: {done}/{total}"
+#~ msgstr "Previews: {done}/{total}"

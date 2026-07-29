@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 12:24+0000\n"
+"POT-Creation-Date: 2026-07-29 09:33+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -806,9 +806,15 @@ msgstr "KI wird vorbereitet…"
 msgid "Анализ: {done}/{total}{eta}"
 msgstr "Analyse: {done}/{total}{eta}"
 
+msgid "Генерация превью"
+msgstr "Vorschauen werden erstellt"
+
+msgid "Чтение превью"
+msgstr "Vorschauen werden gelesen"
+
 #, python-brace-format
-msgid "Превью: {done}/{total}"
-msgstr "Vorschauen: {done}/{total}"
+msgid "{phase}: {done}/{total}"
+msgstr "{phase}: {done}/{total}"
 
 #, python-brace-format
 msgid "Закрытые глаза  {n}"
@@ -2219,3 +2225,6 @@ msgstr "Schnelle Sichtung und Auswahl von RAW- und JPG-Fotos"
 
 #~ msgid "≈ {h} ч {m} мин"
 #~ msgstr "≈ {h} Std. {m} Min."
+
+#~ msgid "Превью: {done}/{total}"
+#~ msgstr "Vorschauen: {done}/{total}"

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 12:24+0000\n"
+"POT-Creation-Date: 2026-07-29 09:33+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -764,8 +764,14 @@ msgstr ""
 msgid "Анализ: {done}/{total}{eta}"
 msgstr ""
 
+msgid "Генерация превью"
+msgstr ""
+
+msgid "Чтение превью"
+msgstr ""
+
 #, python-brace-format
-msgid "Превью: {done}/{total}"
+msgid "{phase}: {done}/{total}"
 msgstr ""
 
 #, python-brace-format

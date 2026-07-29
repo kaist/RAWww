@@ -170,7 +170,7 @@ class DecodeSchedulerTests(unittest.TestCase):
         decoded = _decoded(str(path))
         host.decode_cache.put((path, THUMB_SIZE), decoded)
         scheduler.submit_decode(path, THUMB_SIZE, full_priority=False)
-        self.assertEqual(host.bridge.decoded.emitted, [((decoded, THUMB_SIZE),)])
+        self.assertEqual(host.bridge.decoded.emitted, [((decoded, THUMB_SIZE, True),)])
         self.assertEqual(scheduler.pending, {})
         self.assertEqual(scheduler.background_cache_lookup_executor.calls, [])
 
@@ -196,7 +196,7 @@ class DecodeSchedulerTests(unittest.TestCase):
         folder = _FolderCache(loads={(path, THUMB_SIZE): decoded})
         scheduler, host = _make(folder)
         scheduler.submit_decode(path, THUMB_SIZE, full_priority=False)
-        self.assertEqual(host.bridge.decoded.emitted, [((decoded, THUMB_SIZE),)])
+        self.assertEqual(host.bridge.decoded.emitted, [((decoded, THUMB_SIZE, True),)])
         self.assertIs(host.decode_cache.get((path, THUMB_SIZE)), decoded)
         self.assertEqual(scheduler.pending, {})
 
@@ -254,7 +254,7 @@ class DecodeSchedulerTests(unittest.TestCase):
         self.assertEqual(len(scheduler.background_cache_lookup_executor.calls), 1)
         self.assertEqual(
             host.bridge.decoded.emitted,
-            [((first_decoded, THUMB_SIZE),), ((second_decoded, THUMB_SIZE),)],
+            [((first_decoded, THUMB_SIZE, True),), ((second_decoded, THUMB_SIZE, True),)],
         )
         self.assertEqual(scheduler.pending, {})
 

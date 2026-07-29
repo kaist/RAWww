@@ -203,6 +203,7 @@ class AppStateTests(unittest.TestCase):
             all_paths=[frame.source, target],
             _cache_ai_paths={target},
             preview_finished_paths={target},
+            preview_generated_paths={target},
             decode_cache=SimpleNamespace(remove_path=Mock()),
             photo_details={frame.name: {"rating": 4}, target.name: {"rating": 4}},
             folder_cache=None,

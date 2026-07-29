@@ -94,7 +94,7 @@ class DecodeScheduler:
         key = (path, max_size)
         cached = self._host.decode_cache.get(key)
         if cached is not None:
-            self._host.bridge.decoded.emit((cached, max_size))
+            self._host.bridge.decoded.emit((cached, max_size, True))
             return
         if key in self.pending:
             return
@@ -148,12 +148,12 @@ class DecodeScheduler:
         preview = self._host.decode_cache.thumbnail_get(path)
         if preview is not None:
             self._host.bridge.decoded.emit(
-                (DecodedImage(path=path, image=preview, width=preview.width(), height=preview.height()), self._thumb_size)
+                (DecodedImage(path=path, image=preview, width=preview.width(), height=preview.height()), self._thumb_size, True)
             )
             return
         cached = self._host.decode_cache.get(key)
         if cached is not None:
-            self._host.bridge.decoded.emit((cached, self._thumb_size))
+            self._host.bridge.decoded.emit((cached, self._thumb_size, True))
             return
         if key in self.pending or self._host.folder_cache is None:
             return
@@ -195,7 +195,7 @@ class DecodeScheduler:
             return
         if decoded is not None:
             self._host.decode_cache.put(key, decoded)
-            self._host.bridge.decoded.emit((decoded, self._thumb_size))
+            self._host.bridge.decoded.emit((decoded, self._thumb_size, True))
             return
         if self._host.workspace_active:
             self._host.video_thumbnailer.request(path)
@@ -303,7 +303,7 @@ class DecodeScheduler:
         if decoded is not None:
             self.visible_thumb_pending.discard(key)
             self._host.decode_cache.put((path, max_size), decoded)
-            self._host.bridge.decoded.emit((decoded, max_size))
+            self._host.bridge.decoded.emit((decoded, max_size, True))
             return
         # Приоритет относится ко всему запросу, а не только к чтению SQLite.
         # Иначе после промаха кэша таймер решит, что срочная очередь свободна,
@@ -336,7 +336,7 @@ class DecodeScheduler:
             image = decoded.get(path)
             if image is not None:
                 self._host.decode_cache.put((path, self._thumb_size), image)
-                self._host.bridge.decoded.emit((image, self._thumb_size))
+                self._host.bridge.decoded.emit((image, self._thumb_size, True))
             elif path.is_file():
                 self._submit_process_decode(
                     path, self._thumb_size, full_priority=False, visible_priority=False
@@ -364,7 +364,7 @@ class DecodeScheduler:
             else:
                 decoded = result
             self._host.decode_cache.put((path, max_size), decoded)
-            self._host.bridge.decoded.emit((decoded, max_size))
+            self._host.bridge.decoded.emit((decoded, max_size, False))
             if (
                 isinstance(result, PixelImage)
                 and self._host.folder_cache is not None

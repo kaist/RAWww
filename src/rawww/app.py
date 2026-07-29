@@ -4555,6 +4555,9 @@ class Workspace(QMainWindow):
         self._custom_order: list[str] = []
         self.preview_paths: set[Path] = set()
         self.preview_finished_paths: set[Path] = set()
+        # Пути, чьё превью пришлось декодировать, а не прочитать из кэша: по ним
+        # прогресс отличает «Генерацию превью» от быстрого «Чтения превью».
+        self.preview_generated_paths: set[Path] = set()
         self.view_paths: list[Path] = []
         self.view_generation = 0
         self._full_navigation_generation = -1
@@ -4985,7 +4988,7 @@ class Workspace(QMainWindow):
         if show_loading:
             self.grid_restore_loader_label.setText(loading_text)
             self.grid_restore_loader_progress.setRange(0, 0)
-            self.grid_restore_loader_progress.setTextVisible(False)
+            self._set_grid_restore_progress_text(False)
             self._set_grid_restore_loader_visible(True)
             self.full_view.set_busy_loading(loading_text)
 
@@ -6798,7 +6801,7 @@ class Workspace(QMainWindow):
             self.grid_restore_loader_progress.setRange(0, len(targets))
             self.grid_restore_loader_progress.setValue(0)
             self.grid_restore_loader_progress.setFormat("%v / %m")
-            self.grid_restore_loader_progress.setTextVisible(True)
+            self._set_grid_restore_progress_text(True)
         future = self.file_mutation_executor.submit(
             _delete_paths_task,
             targets,
@@ -6808,6 +6811,18 @@ class Workspace(QMainWindow):
         future.rawww_deleting_current_folder = deleting_current_folder
         future.rawww_cache_directory = cache_directory
         return future
+
+    def _set_grid_restore_progress_text(self, visible: bool) -> None:
+        """Переключает полосу лоадера между тонким индикатором и режимом с числами.
+
+        Текст «выполнено / всего» не помещается в тонкую (5px) полосу загрузки,
+        поэтому при показе чисел полоса делается выше через свойство ``withText``.
+        """
+        bar = self.grid_restore_loader_progress
+        bar.setTextVisible(visible)
+        bar.setProperty("withText", visible)
+        bar.style().unpolish(bar)
+        bar.style().polish(bar)
 
     def _on_delete_progress(self, completed: int, total: int) -> None:
         """Обновляет определяемый прогресс массового удаления в главном потоке."""
@@ -8103,6 +8118,7 @@ class Workspace(QMainWindow):
         self.preview_progress_total = 0
         self.preview_paths.clear()
         self.preview_finished_paths.clear()
+        self.preview_generated_paths.clear()
         self._ai_requested_generation = -1
         self._cache_ai_waiting = False
         self._cache_ai_paths.clear()
@@ -8458,6 +8474,7 @@ class Workspace(QMainWindow):
             self.preview_progress_total = len(images)
             self.preview_paths = set(images)
             self.preview_finished_paths.clear()
+            self.preview_generated_paths.clear()
             self.view_generation += 1
             self._rebuild_status_index()
         except Exception as exc:
@@ -8468,6 +8485,7 @@ class Workspace(QMainWindow):
             self.preview_progress_total = 0
             self.preview_paths.clear()
             self.preview_finished_paths.clear()
+            self.preview_generated_paths.clear()
         scannable_paths = [path for path in self.paths if path.is_file()]
         if scannable_paths:
             self.folder_cache = FolderCache(
@@ -8659,6 +8677,7 @@ class Workspace(QMainWindow):
         self.all_paths = [path for path in self.all_paths if path != target]
         self._cache_ai_paths.discard(target)
         self.preview_finished_paths.discard(target)
+        self.preview_generated_paths.discard(target)
         self.decode_cache.remove_path(target)
         self.photo_details.pop(target.name, None)
         self.photo_details[frame.name] = virtual_detail
@@ -10045,7 +10064,13 @@ class Workspace(QMainWindow):
         if self.preview_progress_total and loaded < self.preview_progress_total:
             self.status_progress.setRange(0, self.preview_progress_total)
             self.status_progress.setValue(loaded)
-            self.status_progress.setFormat(_("Превью: {done}/{total}").format(done=loaded, total=self.preview_progress_total))
+            # Генерация из RAW — долгая работа, поэтому как только хоть одно
+            # превью пришлось декодировать, честнее показать «Генерация».
+            generating = bool(self.preview_generated_paths & self.preview_paths)
+            phase = _("Генерация превью") if generating else _("Чтение превью")
+            self.status_progress.setFormat(
+                _("{phase}: {done}/{total}").format(phase=phase, done=loaded, total=self.preview_progress_total)
+            )
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
             self._set_taskbar_progress(loaded, self.preview_progress_total)
@@ -11353,7 +11378,7 @@ class Workspace(QMainWindow):
 
     def _on_decoded(self, payload: object) -> None:
         """Маршрутизирует готовый кадр в карточку, просмотрщик или RAM-кэш."""
-        decoded, max_size = payload
+        decoded, max_size, from_cache = payload
         self.visible_thumb_pending.discard((decoded.path, max_size))
         if not self.workspace_active:
             return
@@ -11364,6 +11389,8 @@ class Workspace(QMainWindow):
         item = self.items_by_path.get(decoded.path)
         if max_size == THUMB_SIZE:
             self.preview_finished_paths.add(decoded.path)
+            if not from_cache:
+                self.preview_generated_paths.add(decoded.path)
             self._thumbnail_cache_put(decoded.path, decoded.image)
             if item is not None:
                 item.setData(PREVIEW_ROLE, decoded.image)
@@ -12983,7 +13010,11 @@ class MainWindow(QMainWindow):
         if getattr(self, "_fast_full_view", False):
             return
         self._fast_full_view = True
-        self._was_maximized_before_full_view = self.isMaximized()
+        # При запуске с файлом полный просмотр включается до показа окна, когда
+        # ни развёрнутости, ни осмысленной геометрии ещё нет. Тогда выход из
+        # него должен вернуть обычное развёрнутое окно, а не восстановить
+        # мусорную геометрию конструктора и остаться визуально во весь экран.
+        self._was_maximized_before_full_view = self.isMaximized() or not self.isVisible()
         self._geometry_before_full_view = self.geometry()
         self.title_bar.hide()
         has_full_view = workspace.stack.currentWidget() is workspace.full_view
