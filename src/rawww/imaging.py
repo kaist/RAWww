@@ -232,6 +232,58 @@ def _pillow_to_pixels(path: Path, image: Image.Image, max_size: int | None, *, s
     return PixelImage(path=path, pixels=image.tobytes("raw", "RGBA"), width=width, height=height)
 
 
+_SRGB_ICC_PROFILE: bytes | None = None
+
+
+def _srgb_icc_profile() -> bytes:
+    """Кэширует байты sRGB-профиля для тегирования экспортируемых кадров.
+
+    Профиль один на процесс: собирать его на каждый кадр пакета незачем.
+    """
+    global _SRGB_ICC_PROFILE
+    if _SRGB_ICC_PROFILE is None:
+        _SRGB_ICC_PROFILE = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    return _SRGB_ICC_PROFILE
+
+
+def read_export_metadata(path: Path) -> tuple[bytes, bytes | None]:
+    """Даёт EXIF и ICC-профиль исходника для переноса в результат-JPEG.
+
+    Пиксели результата уже приведены к экранной ориентации и к sRGB (см.
+    ``_convert_to_srgb``), поэтому:
+
+    - EXIF отдаётся без тега ориентации: ``exif_transpose`` его снимает, иначе
+      просмотрщик повернул бы уже повёрнутый кадр второй раз;
+    - цветным профилем служит sRGB, а не исходный. Исходный широкий профиль на
+      пересчитанных в sRGB пикселях исказил бы цвет, поэтому он лишь признак
+      того, что кадр цветоуправляемый, а в файл идёт корректный sRGB.
+
+    У RAW и EXIF, и наличие профиля берутся из встроенного превью — того же
+    источника, что и пиксели. Ошибка чтения метаданных не должна потерять уже
+    посчитанный кадр: тогда результат просто сохраняется без них.
+    """
+    try:
+        if path.suffix.lower() in RAW_EXTENSIONS:
+            decoder = _rawpy()
+            with decoder.imread(str(path)) as raw:
+                try:
+                    thumb = raw.extract_thumb()
+                except decoder.LibRawNoThumbnailError:
+                    return b"", None
+                if thumb.format != decoder.ThumbFormat.JPEG:
+                    return b"", None
+                source_image = Image.open(BytesIO(thumb.data))
+        else:
+            source_image = Image.open(path)
+        with source_image:
+            oriented = ImageOps.exif_transpose(source_image)
+            exif = oriented.info.get("exif") or oriented.getexif().tobytes()
+            has_icc = bool(oriented.info.get("icc_profile"))
+    except (OSError, ValueError, RuntimeError):
+        return b"", None
+    return exif or b"", (_srgb_icc_profile() if has_icc else None)
+
+
 def _convert_to_srgb(image: Image.Image) -> Image.Image:
     icc = image.info.get("icc_profile")
     if not icc:

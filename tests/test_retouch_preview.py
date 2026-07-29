@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import tempfile
 import threading
 import time
 import unittest
@@ -18,6 +19,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+from PIL import Image
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -403,7 +405,7 @@ class BatchPipelineTests(unittest.TestCase):
         capture = _Capture()
         with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True, **kwargs: 2), \
                 mock.patch.object(retouch_worker, "_read", lambda path, max_side: (b"", (0, 0), (1, 1))), \
-                mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
+                mock.patch.object(retouch_worker, "_write", lambda path, rgb, source=None: None):
             worker = threading.Thread(
                 target=lambda: retouch_worker._batch(_Slow(), tasks, RetouchSettings()),
                 daemon=True,
@@ -449,7 +451,7 @@ class BatchPipelineTests(unittest.TestCase):
         capture = _Capture()
         with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True, **kwargs: 3), \
                 mock.patch.object(retouch_worker, "_read", lambda path, max_side: (path.name, (0, 0), (1, 1))), \
-                mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
+                mock.patch.object(retouch_worker, "_write", lambda path, rgb, source=None: None):
             with redirect_stdout(capture):
                 retouch_worker._batch(_Tight(), tasks, RetouchSettings())
 
@@ -477,7 +479,7 @@ class BatchPipelineTests(unittest.TestCase):
         capture = _Capture()
         with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True, **kwargs: 2), \
                 mock.patch.object(retouch_worker, "_read", lambda path, max_side: (path.name, (0, 0), (1, 1))), \
-                mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
+                mock.patch.object(retouch_worker, "_write", lambda path, rgb, source=None: None):
             with redirect_stdout(capture):
                 retouch_worker._batch(_Huge(), tasks, RetouchSettings())
 
@@ -502,7 +504,7 @@ class BatchPipelineTests(unittest.TestCase):
         capture = _Capture()
         with mock.patch.object(retouch_worker, "_frame_workers", lambda cpus=None, neural=True, **kwargs: 1), \
                 mock.patch.object(retouch_worker, "_read", lambda path, max_side: (b"", (0, 0), (1, 1))), \
-                mock.patch.object(retouch_worker, "_write", lambda path, rgb: None):
+                mock.patch.object(retouch_worker, "_write", lambda path, rgb, source=None: None):
             with redirect_stdout(capture):
                 retouch_worker._batch(_Stopper(), tasks, RetouchSettings(), control)
 
@@ -524,6 +526,65 @@ class BatchPipelineTests(unittest.TestCase):
             self.assertEqual(first._max_workers, 2)
         finally:
             first.shutdown(wait=True)
+
+
+class WriteMetadataTests(unittest.TestCase):
+    """`_write` переносит EXIF и ICC исходника в результат пакетной ретуши."""
+
+    def _source_jpeg(self, directory: str, *, orientation: int | None = None, icc: bytes | None = None) -> Path:
+        from PIL import Image
+
+        path = Path(directory) / "src.jpg"
+        image = Image.new("RGB", (16, 12), (180, 140, 120))
+        exif = image.getexif()
+        exif[271] = "TestMake"
+        exif[272] = "TestModel"
+        if orientation is not None:
+            exif[274] = orientation
+        params: dict = {"format": "JPEG", "exif": exif.tobytes()}
+        if icc is not None:
+            params["icc_profile"] = icc
+        image.save(path, **params)
+        return path
+
+    def test_exif_is_preserved_and_orientation_is_normalised(self) -> None:
+        from rawww import retouch_worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._source_jpeg(directory, orientation=6)
+            target = Path(directory) / "out.jpg"
+            retouch_worker._write(target, np.zeros((12, 16, 3), np.uint8), source)
+            with Image.open(target) as result:
+                exif = result.getexif()
+        self.assertEqual(exif.get(272), "TestModel")
+        # Пиксели уже повёрнуты, поэтому тег ориентации обязан быть снят.
+        self.assertEqual(exif.get(274, 1), 1)
+
+    def test_srgb_profile_is_embedded_when_source_is_colour_managed(self) -> None:
+        from PIL import ImageCms
+
+        from rawww import retouch_worker
+
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._source_jpeg(directory, icc=profile)
+            target = Path(directory) / "out.jpg"
+            retouch_worker._write(target, np.zeros((12, 16, 3), np.uint8), source)
+            with Image.open(target) as result:
+                embedded = result.info.get("icc_profile")
+        self.assertTrue(embedded)
+        description = ImageCms.getProfileName(ImageCms.ImageCmsProfile(io.BytesIO(embedded)))
+        self.assertIn("srgb", description.lower())
+
+    def test_no_profile_when_source_has_none(self) -> None:
+        from rawww import retouch_worker
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._source_jpeg(directory)
+            target = Path(directory) / "out.jpg"
+            retouch_worker._write(target, np.zeros((12, 16, 3), np.uint8), source)
+            with Image.open(target) as result:
+                self.assertIsNone(result.info.get("icc_profile"))
 
 
 class ClosedDialogCallbackTests(unittest.TestCase):
