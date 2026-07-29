@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-28 12:24+0000\n"
+"POT-Creation-Date: 2026-07-29 09:25+0000\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -807,8 +807,12 @@ msgid "Анализ: {done}/{total}{eta}"
 msgstr "Analyse: {done}/{total}{eta}"
 
 #, python-brace-format
-msgid "Превью: {done}/{total}"
-msgstr "Vorschauen: {done}/{total}"
+msgid "Генерация превью: {done}/{total}"
+msgstr "Vorschauen werden erzeugt: {done}/{total}"
+
+#, python-brace-format
+msgid "Чтение превью: {done}/{total}"
+msgstr "Vorschauen werden gelesen: {done}/{total}"
 
 #, python-brace-format
 msgid "Закрытые глаза  {n}"

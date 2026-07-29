@@ -39,6 +39,8 @@ class DecodeHost(Protocol):
         self, cache: object, pixel: PixelImage, max_size: int
     ) -> None: ...
 
+    def schedule_status_refresh(self) -> None: ...
+
 
 class DecodeScheduler:
     """Распределяет декодирование между срочной и фоновой очередями.
@@ -79,6 +81,9 @@ class DecodeScheduler:
         self.pending: dict[tuple[Path, int], Future] = {}
         self.foreground_full_futures: dict[tuple[Path, int], Future] = {}
         self.visible_thumb_pending: set[tuple[Path, int]] = set()
+        # Промах кэша превью означает настоящее декодирование файла, поэтому
+        # строка состояния отличает генерацию миниатюр от чтения готовых.
+        self.preview_decode_pending: set[Path] = set()
 
     def submit_decode(
         self,
@@ -237,6 +242,8 @@ class DecodeScheduler:
                 return
             raise
         self.pending[key] = future
+        if max_size == self._thumb_size:
+            self.preview_decode_pending.add(path)
         if is_foreground:
             self.foreground_full_futures[key] = future
         generation = self._host.directory_generation
@@ -311,6 +318,7 @@ class DecodeScheduler:
         self._submit_process_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
         if key not in self.pending:
             self.visible_thumb_pending.discard(key)
+        self._host.schedule_status_refresh()
 
     def _cache_batch_lookup_done(
         self, paths: tuple[Path, ...], generation: int, future: Future
@@ -341,12 +349,15 @@ class DecodeScheduler:
                 self._submit_process_decode(
                     path, self._thumb_size, full_priority=False, visible_priority=False
                 )
+        self._host.schedule_status_refresh()
 
     def _decode_done(self, path: Path, max_size: int, generation: int, future: Future) -> None:
         key = (path, max_size)
         if self.pending.get(key) is future:
             self.pending.pop(key, None)
         self.visible_thumb_pending.discard(key)
+        if max_size == self._thumb_size:
+            self.preview_decode_pending.discard(path)
         if self.foreground_full_futures.get(key) is future:
             self.foreground_full_futures.pop(key, None)
         if (
@@ -418,6 +429,7 @@ class DecodeScheduler:
         pending, self.pending = self.pending, {}
         self.foreground_full_futures.clear()
         self.visible_thumb_pending.clear()
+        self.preview_decode_pending.clear()
         for future in pending.values():
             future.cancel()
 
