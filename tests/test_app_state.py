@@ -16,11 +16,11 @@ from unittest.mock import Mock, call, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt, QUrl
-from PySide6.QtGui import QGuiApplication, QPalette
+from PySide6.QtGui import QGuiApplication, QImage, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMenu, QStackedWidget, QVBoxLayout, QWidget
 
-from rawww.app import ChromeTabBar, FullView, MainWindow, VideoThumbnailer, Workspace, _application_settings, _delete_materialized_burst_files, _drive_key, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_xmp_task
+from rawww.app import PREVIEW_ROLE, ChromeTabBar, FullView, MainWindow, VideoThumbnailer, Workspace, _application_settings, _delete_materialized_burst_files, _drive_key, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_directory_state, _scan_xmp_task
 from rawww.widgets import format_remaining_time
 from rawww.canon_burst import BurstFrame
 from rawww.hotkeys import FIXED_HOTKEYS
@@ -1424,6 +1424,61 @@ class AppStateTests(unittest.TestCase):
             photo.write_bytes(b"image")
 
             self.assertEqual(_scan_directory(folder), [photo])
+
+    def test_directory_scan_state_reports_file_stamps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            photo = folder / "photo.jpg"
+            photo.write_bytes(b"image")
+
+            entries, stamps = _scan_directory_state(folder)
+
+            self.assertEqual(entries, [photo])
+            self.assertEqual(stamps[photo], (photo.stat().st_size, photo.stat().st_mtime_ns))
+
+    def test_external_edit_refreshes_only_changed_card(self) -> None:
+        """Правка файла соседней программой обновляет его карточку без перезагрузки папки."""
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            changed = folder / "changed.jpg"
+            intact = folder / "intact.jpg"
+            for path in (changed, intact):
+                path.write_bytes(b"image")
+
+            workspace = Workspace(folder, defer_initial_scan=True)
+            workspace.all_paths = [changed, intact]
+            workspace.paths = [changed, intact]
+            workspace.view_paths = [changed, intact]
+            workspace._media_stamps = {
+                changed: (1, 1),
+                intact: (intact.stat().st_size, intact.stat().st_mtime_ns),
+            }
+            items = {}
+            for path in (changed, intact):
+                item = QListWidgetItem(path.name)
+                item.setData(Qt.ItemDataRole.UserRole, path)
+                item.setData(PREVIEW_ROLE, QImage(2, 2, QImage.Format.Format_RGB888))
+                workspace.grid.addItem(item)
+                items[path] = item
+            workspace.items_by_path = dict(items)
+            preview = QImage(2, 2, QImage.Format.Format_RGB888)
+            workspace.decode_cache.thumbnail_put(changed, preview)
+            workspace.preview_finished_paths = {changed, intact}
+
+            future: Future = Future()
+            future.set_result(_scan_directory_state(folder))
+            with patch.object(Workspace, "load_directory") as reload_folder:
+                workspace._on_folder_checked(
+                    (workspace.cache_load_generation, folder, future)
+                )
+
+            reload_folder.assert_not_called()
+            self.assertIsNone(items[changed].data(PREVIEW_ROLE))
+            self.assertIsNotNone(items[intact].data(PREVIEW_ROLE))
+            self.assertIsNone(workspace.decode_cache.thumbnail_get(changed))
+            self.assertEqual(workspace.preview_finished_paths, {intact})
+            workspace.close()
+            workspace.deleteLater()
 
     def test_rename_uses_one_pass_when_names_do_not_intersect(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
