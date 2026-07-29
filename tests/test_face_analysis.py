@@ -12,7 +12,9 @@ import numpy as np
 from PIL import Image
 
 from rawww.ai import recognize_face_batch
+from rawww import face_analysis
 from rawww.face_analysis import (
+    DETECTOR_SIZE,
     FACE_TEMPLATE,
     LANDMARK_SIZE,
     LEFT_EYE,
@@ -20,6 +22,8 @@ from rawww.face_analysis import (
     Face,
     _aligned_face,
     _classify_eyes,
+    _detect,
+    _detector_input,
     _nms,
     recognize,
 )
@@ -53,6 +57,35 @@ class FaceAnalysisTests(unittest.TestCase):
             [30, 30, 40, 40, 0.7],
         ], dtype=np.float32)
         self.assertEqual(_nms(detections).tolist(), [0, 2])
+
+    def test_large_face_gets_a_second_shrunken_pass(self) -> None:
+        """Лицо во весь кадр не влезает в якорь: пустой ответ надо переспросить."""
+        empty = (np.empty((0, 4), np.float32), np.empty((0, 5, 2), np.float32), np.empty(0, np.float32))
+        found = (np.array([[1.0, 2.0, 3.0, 4.0]], np.float32), np.zeros((1, 5, 2), np.float32),
+                 np.array([.9], np.float32))
+        shrinks: list[float] = []
+
+        def once(image, threshold, shrink):
+            shrinks.append(shrink)
+            return empty if shrink == 1.0 else found
+
+        with patch.object(face_analysis, "_detect_once", side_effect=once):
+            boxes, _landmarks, scores = _detect(Image.new("RGB", (64, 64)), threshold=.55)
+        self.assertEqual(shrinks, [1.0, face_analysis._DETECTOR_RETRY_SHRINK])
+        self.assertAlmostEqual(float(scores[0]), .9, places=6)
+        self.assertEqual(boxes.shape, (1, 4))
+
+    def test_found_face_costs_a_single_pass(self) -> None:
+        found = (np.array([[1.0, 2.0, 3.0, 4.0]], np.float32), np.zeros((1, 5, 2), np.float32),
+                 np.array([.9], np.float32))
+        with patch.object(face_analysis, "_detect_once", return_value=found) as once:
+            _detect(Image.new("RGB", (64, 64)), threshold=.55)
+        self.assertEqual(once.call_count, 1)
+
+    def test_shrink_leaves_room_around_the_frame(self) -> None:
+        values, scale = _detector_input(Image.new("RGB", (1000, 1000)), shrink=.5)
+        self.assertEqual(values.shape, (1, 3, DETECTOR_SIZE[1], DETECTOR_SIZE[0]))
+        self.assertAlmostEqual(scale, DETECTOR_SIZE[0] / 1000 * .5)
 
     def test_face_alignment_maps_landmarks_to_the_model_template(self) -> None:
         image = Image.new("RGB", (224, 224))
