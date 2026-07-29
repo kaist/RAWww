@@ -199,6 +199,13 @@ class MatteSkinTest(unittest.TestCase):
         texture = lambda rgb: float((self._luma(rgb) - _smooth(self._luma(rgb), 2))[self.shine].std())
         self.assertGreater(texture(result), texture(self.rgb) * .7)
 
+    def test_micro_contrast_does_not_grow(self) -> None:
+        """Матирование гасит блик, а не проявляет поры и мелкие дефекты кожи."""
+        result = matte_skin(self.rgb, self.weights, 1.0, self.face_scale)
+        lightness = lambda rgb: _lightness(_srgb_to_linear(rgb) @ retouch_pipeline._LUMA)
+        micro = lambda rgb: float((lightness(rgb) - _smooth(lightness(rgb), 2))[self.shine].std())
+        self.assertLessEqual(micro(result), micro(self.rgb))
+
     def test_even_sheen_is_left_alone(self) -> None:
         """Ровный общий подсвет — это освещение кадра, а не жирный блеск."""
         flat = _shiny(spread=8.0)
