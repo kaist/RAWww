@@ -590,15 +590,16 @@ def matte_skin(rgb: np.ndarray, weights: np.ndarray, strength: float, face_scale
 
     Блик — это нейтральный свет поверх кожи, поэтому пиксель раскладывается по
     двухцветной модели Клинкера: `наблюдаемое = диффузная кожа * её цвет +
-    блеск * (1,1,1)`. Цвет матовой кожи берётся с соседних пикселей темнее
-    локальной базы — на них блеска почти нет. Из полученной карты блеска
-    вычитается её же средний уровень по коже: ровный общий подсвет трогать
-    нельзя, иначе просто темнеет всё лицо, а гасить надо локальный избыток —
-    лоб, нос, скулы.
+    блеск * (1,1,1)`. Цвет матовой кожи берётся с соседних пикселей чуть темнее
+    локальной базы — блеска на них почти нет, а тень ещё не успела покраснеть.
+    Из полученной карты блеска вычитается её же средний уровень по коже:
+    ровный общий подсвет трогать нельзя, иначе просто темнеет всё лицо, а
+    гасить надо локальный избыток — лоб, нос, скулы.
 
-    Дальше два шага. Светлота тушится умножением, а не вычитанием света: так
-    локальный контраст сохраняется и шум почти выбитой области не вылезает
-    вместе с блеском. Затем возвращается хроматичность: в блике красный канал
+    Дальше два шага. Блеск снимается как доля локального уровня кожи, а не как
+    вычитание света из самого пикселя: вычитание ровной вуали поднимало бы
+    микроконтраст, и на матированном лбу вылезали бы поры, морщинки и мелкие
+    дефекты. Затем возвращается хроматичность: в блике красный канал
     уходит в потолок, поэтому одно затемнение оставляет серое пятно — цвет
     подтягивается к матовой коже рядом при неизменной светлоте.
 
@@ -626,7 +627,11 @@ def matte_skin(rgb: np.ndarray, weights: np.ndarray, strength: float, face_scale
         return rgb.copy()
 
     base = _masked_smooth(luminance, small_weight, radius)
-    dark = small_weight * np.clip((base - luminance) / np.maximum(base * .12, 1e-4) + .5, 0.0, 1.0)
+    # Матовый эталон ищется чуть темнее локальной базы, но не в тени: под
+    # бровью, в глазнице и у крыла носа кожа заметно краснее и темнее, и если
+    # пустить её в эталон, на месте погашенного блика остаётся цветное пятно.
+    shade = (base - luminance) / np.maximum(base * .12, 1e-4)
+    dark = small_weight * np.clip(shade + .5, 0.0, 1.0) * np.clip((3.0 - shade) / 1.5, 0.0, 1.0)
     reference = np.stack([_masked_smooth(linear[..., channel], dark, radius) for channel in range(3)], axis=-1)
     reference /= np.maximum(reference @ _LUMA, 1e-5)[..., None]
 
@@ -639,6 +644,9 @@ def matte_skin(rgb: np.ndarray, weights: np.ndarray, strength: float, face_scale
     shine = (ref_ref * linear.sum(-1) - ref_white * (reference * linear).sum(-1)) / determinant
     shine = _smooth(np.minimum(np.maximum(shine, 0.0), luminance * _MATTE_CEILING) * small_weight, detail)
     excess = np.maximum(shine - _masked_smooth(shine, small_weight, radius), 0.0)
+    # Дальше блеск живёт долей локального уровня кожи: так матирование гасит
+    # только низкую частоту, а текстура уезжает вниз вместе с ней.
+    excess /= np.maximum(_smooth(luminance, detail), 1e-4)
     unit = float(np.quantile(excess[confident], .999))
     if unit <= 1e-4:
         return rgb.copy()
@@ -660,7 +668,7 @@ def matte_skin(rgb: np.ndarray, weights: np.ndarray, strength: float, face_scale
         linear = _srgb_to_linear(rgb[rows])
         luminance = linear @ _LUMA
         amount = np.maximum(maps[rows, :, 0], 0.0) * weights[rows]
-        gain = np.clip(1.0 - amount / np.maximum(luminance, 1e-4), _MATTE_FLOOR, 1.0)
+        gain = np.clip(1.0 - amount, _MATTE_FLOOR, 1.0)
         matted = linear * gain[..., None]
         target = matted @ _LUMA
         reference = np.stack(
