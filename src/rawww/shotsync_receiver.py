@@ -18,6 +18,14 @@ _RETRY_MAX_MS = 30_000
 MAX_INFLIGHT_DOWNLOADS = 3
 
 
+def _reply_bytes(reply: QNetworkReply) -> bytes:
+    """Читает только буферизованный ответ, не трогая уже закрытый SSL-сокет."""
+    available = getattr(reply, "bytesAvailable", None)
+    if callable(available) and available() <= 0:
+        return b""
+    return bytes(reply.readAll())
+
+
 def safe_filename(name: str, fallback: str = "photo.jpg") -> str:
     """Оставляет только имя файла и защищает цель от компонентов пути."""
     cleaned = Path(str(name or "").replace("\\", "/")).name.strip()
@@ -159,7 +167,7 @@ class ShotSyncReceiver(QObject):
             self._retry(shooting_id, destination, url, attempt)
             self._pump_downloads()
             return
-        data = bytes(reply.readAll())
+        data = _reply_bytes(reply)
         if not data:
             self.downloadFailed.emit(shooting_id, "Пустой файл.")
             self._retry(shooting_id, destination, url, attempt)
@@ -201,7 +209,7 @@ class ShotSyncReceiver(QObject):
                 self._http2_failed = True
             return
         try:
-            payload = json.loads(bytes(reply.readAll()).decode("utf-8"))
+            payload = json.loads(_reply_bytes(reply).decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             return
         photos = payload.get("photos") if isinstance(payload, dict) else None

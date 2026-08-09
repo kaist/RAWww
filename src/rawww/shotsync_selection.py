@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
-from .shotsync_receiver import safe_filename
+from .shotsync_receiver import _reply_bytes, safe_filename
 
 if TYPE_CHECKING:   # избегайте импорта стека GUI/QtGui при загрузке модуля
     from .cache import FolderCache
@@ -104,7 +104,7 @@ class SelectionDownloader(QObject):
             self._fail(shooting_id, reply.errorString())
             return
         try:
-            data = json.loads(bytes(reply.readAll()).decode("utf-8"))
+            data = json.loads(_reply_bytes(reply).decode("utf-8"))
         except (ValueError, TypeError):
             self._fail(shooting_id, "Некорректный ответ сервера.")
             return
@@ -173,7 +173,7 @@ class SelectionDownloader(QObject):
             return
         run["inflight"] -= 1
         if reply.error() == QNetworkReply.NetworkError.NoError:
-            data = bytes(reply.readAll())
+            data = _reply_bytes(reply)
             if data:
                 temp = destination.with_suffix(destination.suffix + ".part")
                 try:

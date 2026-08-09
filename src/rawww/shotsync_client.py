@@ -76,8 +76,15 @@ class ShotSyncClient(QObject):
         return request
 
     @staticmethod
+    def _reply_bytes(reply: QNetworkReply) -> bytes:
+        available = getattr(reply, "bytesAvailable", None)
+        if callable(available) and available() <= 0:
+            return b""
+        return bytes(reply.readAll())
+
+    @staticmethod
     def _parse_json(reply: QNetworkReply) -> dict:
-        raw = bytes(reply.readAll())
+        raw = ShotSyncClient._reply_bytes(reply)
         if not raw:
             return {}
         try:
@@ -232,7 +239,7 @@ class ShotSyncClient(QObject):
 
         def done() -> None:
             ok = reply.error() == QNetworkReply.NetworkError.NoError
-            data = bytes(reply.readAll()) if ok else b""
+            data = self._reply_bytes(reply) if ok else b""
             reply.deleteLater()
             callback(ok, data)
 
@@ -289,7 +296,7 @@ class ShotSyncClient(QObject):
         if reply.error() != QNetworkReply.NetworkError.NoError:
             return
         image = QImage()
-        if image.loadFromData(bytes(reply.readAll())) and not image.isNull():
+        if image.loadFromData(self._reply_bytes(reply)) and not image.isNull():
             self.avatarLoaded.emit(image)
 
     def shutdown(self) -> None:

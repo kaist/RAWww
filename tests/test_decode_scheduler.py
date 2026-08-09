@@ -416,6 +416,7 @@ class DecodeSchedulerTests(unittest.TestCase):
         scheduler, _ = _make()
         executor = scheduler._current_decode_executor()
         self.assertIsInstance(executor, ProcessPoolExecutor)
+        self.assertEqual(executor._mp_context.get_start_method(), "spawn")
         executor.shutdown(wait=False)
 
     def test_thread_pools_when_processes_disabled(self) -> None:

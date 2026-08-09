@@ -120,6 +120,7 @@ from .theme import (
 )
 from .hotkeys import HOTKEY_DEFAULTS, _hotkey_sequence
 from .batch_jobs import BatchJobControl, PoolBatchJob, UtilityJob, utility_progress_hub
+from .batch_image_workers import recompress_jpeg_worker, resize_export_worker
 from .widgets import SettingsCheckBox, format_remaining_time
 from .transfer_queue import TransferEntry, TransferManager, TransferQueuePanel, TransferTask
 from .card_import import CardImportScan, build_backup_entries, build_import_entries, merge_scans, scan_card
@@ -176,9 +177,9 @@ FULL_STRIP_PAGE_SIZE = 160
 PREVIEW_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 DETAIL_ROLE = PREVIEW_ROLE + 1
 SERIES_ROLE = DETAIL_ROLE + 1
-CURRENT_DECODE_WORKERS = 2
-BACKGROUND_DECODE_WORKERS = 3
-VISIBLE_THUMB_DECODE_WORKERS = 1
+CURRENT_DECODE_WORKERS = 3
+BACKGROUND_DECODE_WORKERS = 5
+VISIBLE_THUMB_DECODE_WORKERS = 2
 
 
 def _media_value(value: object):
@@ -601,6 +602,7 @@ class VideoThumbnailer(QObject):
     """
 
     previewReady = Signal(Path, QImage)
+    previewFailed = Signal(Path)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -630,6 +632,10 @@ class VideoThumbnailer(QObject):
         self._queue.append(path)
         self._queued.add(path)
         self._maybe_start()
+
+    @property
+    def has_pending(self) -> bool:
+        return self._current is not None or bool(self._queue)
 
     def set_active(self, active: bool) -> None:
         self._active = active
@@ -706,7 +712,9 @@ class VideoThumbnailer(QObject):
     def _finish_current(self) -> None:
         if self._current is None:
             return
+        path = self._current
         self._reset_current()
+        self.previewFailed.emit(path)
         QTimer.singleShot(0, self._maybe_start)
 
 
@@ -1441,7 +1449,11 @@ def _folder_card_pixmap(path: str, target: QSize, dpr: float) -> QPixmap:
     Иконка запрашивается в физических пикселях с ``devicePixelRatio``, чтобы на
     HiDPI не была мыльной.
     """
-    device_target = (QSizeF(target) * dpr).toSize()
+    # Системные значки папок квадратные. Прямоугольный запрос на macOS может
+    # растянуть NSImage до пропорций всей карточки.
+    logical_side = max(1, min(target.width(), target.height()))
+    device_side = max(1, round(logical_side * dpr))
+    device_target = QSize(device_side, device_side)
     key = f"foldericon:{path}:{device_target.width()}x{device_target.height()}"
     cached = QPixmapCache.find(key)
     if cached is not None and not cached.isNull():
@@ -1523,7 +1535,7 @@ class PhotoCardDelegate(QStyledItemDelegate):
             folder_pixmap = _folder_card_pixmap(str(path_obj), folder_rect.size(), dpr)
             if not folder_pixmap.isNull():
                 painter.fillRect(folder_rect, Qt.GlobalColor.transparent)
-                scaled = folder_pixmap.size().scaled(
+                scaled = folder_pixmap.deviceIndependentSize().toSize().scaled(
                     folder_rect.size(),
                     Qt.AspectRatioMode.KeepAspectRatio
                 )
@@ -3129,6 +3141,11 @@ class FullView(QFrame):
     def has_image(self) -> bool:
         return self._pixmap is not None and not self._pixmap.isNull()
 
+    @property
+    def displayed_path(self) -> Path | None:
+        """Возвращает путь кадра, который сейчас показан в большом просмотре."""
+        return self._path
+
     def show_original(self, decoded: DecodedImage) -> None:
         """Включает масштаб 100 %, когда исходный кадр уже декодирован."""
         if decoded.path != self._path or not self.image_view.zoom_requested:
@@ -4509,6 +4526,7 @@ class Workspace(QMainWindow):
         self.bridge.folderChecked.connect(self._on_folder_checked)
         self.video_thumbnailer = VideoThumbnailer(self)
         self.video_thumbnailer.previewReady.connect(self._on_video_preview)
+        self.video_thumbnailer.previewFailed.connect(self._on_video_preview_failed)
         self._xmp_pending: dict[Path, tuple[dict, list[dict], str | None]] = {}
         self._xmp_running: set[Path] = set()
         self._xmp_retry_after_change: set[Path] = set()
@@ -5102,6 +5120,7 @@ class Workspace(QMainWindow):
         self._schedule_visible_thumb_priority()
         if self.thumb_priority or self.thumb_index < len(self.paths):
             self.thumb_timer.start()
+        self._resume_incomplete_thumbnail_work()
         if self._resume_ai_when_active:
             self._resume_ai_when_active = False
             self._start_ai_analysis()
@@ -5111,6 +5130,7 @@ class Workspace(QMainWindow):
         self.video_thumbnailer.set_active(self.workspace_active and not playing)
         if not playing and self.workspace_active:
             self._schedule_visible_thumb_priority()
+            self._resume_incomplete_thumbnail_work()
 
     def _build_grid_page(self) -> QWidget:
         """Собирает основную страницу: дерево папок, сетку и служебные панели.
@@ -7052,7 +7072,11 @@ class Workspace(QMainWindow):
 
     def _set_tree_root_for_path(self, path: str | Path) -> None:
         path_text = str(path)
-        model_index = self.dir_model.index(path_text)
+        # QFileSystemModel наполняется асинхронно. На macOS и Linux индекс нового
+        # тома часто ещё не существует в старом корне модели в момент клика.
+        model_index = self.dir_model.setRootPath(path_text)
+        if not model_index.isValid():
+            model_index = self.dir_model.index(path_text)
         if model_index.isValid():
             self.dir_tree.setRootIndex(model_index)
             root = _volume_root_for_path(Path(path_text), _mounted_volume_paths())
@@ -9595,7 +9619,7 @@ class Workspace(QMainWindow):
         jobs = [(str(path), int(options["quality"]), bool(options["keep_exif"])) for path in paths]
         totals = _ShrinkTotals()
         job = PoolBatchJob(
-            _recompress_jpeg_worker, jobs,
+            recompress_jpeg_worker, jobs,
             label=_("Уменьшить JPG"),
             max_workers=min(8, max(1, os.cpu_count() or 1)),
             parent=dialog,
@@ -9672,7 +9696,7 @@ class Workspace(QMainWindow):
         ]
         errors: list[str] = []
         job = PoolBatchJob(
-            _resize_export_worker, jobs,
+            resize_export_worker, jobs,
             label=_("Групповой резайс"),
             max_workers=min(8, max(1, os.cpu_count() or 1)),
             parent=dialog,
@@ -10503,9 +10527,13 @@ class Workspace(QMainWindow):
             path = self.paths[self.thumb_index]
             self.thumb_index += 1
             if not path.is_file() or not is_supported_media(path):
+                if path in self.preview_paths:
+                    self.preview_finished_paths.add(path)
                 continue
             item = self.items_by_path.get(path)
             if item is not None and item.data(PREVIEW_ROLE) is not None:
+                if path in self.preview_paths:
+                    self.preview_finished_paths.add(path)
                 continue
             if (path, THUMB_SIZE) in self.pending:
                 continue
@@ -11498,7 +11526,12 @@ class Workspace(QMainWindow):
             and decoded.path == self.current_path
             and not is_supported_video(decoded.path)
         ):
-            if max_size > THUMB_SIZE or not self.full_view.has_image or self.full_view.is_fallback:
+            if (
+                max_size > THUMB_SIZE
+                or self.full_view.displayed_path != decoded.path
+                or not self.full_view.has_image
+                or self.full_view.is_fallback
+            ):
                 self.full_view.set_image(decoded, fallback=max_size == THUMB_SIZE)
         if max_size > THUMB_SIZE and decoded.path == self.current_path:
             self.thumb_timer.start()
@@ -11525,6 +11558,14 @@ class Workspace(QMainWindow):
             )
         self.preview_finished_paths.add(path)
         self._schedule_status_refresh()
+        self._resume_incomplete_thumbnail_work()
+
+    def _on_video_preview_failed(self, path: Path) -> None:
+        if self.closing or path.parent != self.current_dir:
+            return
+        self.preview_finished_paths.add(path)
+        self._schedule_status_refresh()
+        self._resume_incomplete_thumbnail_work()
 
     def _on_decode_failed(self, path: object, message: str) -> None:
         failed_path = _media_value(path)
@@ -11542,6 +11583,7 @@ class Workspace(QMainWindow):
     def _on_scheduler_finished(self, payload: object) -> None:
         """Принимает bookkeeping декодера в главном потоке Qt."""
         self.scheduler.handle_completion(payload)
+        self._resume_incomplete_thumbnail_work()
 
     def _open_selected(self) -> None:
         item = self.grid.currentItem()
@@ -11748,6 +11790,7 @@ class Workspace(QMainWindow):
             return
         self.stack.setCurrentWidget(self.grid_page)
         self._restore_grid_context()
+        self._resume_incomplete_thumbnail_work()
         self._refresh_status_panel()
         self.gridRequested.emit()
 
@@ -12017,8 +12060,33 @@ class Workspace(QMainWindow):
         self.visible_thumb_timer.stop()
         for key, future in list(self.pending.items()):
             if key[1] == THUMB_SIZE:
-                future.cancel()
+                if future.cancel() and self.pending.get(key) is future:
+                    self.pending.pop(key, None)
                 self.visible_thumb_pending.discard(key)
+
+    def _resume_incomplete_thumbnail_work(self) -> None:
+        """Возобновляет пропущенный хвост превью после отмены или ошибки задания."""
+        if (
+            self.closing
+            or not self.workspace_active
+            or self.folder_cache is None
+            or not self.cache_ready
+            or self.stack.currentWidget() is not self.grid_page
+            or self.thumb_timer.isActive()
+        ):
+            return
+        if any(size == THUMB_SIZE for _path, size in self.pending):
+            return
+        if self.video_thumbnailer.has_pending:
+            return
+        if self.thumb_priority or self.thumb_index < len(self.paths):
+            self.thumb_timer.start()
+            return
+        if not self.preview_paths.issubset(self.preview_finished_paths):
+            # Ранее пройденные pending-задачи могли быть отменены при входе в FullView.
+            # Повторный проход дешёвый: готовые карточки сразу пропускаются.
+            self.thumb_index = 0
+            self.thumb_timer.start()
 
     def _photo_mode_paths(self) -> list[Path]:
         """Возвращает сохранённый порядок ленты без обхода всей папки."""

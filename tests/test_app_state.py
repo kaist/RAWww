@@ -15,12 +15,12 @@ from unittest.mock import Mock, call, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt, QUrl
-from PySide6.QtGui import QGuiApplication, QImage, QPalette
+from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, QSize, Qt, QUrl
+from PySide6.QtGui import QGuiApplication, QImage, QPalette, QPixmap
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMenu, QStackedWidget, QVBoxLayout, QWidget
 
-from rawww.app import PREVIEW_ROLE, ChromeTabBar, FullView, MainWindow, VideoThumbnailer, Workspace, _application_settings, _delete_materialized_burst_files, _drive_key, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_directory_state, _scan_xmp_task
+from rawww.app import PREVIEW_ROLE, THUMB_SIZE, ChromeTabBar, FullView, MainWindow, VideoThumbnailer, Workspace, _application_settings, _delete_materialized_burst_files, _drive_key, _folder_card_pixmap, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_directory_state, _scan_xmp_task
 from rawww.widgets import format_remaining_time
 from rawww.canon_burst import BurstFrame
 from rawww.hotkeys import FIXED_HOTKEYS
@@ -107,6 +107,58 @@ class AppStateTests(unittest.TestCase):
         view.close()
         view.deleteLater()
         parent.deleteLater()
+
+    def test_folder_icon_requests_square_hidpi_pixmap(self) -> None:
+        requested = []
+
+        class FakeIcon:
+            @staticmethod
+            def isNull() -> bool:
+                return False
+
+            @staticmethod
+            def pixmap(size: QSize) -> QPixmap:
+                requested.append(size)
+                return QPixmap(size)
+
+        provider = SimpleNamespace(icon=Mock(return_value=FakeIcon()))
+        with patch("rawww.app._folder_icon_provider", return_value=provider):
+            pixmap = _folder_card_pixmap("/unique/folder-icon-test", QSize(240, 100), 2.0)
+
+        self.assertEqual(requested, [QSize(200, 200)])
+        self.assertEqual(pixmap.devicePixelRatio(), 2.0)
+
+    def test_new_thumbnail_replaces_previous_full_view_image(self) -> None:
+        old_path = Path("/photos/old.jpg")
+        new_path = Path("/photos/new.jpg")
+        full_view = SimpleNamespace(
+            displayed_path=old_path,
+            has_image=True,
+            is_fallback=False,
+            set_image=Mock(),
+            update_preview=Mock(),
+            set_video_preview=Mock(),
+        )
+        host = SimpleNamespace(
+            visible_thumb_pending=set(),
+            workspace_active=True,
+            stack=SimpleNamespace(currentWidget=lambda: full_view),
+            full_view=full_view,
+            current_path=new_path,
+            items_by_path={},
+            preview_finished_paths=set(),
+            _thumbnail_cache_put=Mock(),
+            _schedule_status_refresh=Mock(),
+            thumb_timer=SimpleNamespace(start=Mock()),
+        )
+        decoded = SimpleNamespace(
+            path=new_path,
+            image=QImage(8, 8, QImage.Format.Format_RGB32),
+        )
+
+        Workspace._on_decoded(host, (decoded, THUMB_SIZE))
+
+        full_view.set_image.assert_called_once_with(decoded, fallback=True)
 
     def test_full_view_delete_shortcut_reports_shift_modifier(self) -> None:
         parent = QWidget()
@@ -303,6 +355,64 @@ class AppStateTests(unittest.TestCase):
         self.assertTrue(thumbnailer._player.source().isEmpty())
         self.assertFalse(thumbnailer._timeout_timer.isActive())
         self.assertIsNone(thumbnailer._current)
+        thumbnailer.deleteLater()
+        self.app.processEvents()
+
+    def test_thumbnail_tail_restarts_after_cancelled_jobs(self) -> None:
+        first = Path("/photos/first.jpg")
+        missing = Path("/photos/missing.jpg")
+        grid_page = object()
+        timer = SimpleNamespace(isActive=Mock(return_value=False), start=Mock())
+        workspace = SimpleNamespace(
+            closing=False,
+            workspace_active=True,
+            folder_cache=object(),
+            cache_ready=True,
+            stack=SimpleNamespace(currentWidget=lambda: grid_page),
+            grid_page=grid_page,
+            thumb_timer=timer,
+            pending={},
+            video_thumbnailer=SimpleNamespace(has_pending=False),
+            thumb_priority=[],
+            thumb_index=2,
+            paths=[first, missing],
+            preview_paths={first, missing},
+            preview_finished_paths={first},
+        )
+
+        Workspace._resume_incomplete_thumbnail_work(workspace)
+
+        self.assertEqual(workspace.thumb_index, 0)
+        timer.start.assert_called_once_with()
+
+    def test_suspending_thumbnails_retires_cancelled_pending_entries(self) -> None:
+        path = Path("/photos/tail.jpg")
+        key = (path, THUMB_SIZE)
+        future = Future()
+        workspace = SimpleNamespace(
+            thumb_timer=SimpleNamespace(stop=Mock()),
+            visible_thumb_timer=SimpleNamespace(stop=Mock()),
+            pending={key: future},
+            visible_thumb_pending={key},
+        )
+
+        Workspace._suspend_thumbnail_work(workspace)
+
+        self.assertTrue(future.cancelled())
+        self.assertNotIn(key, workspace.pending)
+        self.assertNotIn(key, workspace.visible_thumb_pending)
+
+    def test_failed_video_thumbnail_finishes_its_progress_slot(self) -> None:
+        thumbnailer = VideoThumbnailer()
+        path = Path("/photos/broken.mp4")
+        failed = []
+        thumbnailer.previewFailed.connect(failed.append)
+        thumbnailer._current = path
+
+        thumbnailer._finish_current()
+
+        self.assertEqual(failed, [path])
+        self.assertFalse(thumbnailer.has_pending)
         thumbnailer.deleteLater()
         self.app.processEvents()
 
@@ -1145,6 +1255,34 @@ class AppStateTests(unittest.TestCase):
                 host.load_directory.reset_mock()
                 Workspace._drive_selected(host, volume_b)
                 host.load_directory.assert_called_once_with(remembered)
+
+    def test_tree_root_switch_reloads_the_selected_volume(self) -> None:
+        first_index = SimpleNamespace(isValid=lambda: True)
+        second_index = SimpleNamespace(isValid=lambda: True)
+        model = SimpleNamespace(
+            setRootPath=Mock(side_effect=[first_index, second_index]),
+            index=Mock(),
+        )
+        tree = SimpleNamespace(setRootIndex=Mock())
+        host = SimpleNamespace(
+            dir_model=model,
+            dir_tree=tree,
+            current_dir=Path("/current"),
+            shotsync_active=False,
+        )
+
+        Workspace._set_tree_root_for_path(host, Path("/Volumes/ONE"))
+        Workspace._set_tree_root_for_path(host, Path("/Volumes/TWO"))
+
+        self.assertEqual(
+            model.setRootPath.call_args_list,
+            [call(str(Path("/Volumes/ONE"))), call(str(Path("/Volumes/TWO")))],
+        )
+        self.assertEqual(
+            tree.setRootIndex.call_args_list,
+            [call(first_index), call(second_index)],
+        )
+        model.index.assert_not_called()
 
     @unittest.skipUnless(os.name == "nt", "Системное меню Проводника есть только в Windows")
     def test_photo_context_menu_uses_windows_shell(self) -> None:

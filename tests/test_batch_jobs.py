@@ -130,9 +130,13 @@ class PoolBatchJobTests(unittest.TestCase):
         job.finished.connect(outcome.append)
         job.start()
         deadline = threading.Event()
-        threading.Timer(timeout, deadline.set).start()
-        while not outcome and not deadline.is_set():
-            self.app.processEvents()
+        timer = threading.Timer(timeout, deadline.set)
+        timer.start()
+        try:
+            while not outcome and not deadline.is_set():
+                self.app.processEvents()
+        finally:
+            timer.cancel()
         self.assertTrue(outcome, "операция не завершилась в отведённое время")
         return outcome[0]
 

@@ -3,8 +3,14 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import multiprocessing
+import sys
+import types
 import unittest
+from unittest.mock import patch
 
+import rawww
+from rawww import i18n
 from rawww.launch import target_from_argv
 
 
@@ -25,3 +31,18 @@ class LaunchTargetTests(unittest.TestCase):
             folder = Path(temporary)
             self.assertEqual(target_from_argv(["--platform", str(folder)]), folder.resolve())
             self.assertIsNone(target_from_argv([str(folder / "missing")]))
+
+    def test_freeze_support_runs_before_i18n_and_app_import(self):
+        events = []
+        fake_app = types.ModuleType("rawww.app")
+        fake_app.main = lambda *args, **kwargs: events.append("app")
+
+        with (
+            patch.object(multiprocessing, "freeze_support", side_effect=lambda: events.append("freeze")),
+            patch.object(i18n, "activate", side_effect=lambda: events.append("i18n")),
+            patch.dict(sys.modules, {"rawww.app": fake_app}),
+            patch.object(sys, "argv", ["rawww"]),
+        ):
+            rawww.main()
+
+        self.assertEqual(events, ["freeze", "i18n", "app"])

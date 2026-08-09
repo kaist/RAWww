@@ -729,6 +729,9 @@ class MarksFetcher(QObject):
 
 def _read_json(reply: QNetworkReply) -> dict | None:
     try:
+        available = getattr(reply, "bytesAvailable", None)
+        if callable(available) and available() <= 0:
+            return None
         raw = bytes(reply.readAll()).decode("utf-8")
         data = json.loads(raw)
         return data if isinstance(data, dict) else None

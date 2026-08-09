@@ -14,7 +14,13 @@ def main(*args, **kwargs):
     Язык интерфейса активируется до импорта ``.app``: строковые константы уровня
     модуля берут перевод сразу при загрузке, без повторной трансляции виджетов.
     """
+    # PyInstaller запускает multiprocessing worker тем же исполняемым файлом.
+    # Dispatch обязан произойти до i18n и app: иначе каждый spawn-процесс зря
+    # импортирует весь Qt-интерфейс, мультимедиа и диалоги приложения.
+    import multiprocessing
     import sys
+
+    multiprocessing.freeze_support()
 
     if "--retouch-worker" in sys.argv:
         index = sys.argv.index("--retouch-worker")

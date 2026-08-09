@@ -12,18 +12,18 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 from datetime import datetime
 from pathlib import Path
-from concurrent.futures import Future, ProcessPoolExecutor
+from typing import TYPE_CHECKING
 
 import pyexiv2
 
-from .cache import FolderCache
-from .error_log import log_exception
-from .task_lifecycle import retire_executor
-
 from .worker_priority import lower_background_priority
+
+if TYPE_CHECKING:
+    from concurrent.futures import Future, ProcessPoolExecutor
+
+    from .cache import FolderCache
 
 
 METADATA_BATCH_SIZE = 32
@@ -250,6 +250,8 @@ class MetadataPipeline:
     """Фоновая очередь EXIF, намеренно независимая от прогресса ИИ."""
 
     def __init__(self) -> None:
+        import threading
+
         self.workers: ProcessPoolExecutor | None = None
         self.futures: set[Future] = set()
         self._lock = threading.Lock()
@@ -264,7 +266,13 @@ class MetadataPipeline:
             if self._shutting_down:
                 return
             if self.workers is None:
-                self.workers = ProcessPoolExecutor(max_workers=1)
+                from concurrent.futures import ProcessPoolExecutor
+                from multiprocessing import get_context
+
+                self.workers = ProcessPoolExecutor(
+                    max_workers=1,
+                    mp_context=get_context("spawn"),
+                )
             workers = self.workers
         for start in range(0, len(missing), METADATA_BATCH_SIZE):
             batch = [str(path) for path in missing[start:start + METADATA_BATCH_SIZE]]
@@ -296,6 +304,8 @@ class MetadataPipeline:
             if on_complete is not None:
                 on_complete(results)
         except Exception as exc:
+            from .error_log import log_exception
+
             log_exception("Не удалось обработать результаты pyexiv2", exc)
 
     def shutdown(self) -> None:
@@ -307,6 +317,8 @@ class MetadataPipeline:
         for future in futures:
             future.cancel()
         if workers is not None:
+            from .task_lifecycle import retire_executor
+
             retire_executor(workers)
 
     def pending_futures(self) -> tuple[Future, ...]:

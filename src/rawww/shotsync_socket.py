@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
+from PySide6.QtNetwork import QAbstractSocket
 from PySide6.QtWebSockets import QWebSocket
 
 _RECONNECT_START_MS = 1000
@@ -36,6 +37,7 @@ class ShotSyncSocket(QObject):
         self._api_key: str = ""
         self._want_running = False
         self._connected = False
+        self._reopen_pending = False
         self._reconnect_ms = _RECONNECT_START_MS
 
         self._socket = QWebSocket()
@@ -76,6 +78,7 @@ class ShotSyncSocket(QObject):
     def stop(self) -> None:
         """Закрывает сокет и запрещает автоматическое переподключение."""
         self._want_running = False
+        self._reopen_pending = False
         self._reconnect_timer.stop()
         self._heartbeat.stop()
         self._socket.close()
@@ -95,12 +98,19 @@ class ShotSyncSocket(QObject):
     def _open(self) -> None:
         if not self._want_running or not self._api_key or self._connected:
             return
+        if self._socket.state() != QAbstractSocket.SocketState.UnconnectedState:
+            return
         self._socket.open(self._ws_url())
 
     def _reopen(self) -> None:
-        self._socket.close()
+        self._reconnect_timer.stop()
         self._reconnect_ms = _RECONNECT_START_MS
-        self._open()
+        if self._socket.state() == QAbstractSocket.SocketState.UnconnectedState:
+            self._reopen_pending = False
+            self._open()
+            return
+        self._reopen_pending = True
+        self._socket.close()
 
     def _schedule_reconnect(self) -> None:
         if not self._want_running or not self._api_key:
@@ -122,6 +132,10 @@ class ShotSyncSocket(QObject):
         self._heartbeat.stop()
         if was_connected:
             self.connectionChanged.emit(False)
+        if self._reopen_pending and self._want_running and self._api_key:
+            self._reopen_pending = False
+            QTimer.singleShot(0, self._open)
+            return
         self._schedule_reconnect()
 
     def _send_ping(self) -> None:

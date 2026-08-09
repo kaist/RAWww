@@ -7,6 +7,8 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -44,6 +46,15 @@ class ViewerStripExtendTests(unittest.TestCase):
         strip.extend_paths(tail, {}, {}, at_start=False)
         self.assertEqual(strip._paths, head + base + tail)
         strip.deleteLater()
+
+    def test_closed_network_reply_is_not_read(self) -> None:
+        reply = SimpleNamespace(
+            bytesAvailable=lambda: 0,
+            readAll=Mock(side_effect=AssertionError("closed device was read")),
+        )
+
+        self.assertEqual(ShotSyncClient._reply_bytes(reply), b"")
+        reply.readAll.assert_not_called()
 
 
 class CodeReplacementsEditorTests(unittest.TestCase):

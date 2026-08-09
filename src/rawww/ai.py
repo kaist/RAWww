@@ -15,19 +15,21 @@ import os
 import threading
 from dataclasses import dataclass, field
 from io import BytesIO
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
-from multiprocessing import get_context
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import numpy as np
 from PIL import Image, ImageOps
 
-from .cache import FolderCache
-from .face_analysis import recognize
 from .imaging import RAW_EXTENSIONS
 from .runtime_paths import data_path
-from .task_lifecycle import retire_executor
 from .worker_priority import lower_background_priority
+
+if TYPE_CHECKING:
+    from concurrent.futures import Future, ProcessPoolExecutor
+
+    import numpy as np
+
+    from .cache import FolderCache
 
 MODEL_ROOT = data_path("models")
 CLIP_MODEL = MODEL_ROOT / "clip" / "patch32_v1.onnx"
@@ -123,6 +125,8 @@ def _clip():
 
 
 def _clip_input(image: Image.Image) -> np.ndarray:
+    import numpy as np
+
     side = max(image.size)
     square = Image.new("RGB", (side, side))
     square.paste(image, ((side - image.width) // 2, (side - image.height) // 2))
@@ -134,6 +138,8 @@ def _clip_input(image: Image.Image) -> np.ndarray:
 
 
 def _quantize(values: np.ndarray) -> bytes:
+    import numpy as np
+
     norm = math.sqrt(float(np.dot(values, values)))
     if not norm:
         return b""
@@ -141,6 +147,8 @@ def _quantize(values: np.ndarray) -> bytes:
 
 
 def extract_embedding_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[str, bytes]]:
+    import numpy as np
+
     lower_background_priority()
     images = []
     good_paths = []
@@ -156,6 +164,13 @@ def extract_embedding_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[
     input_name = _clip().get_inputs()[0].name
     embeddings = _clip().run(["embeddings"], {input_name: np.stack(images)})[0]
     return [(path, _quantize(embedding)) for path, embedding in zip(good_paths, embeddings)]
+
+
+def recognize(image: Image.Image):
+    """Лениво загружает face-модель, сохраняя тестируемую точку подмены модуля."""
+    from .face_analysis import recognize as recognize_image
+
+    return recognize_image(image)
 
 
 def recognize_face_batch(paths: list[str | tuple[str, bytes]]) -> list[tuple[str, str]]:
@@ -202,6 +217,8 @@ class AiPipeline:
     """
 
     def __init__(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
         self.job_workers = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ai-jobs")
         self.source_workers: ProcessPoolExecutor | None = None
         self.embedding_workers: ProcessPoolExecutor | None = None
@@ -232,6 +249,8 @@ class AiPipeline:
 
     @staticmethod
     def _prepare_job(job: _AiJob) -> tuple[FolderCache, list[Path], list[Path]]:
+        from .cache import FolderCache
+
         cache = FolderCache(
             job.folder,
             {path.name for path in job.paths},
@@ -379,6 +398,9 @@ class AiPipeline:
             return completed
 
     def _ensure_analysis_workers(self) -> None:
+        from concurrent.futures import ProcessPoolExecutor
+        from multiprocessing import get_context
+
         process_context = get_context("spawn")
         if self.source_workers is None:
             self.source_workers = ProcessPoolExecutor(max_workers=1, mp_context=process_context)
@@ -392,6 +414,8 @@ class AiPipeline:
         source_workers, self.source_workers = self.source_workers, None
         embedding_workers, self.embedding_workers = self.embedding_workers, None
         face_workers, self.face_workers = self.face_workers, None
+        from .task_lifecycle import retire_executor
+
         if source_workers is not None:
             retire_executor(source_workers)
         if embedding_workers is not None:
@@ -435,6 +459,8 @@ class AiPipeline:
             cache.close(flush=True)
 
     def shutdown(self) -> None:
+        from .task_lifecycle import retire_executor
+
         with self._futures_lock:
             self._shutting_down = True
             futures = tuple(self.futures)

@@ -15,6 +15,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from multiprocessing import get_context
 
 from PySide6.QtCore import QObject, Signal
 
@@ -272,7 +273,10 @@ class PoolBatchJob(QObject):
         window = max(1, self._max_workers * 2)
         index = 0
         pending: set[Future] = set()
-        executor = ProcessPoolExecutor(max_workers=self._max_workers)
+        executor = ProcessPoolExecutor(
+            max_workers=self._max_workers,
+            mp_context=get_context("spawn"),
+        )
         try:
             while True:
                 if not self.control.stopped:

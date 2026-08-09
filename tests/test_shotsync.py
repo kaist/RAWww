@@ -10,7 +10,8 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -20,7 +21,7 @@ from rawww.shotsync_hub import ShotSyncHub  # noqa: E402
 from rawww.shotsync_receiver import ShotSyncReceiver, safe_filename  # noqa: E402
 from rawww.shotsync_selection import SelectionMarkSyncer  # noqa: E402
 from rawww.shotsync_socket import ShotSyncSocket  # noqa: E402
-from PySide6.QtNetwork import QNetworkReply  # noqa: E402
+from PySide6.QtNetwork import QAbstractSocket, QNetworkReply  # noqa: E402
 
 from rawww.shotsync_upload import (  # noqa: E402
     MAX_UPLOAD_ATTEMPTS,
@@ -76,6 +77,22 @@ class SocketParsingTests(unittest.TestCase):
         self.assertEqual(
             socket._ws_url().toString(), "ws://localhost:8000/ws/app/?api_key=k"
         )
+
+    def test_reopen_waits_until_the_old_ssl_socket_is_disconnected(self) -> None:
+        fake_socket = SimpleNamespace(
+            state=Mock(return_value=QAbstractSocket.SocketState.ConnectedState),
+            close=Mock(),
+        )
+        self.socket._socket = fake_socket
+        self.socket._want_running = True
+        self.socket._api_key = "new-key"
+
+        with patch.object(self.socket, "_open") as open_socket:
+            self.socket._reopen()
+
+        fake_socket.close.assert_called_once_with()
+        open_socket.assert_not_called()
+        self.assertTrue(self.socket._reopen_pending)
 
     def test_photo_added_message_is_parsed(self) -> None:
         received: list[tuple[int, dict]] = []

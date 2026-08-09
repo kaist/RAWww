@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Protocol
 
@@ -393,18 +394,26 @@ class DecodeScheduler:
 
     def _current_decode_executor(self) -> Executor:
         if self.current_decode_executor is None:
-            self.current_decode_executor = self._decode_executor_cls(max_workers=self._current_workers)
+            self.current_decode_executor = self._new_decode_executor(self._current_workers)
         return self.current_decode_executor
 
     def _background_decode_executor(self) -> Executor:
         if self.background_decode_executor is None:
-            self.background_decode_executor = self._decode_executor_cls(max_workers=self._background_workers)
+            self.background_decode_executor = self._new_decode_executor(self._background_workers)
         return self.background_decode_executor
 
     def _visible_thumb_decode_executor(self) -> Executor:
         if self.visible_thumb_decode_executor is None:
-            self.visible_thumb_decode_executor = self._decode_executor_cls(max_workers=self._visible_thumb_workers)
+            self.visible_thumb_decode_executor = self._new_decode_executor(self._visible_thumb_workers)
         return self.visible_thumb_decode_executor
+
+    def _new_decode_executor(self, max_workers: int) -> Executor:
+        if self._decode_executor_cls is ProcessPoolExecutor:
+            return ProcessPoolExecutor(
+                max_workers=max_workers,
+                mp_context=get_context("spawn"),
+            )
+        return self._decode_executor_cls(max_workers=max_workers)
 
     def abandon_preview_decode_work(self) -> None:
         """Освобождает новую папку от очереди декодирования предыдущей.

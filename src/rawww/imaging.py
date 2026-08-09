@@ -14,8 +14,10 @@ from io import BytesIO
 from pathlib import Path
 
 from PIL import Image, ImageCms, ImageFilter, ImageOps
-from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSize
-from PySide6.QtGui import QImage, QImageReader
+
+# RAWww открывает выбранные пользователем локальные фотографии, включая гигапиксельные
+# панорамы. Серверный лимит Pillow для такого настольного сценария неприменим.
+Image.MAX_IMAGE_PIXELS = None
 
 from .worker_priority import lower_background_priority
 
@@ -144,6 +146,8 @@ def decode_original_pixels(path: Path) -> PixelImage:
 
 
 def pixel_to_decoded(pixel: PixelImage) -> DecodedImage:
+    from PySide6.QtGui import QImage
+
     rgba = QImage(
         pixel.pixels,
         pixel.width,
@@ -188,6 +192,9 @@ def _decode_pillow(
 
 
 def _decode_qt_jpeg_bytes(path: Path, data: bytes, max_size: int) -> PixelImage:
+    from PySide6.QtCore import QByteArray, QBuffer, QIODevice, QSize
+    from PySide6.QtGui import QImage, QImageReader
+
     """Быстро декодирует JPEG-байты средствами Qt без временного файла."""
     byte_array = QByteArray(data)
     buffer = QBuffer(byte_array)
@@ -306,6 +313,8 @@ def _sharpen_preview(image: Image.Image) -> Image.Image:
 
 
 def _qimage_sharpen(image: QImage) -> QImage:
+    from PySide6.QtGui import QImage
+
     if not SHARPEN_PREVIEWS:
         return image
     rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
@@ -318,6 +327,8 @@ def _qimage_sharpen(image: QImage) -> QImage:
 
 
 def _qimage_to_pillow_pixels(path: Path, image: QImage, max_size: int) -> PixelImage:
+    from PySide6.QtGui import QImage
+
     rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
     width = rgba.width()
     height = rgba.height()
