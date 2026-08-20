@@ -387,6 +387,42 @@ class SettingsDialog(QDialog):
         editor_layout.addWidget(self.custom_editor_controls)
         layout.addWidget(editor_card)
 
+        second_editor_card = QFrame()
+        second_editor_card.setObjectName("externalEditorCard")
+        second_editor_layout = QVBoxLayout(second_editor_card)
+        second_editor_layout.setContentsMargins(14, 13, 14, 14)
+        second_editor_layout.setSpacing(7)
+        second_editor_heading = QLabel(_("Второй внешний редактор"))
+        second_editor_heading.setObjectName("externalEditorTitle")
+        second_editor_layout.addWidget(second_editor_heading)
+        second_editor_hint = QLabel(
+            _("Выберите приложение для Shift+E: в него передаются текущий файл и всё выделение.")
+        )
+        second_editor_hint.setObjectName("externalEditorHint")
+        second_editor_hint.setWordWrap(True)
+        second_editor_layout.addWidget(second_editor_hint)
+        second_editor_row = QHBoxLayout()
+        second_editor_row.setContentsMargins(24, 0, 0, 0)
+        second_editor_row.setSpacing(8)
+        self.second_editor_executable = QLineEdit(
+            self.settings.value("editor/second_executable", "", str)
+        )
+        self.second_editor_executable.setObjectName("editorExecutable")
+        self.second_editor_executable.setPlaceholderText(_("Путь к приложению или исполняемому файлу"))
+        self.second_editor_executable.setClearButtonEnabled(True)
+        second_editor_row.addWidget(self.second_editor_executable, 1)
+        self.choose_second_editor = QToolButton()
+        self.choose_second_editor.setObjectName("editorBrowseButton")
+        self.choose_second_editor.setIcon(_fomantic_icon("folder", 15, "#c9c9c9"))
+        self.choose_second_editor.setIconSize(QSize(15, 15))
+        self.choose_second_editor.setToolTip(_("Выбрать исполняемый файл"))
+        self.choose_second_editor.clicked.connect(
+            lambda: self._choose_editor_executable(self.second_editor_executable)
+        )
+        second_editor_row.addWidget(self.choose_second_editor)
+        second_editor_layout.addLayout(second_editor_row)
+        layout.addWidget(second_editor_card)
+
         if sys.platform == "win32":
             integration_card = QFrame()
             integration_card.setObjectName("externalEditorCard")
@@ -430,7 +466,9 @@ class SettingsDialog(QDialog):
         if chosen:
             self.card_import_backup_destination.setText(chosen)
 
-    def _choose_editor_executable(self) -> None:
+    def _choose_editor_executable(self, field: QLineEdit | None = None) -> None:
+        """Выбирает исполняемый файл для указанного поля настройки редактора."""
+        field = field or self.editor_executable
         if sys.platform == "win32":
             file_filter = _("Программы (*.exe);;Все файлы (*)")
         elif sys.platform == "darwin":
@@ -440,11 +478,11 @@ class SettingsDialog(QDialog):
         path, _filter = QFileDialog.getOpenFileName(
             self,
             _("Выберите редактор"),
-            self.editor_executable.text().strip(),
+            field.text().strip(),
             file_filter,
         )
         if path:
-            self.editor_executable.setText(path)
+            field.setText(path)
 
     def _refresh_explorer_integration_button(self) -> None:
         from .windows_integration import is_registered
@@ -892,6 +930,7 @@ class SettingsDialog(QDialog):
         self.settings.setValue(i18n.LANGUAGE_SETTING_KEY, self.language_combo.currentData())
         self.settings.setValue("editor/use_custom_executable", self.custom_editor.isChecked())
         self.settings.setValue("editor/executable", self.editor_executable.text().strip())
+        self.settings.setValue("editor/second_executable", self.second_editor_executable.text().strip())
         self.settings.setValue("hotkeys/swap_rating_and_color", self.swap_rating_color.isChecked())
         self.settings.setValue("updates/auto_check", self.auto_update_check.isChecked())
         self.settings.setValue("telemetry/disable_usage_statistics", self.disable_usage_statistics.isChecked())

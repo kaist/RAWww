@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-29 09:25+0000\n"
+"POT-Creation-Date: 2026-08-19 21:25+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -871,8 +871,8 @@ msgstr "Bewertung entfernen"
 msgid "Убрать метку"
 msgstr "Markierung entfernen"
 
-msgid "Внешний редактор"
-msgstr "Externer Editor"
+msgid "Второй внешний редактор"
+msgstr "Zweiter externer Editor"
 
 #, python-brace-format
 msgid ""
@@ -881,6 +881,9 @@ msgid ""
 msgstr ""
 "Editor-Anwendung oder ausführbare Datei nicht gefunden:\n"
 "{path}"
+
+msgid "Внешний редактор"
+msgstr "Externer Editor"
 
 msgid "Adobe Photoshop не найден"
 msgstr "Adobe Photoshop nicht gefunden"
@@ -1162,6 +1165,11 @@ msgstr "Pfad zur Anwendung oder ausführbaren Datei"
 
 msgid "Выбрать исполняемый файл"
 msgstr "Ausführbare Datei wählen"
+
+msgid ""
+"Выберите приложение для Shift+E: в него передаются текущий файл и всё "
+"выделение."
+msgstr "Wählen Sie die Anwendung für Shift+E; sie erhält die aktuelle Datei und alle ausgewählten Dateien."
 
 msgid "Интеграция с Проводником"
 msgstr "Explorer-Integration"
@@ -1645,6 +1653,9 @@ msgstr "Vollansicht"
 
 msgid "Открыть в редакторе"
 msgstr "Im Editor öffnen"
+
+msgid "Открыть в другом редакторе"
+msgstr "In anderem Editor öffnen"
 
 msgid "Сетка"
 msgstr "Raster"

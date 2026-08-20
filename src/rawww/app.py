@@ -5752,6 +5752,7 @@ class Workspace(QMainWindow):
 
         add_hotkey("full_view", self._open_selected)
         add_hotkey("open_in_editor", self._open_in_editor)
+        add_hotkey("open_in_second_editor", self._open_in_second_editor)
         add_hotkey("grid", self._show_grid_or_open_single_photo_folder)
         add_hotkey("strip_collapse", lambda: self.full_view.cycle_strip(1), target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         add_hotkey("strip_expand", lambda: self.full_view.cycle_strip(-1), target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -11599,6 +11600,36 @@ class Workspace(QMainWindow):
         if path is None or not path.is_file():
             return
 
+        self._open_paths_in_editor([path])
+
+    def _open_in_second_editor(self) -> None:
+        """Открывает активный файл и выделение во втором внешнем редакторе."""
+        current = self.current_path if self.stack.currentWidget() is self.full_view else None
+        if current is None:
+            item = self.grid.currentItem()
+            current = _media_value(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
+        paths = [path for path in [current, *self._selected_paths()] if isinstance(path, Path) and path.is_file()]
+        paths = list(dict.fromkeys(paths))
+        if not paths:
+            return
+
+        executable = self.settings.value("editor/second_executable", "", str).strip()
+        editor = Path(executable)
+        is_macos_bundle = sys.platform == "darwin" and editor.suffix.casefold() == ".app" and editor.is_dir()
+        if not editor.is_file() and not is_macos_bundle:
+            QMessageBox.warning(
+                self,
+                _("Второй внешний редактор"),
+                _("Не найдено приложение или исполняемый файл редактора:\n{path}").format(path=editor),
+            )
+            return
+        command = ["open", "-a", str(editor), *(str(path) for path in paths)] if is_macos_bundle else [str(editor), *(str(path) for path in paths)]
+        self._start_editor(command)
+
+    def _open_paths_in_editor(self, paths: list[Path]) -> None:
+        """Собирает команду основного редактора для уже проверенных файлов."""
+        path = paths[0]
+
         executable = self.settings.value("editor/executable", "", str).strip()
         use_custom = self.settings.value("editor/use_custom_executable", bool(executable), bool)
         if use_custom:
@@ -11622,6 +11653,10 @@ class Workspace(QMainWindow):
                     "в Настройки → Поведение."),
                 )
                 return
+        self._start_editor(command)
+
+    def _start_editor(self, command: list[str]) -> None:
+        """Запускает редактор отдельно от приложения, не удерживая интерфейс."""
         try:
             subprocess.Popen(command, **detached_process_kwargs())
         except OSError as error:

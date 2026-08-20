@@ -23,7 +23,7 @@ from PySide6.QtWidgets import QApplication, QListWidgetItem, QMainWindow, QMenu,
 from rawww.app import PREVIEW_ROLE, THUMB_SIZE, ChromeTabBar, FullView, MainWindow, VideoThumbnailer, Workspace, _application_settings, _delete_materialized_burst_files, _drive_key, _folder_card_pixmap, _install_interrupt_shutdown, _plan_xmp_sidecar_relocation, _relocate_xmp_sidecars, _scan_directory, _scan_directory_state, _scan_xmp_task
 from rawww.widgets import format_remaining_time
 from rawww.canon_burst import BurstFrame
-from rawww.hotkeys import FIXED_HOTKEYS
+from rawww.hotkeys import FIXED_HOTKEYS, HOTKEY_DEFAULTS
 from rawww.theme import apply_theme
 
 
@@ -127,6 +127,33 @@ class AppStateTests(unittest.TestCase):
 
         self.assertEqual(requested, [QSize(200, 200)])
         self.assertEqual(pixmap.devicePixelRatio(), 2.0)
+
+    def test_second_editor_receives_current_file_and_selection(self) -> None:
+        """Shift+E передаёт второму редактору курсор и все выбранные файлы разом."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            editor = root / "editor.exe"
+            current = root / "current.jpg"
+            selected = root / "selected.jpg"
+            for path in (editor, current, selected):
+                path.touch()
+            item = SimpleNamespace(data=lambda _role: current)
+            host = SimpleNamespace(
+                stack=SimpleNamespace(currentWidget=lambda: object()),
+                full_view=object(),
+                grid=SimpleNamespace(currentItem=lambda: item),
+                _selected_paths=lambda: [selected, current],
+                settings=_MemorySettings({"editor/second_executable": str(editor)}),
+                _start_editor=Mock(),
+            )
+
+            Workspace._open_in_second_editor(host)
+
+        host._start_editor.assert_called_once_with([str(editor), str(current), str(selected)])
+
+    def test_second_editor_hotkey_defaults_to_shift_e(self) -> None:
+        self.assertEqual(HOTKEY_DEFAULTS["open_in_second_editor"][1], "Shift+E")
+
 
     def test_new_thumbnail_replaces_previous_full_view_image(self) -> None:
         old_path = Path("/photos/old.jpg")

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-29 09:25+0000\n"
+"POT-Creation-Date: 2026-08-19 21:25+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -827,13 +827,16 @@ msgstr ""
 msgid "Убрать метку"
 msgstr ""
 
-msgid "Внешний редактор"
+msgid "Второй внешний редактор"
 msgstr ""
 
 #, python-brace-format
 msgid ""
 "Не найдено приложение или исполняемый файл редактора:\n"
 "{path}"
+msgstr ""
+
+msgid "Внешний редактор"
 msgstr ""
 
 msgid "Adobe Photoshop не найден"
@@ -1086,6 +1089,11 @@ msgid "Путь к приложению или исполняемому файл
 msgstr ""
 
 msgid "Выбрать исполняемый файл"
+msgstr ""
+
+msgid ""
+"Выберите приложение для Shift+E: в него передаются текущий файл и всё "
+"выделение."
 msgstr ""
 
 msgid "Интеграция с Проводником"
@@ -1534,6 +1542,9 @@ msgid "Полный просмотр"
 msgstr ""
 
 msgid "Открыть в редакторе"
+msgstr ""
+
+msgid "Открыть в другом редакторе"
 msgstr ""
 
 msgid "Сетка"

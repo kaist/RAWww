@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-07-29 09:25+0000\n"
+"POT-Creation-Date: 2026-08-19 21:25+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -851,8 +851,8 @@ msgstr "移除评分"
 msgid "Убрать метку"
 msgstr "移除标记"
 
-msgid "Внешний редактор"
-msgstr "外部编辑器"
+msgid "Второй внешний редактор"
+msgstr "第二个外部编辑器"
 
 #, python-brace-format
 msgid ""
@@ -861,6 +861,9 @@ msgid ""
 msgstr ""
 "未找到编辑器应用或可执行文件：\n"
 "{path}"
+
+msgid "Внешний редактор"
+msgstr "外部编辑器"
 
 msgid "Adobe Photoshop не найден"
 msgstr "未找到 Adobe Photoshop"
@@ -1117,6 +1120,11 @@ msgstr "应用或可执行文件的路径"
 
 msgid "Выбрать исполняемый файл"
 msgstr "选择可执行文件"
+
+msgid ""
+"Выберите приложение для Shift+E: в него передаются текущий файл и всё "
+"выделение."
+msgstr "为 Shift+E 选择应用程序；它将接收当前文件和所有选中的文件。"
 
 msgid "Интеграция с Проводником"
 msgstr "资源管理器集成"
@@ -1575,6 +1583,9 @@ msgstr "全屏查看"
 
 msgid "Открыть в редакторе"
 msgstr "在编辑器中打开"
+
+msgid "Открыть в другом редакторе"
+msgstr "在另一个编辑器中打开"
 
 msgid "Сетка"
 msgstr "网格"
