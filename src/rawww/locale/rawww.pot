@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-19 21:25+0300\n"
+"POT-Creation-Date: 2026-08-25 19:05+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -247,6 +247,31 @@ msgid "По рейтингу"
 msgstr ""
 
 msgid "Поиск"
+msgstr ""
+
+msgid "Сбросить"
+msgstr ""
+
+msgid "Фильтр по времени"
+msgstr ""
+
+msgid ""
+"Вставьте список имён или номеров файлов. Подойдут любые разделители: "
+"IMG_0239.jpg, 0239, 239."
+msgstr ""
+
+msgid ""
+"IMG_0239.jpg, 0240\n"
+"IMG_0241"
+msgstr ""
+
+msgid "Показать"
+msgstr ""
+
+msgid "Открыть список номеров файлов"
+msgstr ""
+
+msgid "Сбросить фильтр по списку номеров"
 msgstr ""
 
 msgid "AI: серии и лица"
@@ -774,6 +799,18 @@ msgstr ""
 
 #, python-brace-format
 msgid "Закрытые глаза  {n}"
+msgstr ""
+
+#, python-brace-format
+msgid "Номера: {count}"
+msgstr ""
+
+#, python-brace-format
+msgid "От: {time}"
+msgstr ""
+
+#, python-brace-format
+msgid "До: {time}"
 msgstr ""
 
 msgid "Без названия"

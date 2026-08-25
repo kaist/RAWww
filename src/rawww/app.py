@@ -205,6 +205,24 @@ APP_VERSION = __version__
 SETTINGS_NAME = "ctrlka"
 
 
+def _capture_datetime_display(value: object) -> str:
+    """Форматирует EXIF-даты компактно и одинаково в сетке и полном просмотре."""
+    try:
+        captured = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return ""
+    language = i18n.active_language()
+    if language == "zh":
+        return f"{captured:%H:%M:%S} {captured.year}年{captured.month}月{captured.day}日"
+    months = {
+        "ru": ("янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"),
+        "de": ("Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"),
+        "en": ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"),
+    }
+    month = months.get(language, months["en"])[captured.month - 1]
+    return f"{captured:%H:%M:%S} {captured.day} {month} {captured.year}"
+
+
 def _application_settings() -> QSettings:
     if PORTABLE:
         settings_path = work_path() / "settings"
@@ -2303,6 +2321,7 @@ class ViewerMetaBar(QWidget):
     def __init__(self, *, settings: QSettings | None = None) -> None:
         super().__init__()
         self.setObjectName("viewerMeta")
+        self.setFixedHeight(30)
         self.settings = settings or _application_settings()
         self._quick_mark = ("rating", 5)
         layout = QHBoxLayout(self)
@@ -2377,16 +2396,44 @@ class ViewerMetaBar(QWidget):
         self.comment_edit.setPlaceholderText(_("Комментарий"))
         self.comment_edit.setFixedHeight(24)
         self.comment_edit.setMinimumWidth(72)
-        self.comment_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.comment_edit.setMaximumWidth(260)
+        self.comment_edit.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.comment_edit.editingFinished.connect(lambda: self.commentSubmitted.emit(self.comment_edit.text().strip()))
-        layout.addWidget(self.comment_edit, 1)
+        layout.addWidget(self.comment_edit)
+        layout.addStretch(1)
+
+        self.exif_panel = QWidget()
+        self.exif_panel.setObjectName("viewerExifPanel")
+        exif_layout = QVBoxLayout(self.exif_panel)
+        exif_layout.setContentsMargins(0, 0, 0, 0)
+        exif_layout.setSpacing(0)
+        exif_top_row = QHBoxLayout()
+        exif_top_row.setContentsMargins(0, 0, 0, 0)
+        exif_top_row.setSpacing(8)
+        self.filename_label = QLabel()
+        self.filename_label.setObjectName("viewerFilename")
+        self.filename_label.setFixedHeight(12)
+        self.filename_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.filename_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.capture_datetime_label = QLabel()
+        self.capture_datetime_label.setObjectName("viewerCaptureDate")
+        self.capture_datetime_label.setFixedHeight(12)
+        self.capture_datetime_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.capture_datetime_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        exif_top_row.addWidget(self.filename_label, 1)
+        exif_top_row.addWidget(self.capture_datetime_label)
+        exif_layout.addLayout(exif_top_row)
 
         self.exif_label = QLabel()
         self.exif_label.setObjectName("viewerExif")
-        self.exif_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.exif_label.setFixedHeight(12)
+        self.exif_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.exif_label.setMinimumWidth(0)
         self.exif_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        layout.addWidget(self.exif_label, 1)
+        exif_layout.addWidget(self.exif_label)
+        self.exif_panel.setFixedWidth(240)
+        self.exif_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.exif_panel)
 
     def _show_quick_mark_menu(self) -> None:
         """Строит меню выбора действия, которое будет висеть на клавише M."""
@@ -2475,8 +2522,8 @@ class ViewerMetaBar(QWidget):
         self.comment_edit.setText(comment)
         self.comment_edit.blockSignals(False)
 
-    def set_metadata(self, detail: dict) -> None:
-        """Синхронизирует кнопки и EXIF-строку с метаданными активного кадра."""
+    def set_metadata(self, detail: dict, paths: tuple[Path, ...] = ()) -> None:
+        """Синхронизирует кнопки и двухстрочный блок EXIF с активным кадром."""
         color = str(detail.get("color_label") or "")
         rating = int(detail.get("rating") or 0)
         for value, button in self.color_buttons.items():
@@ -2507,6 +2554,10 @@ class ViewerMetaBar(QWidget):
         if capture.get("focal_length_mm") is not None:
             parts.append(f"{capture['focal_length_mm']:g}mm")
         self.exif_label.setText(" · ".join(parts))
+        path = paths[0] if paths else None
+        self.filename_label.setText(path.name if path is not None else "")
+        self.capture_datetime_label.setText(_capture_datetime_display(detail.get("original_datetime")))
+        self.exif_panel.updateGeometry()
 
 
 class FullView(QFrame):
@@ -2693,7 +2744,7 @@ class FullView(QFrame):
         strip_header = QWidget()
         strip_header.setObjectName("stripHeader")
         strip_header_layout = QHBoxLayout(strip_header)
-        strip_header_layout.setContentsMargins(9, 4, 9, 4)
+        strip_header_layout.setContentsMargins(9, 0, 9, 0)
         strip_header_layout.setSpacing(5)
         self.strip_toggle = QToolButton()
         self.strip_toggle.setObjectName("stripToggle")
@@ -3000,7 +3051,7 @@ class FullView(QFrame):
         self.full_comment_edit.blockSignals(False)
 
     def set_metadata(self, detail: dict, paths: tuple[Path, ...] = ()) -> None:
-        self.meta_bar.set_metadata(detail)
+        self.meta_bar.set_metadata(detail, paths or ((self._path,) if self._path is not None else ()))
         self._mark_detail = detail
         self._update_mark_indicator()
         self._set_audio_detail(detail)
@@ -4071,7 +4122,6 @@ class CenteredSearchEdit(QLineEdit):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         QTimer.singleShot(0, self._center_action_buttons)
-
 
 class GridZoomControls(QFrame):
     """Компактные элементы управления наложением для изменения размера миниатюр.
@@ -5474,7 +5524,106 @@ class Workspace(QMainWindow):
             control.currentIndexChanged.connect(self._apply_view)
             filter_layout.addWidget(control)
         self.search_edit.textChanged.connect(self._apply_view)
+
+        self.time_from = None
+        self.time_to = None
+        self._time_range_bounds: tuple[int, int] | None = None
+        self.time_menu = QMenu(self)
+        self.time_menu.setObjectName("timeRangeMenu")
+        time_panel = QWidget()
+        time_panel.setObjectName("timeRangePanel")
+        time_panel.setFixedWidth(330)
+        time_layout = QVBoxLayout(time_panel)
+        time_layout.setContentsMargins(14, 12, 14, 12)
+        time_layout.setSpacing(6)
+        self.time_from_label = QLabel()
+        self.time_to_label = QLabel()
+        self.time_from_label.setObjectName("timeRangeLabel")
+        self.time_to_label.setObjectName("timeRangeLabel")
+        self.time_from_slider = QSlider(Qt.Orientation.Horizontal)
+        self.time_to_slider = QSlider(Qt.Orientation.Horizontal)
+        self.time_from_slider.setObjectName("timeRangeSlider")
+        self.time_to_slider.setObjectName("timeRangeSlider")
+        for label, slider in ((self.time_from_label, self.time_from_slider), (self.time_to_label, self.time_to_slider)):
+            time_layout.addWidget(label)
+            time_layout.addWidget(slider)
+            slider.setSingleStep(600)
+            slider.valueChanged.connect(self._time_range_changed)
+        self.time_reset_button = QPushButton(_("Сбросить"))
+        self.time_reset_button.setObjectName("timeRangeReset")
+        self.time_reset_button.setIcon(_fomantic_icon("undo", 12, "#d9e6f5"))
+        self.time_reset_button.setIconSize(QSize(12, 12))
+        self.time_reset_button.setEnabled(False)
+        self.time_reset_button.clicked.connect(self._clear_time_range)
+        time_actions = QHBoxLayout()
+        time_actions.addStretch(1)
+        time_actions.addWidget(self.time_reset_button)
+        time_layout.addLayout(time_actions)
+        time_action = QWidgetAction(self.time_menu)
+        time_action.setDefaultWidget(time_panel)
+        self.time_menu.addAction(time_action)
+        self.time_filter_button = QToolButton()
+        self.time_filter_button.setObjectName("timeRangeOpen")
+        self.time_filter_button.setCheckable(True)
+        self.time_filter_button.setIcon(_fomantic_icon("clock", 13, "#c7ced8"))
+        self.time_filter_button.setIconSize(QSize(13, 13))
+        self.time_filter_button.setFixedSize(self.sort_combo.sizeHint().height(), self.sort_combo.sizeHint().height())
+        self.time_filter_button.setToolTip(_("Фильтр по времени"))
+        self.time_filter_button.clicked.connect(self._show_time_menu)
+        filter_layout.addWidget(self.time_filter_button)
+
+        self.file_numbers_filter = self.settings.value("viewer/file_numbers_filter", "", str).strip()
+        self.file_numbers_menu = QMenu(self)
+        self.file_numbers_menu.setObjectName("fileNumbersMenu")
+        file_numbers_panel = QWidget()
+        file_numbers_layout = QVBoxLayout(file_numbers_panel)
+        file_numbers_layout.setContentsMargins(8, 8, 8, 8)
+        file_numbers_layout.setSpacing(6)
+        file_numbers_hint = QLabel(_("Вставьте список имён или номеров файлов. Подойдут любые разделители: IMG_0239.jpg, 0239, 239."))
+        file_numbers_hint.setObjectName("fileNumbersHint")
+        file_numbers_hint.setWordWrap(True)
+        file_numbers_layout.addWidget(file_numbers_hint)
+        self.file_numbers_edit = QTextEdit()
+        self.file_numbers_edit.setObjectName("fileNumbersEdit")
+        self.file_numbers_edit.setPlaceholderText(_("IMG_0239.jpg, 0240\nIMG_0241"))
+        self.file_numbers_edit.setPlainText(self.file_numbers_filter)
+        self.file_numbers_edit.setFixedHeight(78)
+        file_numbers_layout.addWidget(self.file_numbers_edit)
+        file_numbers_actions = QHBoxLayout()
+        file_numbers_actions.addStretch(1)
+        self.file_numbers_apply_button = QPushButton(_("Показать"))
+        self.file_numbers_apply_button.clicked.connect(self._apply_file_numbers_filter)
+        file_numbers_actions.addWidget(self.file_numbers_apply_button)
+        file_numbers_layout.addLayout(file_numbers_actions)
+        file_numbers_action = QWidgetAction(self.file_numbers_menu)
+        file_numbers_action.setDefaultWidget(file_numbers_panel)
+        self.file_numbers_menu.addAction(file_numbers_action)
+
+        self.file_numbers_open_button = QToolButton()
+        self.file_numbers_open_button.setObjectName("fileNumbersOpen")
+        self.file_numbers_open_button.setIcon(_fomantic_icon("list", 13, "#c7ced8"))
+        self.file_numbers_open_button.setIconSize(QSize(13, 13))
+        filter_control_height = self.sort_combo.sizeHint().height()
+        self.file_numbers_open_button.setFixedSize(filter_control_height, filter_control_height)
+        self.file_numbers_open_button.setToolTip(_("Открыть список номеров файлов"))
+        self.file_numbers_open_button.clicked.connect(self._show_file_numbers_menu)
+        filter_layout.addWidget(self.file_numbers_open_button)
+        filter_layout.setAlignment(self.file_numbers_open_button, Qt.AlignmentFlag.AlignVCenter)
         filter_layout.addWidget(self.search_edit)
+
+        self.file_numbers_badge = QToolButton()
+        self.file_numbers_badge.setObjectName("fileNumbersBadge")
+        self.file_numbers_badge.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.file_numbers_badge.setToolTip(_("Открыть список номеров файлов"))
+        self.file_numbers_badge.clicked.connect(self._show_file_numbers_menu)
+        self.file_numbers_reset_button = QToolButton()
+        self.file_numbers_reset_button.setObjectName("fileNumbersReset")
+        self.file_numbers_reset_button.setText(_("Сбросить"))
+        self.file_numbers_reset_button.setToolTip(_("Сбросить фильтр по списку номеров"))
+        self.file_numbers_reset_button.clicked.connect(self._clear_file_numbers_filter)
+        self._update_file_numbers_controls()
+        filter_layout.addWidget(self.file_numbers_badge)
+        filter_layout.addWidget(self.file_numbers_reset_button)
 
         self.face_filter_chip = QFrame()
         self.face_filter_chip.setObjectName("fullFaceFilterChip")
@@ -9183,7 +9332,7 @@ class Workspace(QMainWindow):
             self.full_view.set_metadata(self.photo_details.get(self.current_path.name, {}))
         selected = self._selected_paths()
         if len(selected) == 1 and sidecar_path(selected[0]) == target:
-            self.meta_bar.set_metadata(self.photo_details.get(selected[0].name, {}))
+            self.meta_bar.set_metadata(self.photo_details.get(selected[0].name, {}), (selected[0],))
         return changed_fields
 
     def _scan_xmp_changes(
@@ -10301,7 +10450,7 @@ class Workspace(QMainWindow):
             detail = self.photo_details.get(self.current_path.name, {})
             self.full_view.set_metadata(detail)
             if self.stack.currentWidget() is self.grid_page and hasattr(self, "meta_bar"):
-                self.meta_bar.set_metadata(detail)
+                self.meta_bar.set_metadata(detail, (self.current_path,))
 
     def _flush_metadata_ui_updates(self) -> None:
         """Обновляет фильтры один раз за несколько пакетов EXIF, а не на каждые 32 файла."""
@@ -10677,6 +10826,112 @@ class Workspace(QMainWindow):
             control.setCurrentIndex(0)
             control.blockSignals(False)
 
+    def _show_file_numbers_menu(self) -> None:
+        """Открывает ввод списка рядом с поиском, не меняя обычный текстовый запрос."""
+        if self.file_numbers_menu.isVisible():
+            return
+        self.file_numbers_edit.setPlainText(self.file_numbers_filter)
+        self.file_numbers_menu.popup(
+            self.search_edit.mapToGlobal(QPoint(0, self.search_edit.height() + 4))
+        )
+
+    def _apply_file_numbers_filter(self) -> None:
+        """Сохраняет введённый список и заново строит сетку по номерам файлов."""
+        self.file_numbers_filter = self.file_numbers_edit.toPlainText().strip()
+        if self.file_numbers_filter:
+            self.settings.setValue("viewer/file_numbers_filter", self.file_numbers_filter)
+        else:
+            self.settings.remove("viewer/file_numbers_filter")
+        self._update_file_numbers_controls()
+        self.file_numbers_menu.hide()
+        self._apply_view()
+
+    def _clear_file_numbers_filter(self) -> None:
+        """Очищает сохранённый фильтр номеров и возвращает все кадры."""
+        self.file_numbers_filter = ""
+        self.file_numbers_edit.clear()
+        self.settings.remove("viewer/file_numbers_filter")
+        self._update_file_numbers_controls()
+        self._apply_view()
+
+    def _update_file_numbers_controls(self) -> None:
+        """Отражает активный фильтр компактной меткой с числом уникальных номеров."""
+        count = len(_extract_photo_numbers(self.file_numbers_filter))
+        active = bool(self.file_numbers_filter)
+        self.file_numbers_badge.setText(_("Номера: {count}").format(count=count))
+        self.file_numbers_badge.setVisible(active)
+        self.file_numbers_reset_button.setVisible(active)
+
+    def _capture_timestamp(self, path: Path) -> int | None:
+        try:
+            return int(datetime.fromisoformat(str(self.photo_details.get(path.name, {}).get("original_datetime") or "")).timestamp())
+        except ValueError:
+            return None
+
+    def _show_time_menu(self) -> None:
+        """Открывает диапазон по фактическим EXIF-временам текущей папки."""
+        values = [self._capture_timestamp(path) for path in self.all_paths if path.is_file()]
+        values = [value for value in values if value is not None]
+        if not values:
+            self.time_filter_button.setChecked(False)
+            return
+        minimum, maximum = min(values) // 600 * 600, (max(values) + 599) // 600 * 600
+        self._time_range_bounds = (minimum, maximum)
+        from_value = min(max(self.time_from if self.time_from is not None else minimum, minimum), maximum)
+        to_value = min(max(self.time_to if self.time_to is not None else maximum, minimum), maximum)
+        if from_value > to_value:
+            from_value, to_value = minimum, maximum
+        for slider, value in ((self.time_from_slider, from_value), (self.time_to_slider, to_value)):
+            slider.blockSignals(True)
+            slider.setRange(minimum, maximum)
+            slider.setValue(value)
+            slider.blockSignals(False)
+        self._update_time_range_controls()
+        self.time_menu.popup(self.time_filter_button.mapToGlobal(QPoint(0, self.time_filter_button.height() + 4)))
+
+    def _time_range_changed(self, _value: int) -> None:
+        """Сохраняет границы диапазона, не считая его активным на крайних положениях."""
+        if self.time_from_slider.value() > self.time_to_slider.value():
+            if self.sender() is self.time_from_slider:
+                self.time_to_slider.blockSignals(True)
+                self.time_to_slider.setValue(self.time_from_slider.value())
+                self.time_to_slider.blockSignals(False)
+            else:
+                self.time_from_slider.blockSignals(True)
+                self.time_from_slider.setValue(self.time_to_slider.value())
+                self.time_from_slider.blockSignals(False)
+        minimum, maximum = self._time_range_bounds or (self.time_from_slider.minimum(), self.time_to_slider.maximum())
+        from_value, to_value = self.time_from_slider.value(), self.time_to_slider.value()
+        self.time_from = from_value if from_value > minimum else None
+        self.time_to = to_value if to_value < maximum else None
+        self._update_time_range_controls()
+        self._apply_view()
+
+    def _update_time_range_controls(self) -> None:
+        """Обновляет подписи и состояние кнопок по положению ползунков."""
+        from_value, to_value = self.time_from_slider.value(), self.time_to_slider.value()
+        same_day = datetime.fromtimestamp(from_value).date() == datetime.fromtimestamp(to_value).date()
+        fmt = "%H:%M" if same_day else "%d.%m.%Y %H:%M"
+        self.time_from_label.setText(_("От: {time}").format(time=datetime.fromtimestamp(from_value).strftime(fmt)))
+        self.time_to_label.setText(_("До: {time}").format(time=datetime.fromtimestamp(to_value).strftime(fmt)))
+        active = self.time_from is not None or self.time_to is not None
+        self.time_filter_button.setChecked(active)
+        self.time_reset_button.setEnabled(active)
+
+    def _clear_time_range(self) -> None:
+        """Возвращает полный временной диапазон и показывает все кадры по времени."""
+        if self._time_range_bounds is None:
+            return
+        minimum, maximum = self._time_range_bounds
+        self.time_from = None
+        self.time_to = None
+        for slider, value in ((self.time_from_slider, minimum), (self.time_to_slider, maximum)):
+            slider.blockSignals(True)
+            slider.setValue(value)
+            slider.blockSignals(False)
+        self._update_time_range_controls()
+        self._apply_view()
+
     def _apply_view(self, *_args) -> None:
         """Перестраивает видимый список по фильтрам, поиску и режиму серий."""
         if not hasattr(self, "rating_filter"):
@@ -10692,6 +10947,7 @@ class Workspace(QMainWindow):
         shot = self.shot_filter.currentData()
         eyes = self.eyes_filter.currentData()
         needle = self.search_edit.text().strip().casefold()
+        file_numbers = _extract_photo_numbers(self.file_numbers_filter)
 
         def visible(path: Path) -> bool:
             """Проверяет один путь по всем активным фильтрам сетки."""
@@ -10724,6 +10980,11 @@ class Workspace(QMainWindow):
                 and path.name not in self._face_match_names
             ):
                 return False
+            if file_numbers and not _photo_name_matches_numbers(path.name, file_numbers):
+                return False
+            captured = self._capture_timestamp(path)
+            if self.time_from is not None and (captured is None or captured < self.time_from): return False
+            if self.time_to is not None and (captured is None or captured > self.time_to + 599): return False
             return not needle or needle in path.name.casefold() or needle in str(detail.get("comment", "")).casefold()
 
         order = self.sort_combo.currentData()
@@ -10950,7 +11211,8 @@ class Workspace(QMainWindow):
         self.grid.viewport().update()
         if self.stack.currentWidget() is self.grid_page:
             self.meta_bar.set_metadata(
-                self.photo_details.get(selected_paths[0].name, {}) if len(selected_paths) == 1 else {}
+                self.photo_details.get(selected_paths[0].name, {}) if len(selected_paths) == 1 else {},
+                (selected_paths[0],) if len(selected_paths) == 1 else (),
             )
         if self.current_path is not None and self.stack.currentWidget() is self.full_view:
             self.full_view.set_metadata(
@@ -11727,7 +11989,7 @@ class Workspace(QMainWindow):
         self.workspace_state.current_photo = path
         self._refresh_status_panel()
         if hasattr(self, "meta_bar"):
-            self.meta_bar.set_metadata(self.photo_details.get(path.name, {}))
+            self.meta_bar.set_metadata(self.photo_details.get(path.name, {}), (path,))
         if not path.is_file() or not is_supported_image(path):
             self.pending_grid_full_request = None
             self.grid_full_request_timer.stop()
@@ -13537,6 +13799,30 @@ def _build_photo_view(
     visible = photos if predicate is None else [path for path in photos if predicate(path)]
     key = sort_key or (lambda path: path.name.lower())
     return [*folders, *sorted(visible, key=key, reverse=reverse)]
+
+
+def _extract_photo_numbers(value: str) -> frozenset[str]:
+    """Нормализует номера из произвольного списка, игнорируя ведущие нули."""
+    result: set[str] = set()
+    for match in re.findall(r"\d+", value):
+        try:
+            result.add(str(int(match)))
+        except ValueError:
+            continue
+        if len(result) >= 5000:
+            break
+    return frozenset(result)
+
+
+def _photo_name_matches_numbers(name: str, numbers: frozenset[str]) -> bool:
+    """Проверяет, содержит ли имя файла хотя бы один номер из списка фильтра."""
+    for match in re.findall(r"\d+", name):
+        try:
+            if str(int(match)) in numbers:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _flush_and_close(cache: FolderCache, close: bool) -> None:

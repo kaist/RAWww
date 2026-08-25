@@ -23,7 +23,7 @@ from .runtime_paths import data_path
 
 FOMANTIC_ICON_CODES = {
     "images": "\uf302", "grid": "\uf00a", "user": "\uf007", "brush": "\uf1fc", "media": "\uf87c",
-    "sort": "\uf160", "search": "\uf002", "star": "\uf005", "ban": "\uf05e",
+    "sort": "\uf160", "search": "\uf002", "list": "\uf03a", "star": "\uf005", "ban": "\uf05e",
     "chevron-down": "\uf078", "chevron-up": "\uf077", "bookmark": "\uf02e",
     "chevron-left": "\uf053", "chevron-right": "\uf054",
     "step-forward": "\uf051", "keyboard": "\uf11c", "folder": "\uf07c",
@@ -1283,6 +1283,92 @@ def apply_theme(app: QApplication) -> None:
             margin-top: 3px;
             margin-bottom: -3px;
         }
+        QMenu#fileNumbersMenu {
+            background: #303030;
+            border: 1px solid #5a5a5a;
+            border-radius: 7px;
+        }
+        QMenu#timeRangeMenu {
+            background: #303030;
+            border: 1px solid #5a5a5a;
+            border-radius: 9px;
+        }
+        QWidget#timeRangePanel, QWidget#timeRangePanel QLabel {
+            background: transparent;
+        }
+        QLabel#timeRangeLabel {
+            color: #dfe6ef;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        QSlider#timeRangeSlider {
+            background: transparent;
+            min-height: 18px;
+        }
+        QSlider#timeRangeSlider::groove:horizontal {
+            height: 4px;
+            background: #202020;
+            border: 1px solid #69727d;
+            border-radius: 3px;
+        }
+        QSlider#timeRangeSlider::sub-page:horizontal {
+            background: #6ca8e8;
+            border: 1px solid #8cc0f4;
+            border-radius: 3px;
+        }
+        QSlider#timeRangeSlider::add-page:horizontal {
+            background: #202020;
+            border-radius: 3px;
+        }
+        QSlider#timeRangeSlider::handle:horizontal {
+            width: 12px;
+            height: 12px;
+            margin: -5px 0;
+            background: #6ca8e8;
+            border: 1px solid #c0dcf8;
+            border-radius: 6px;
+        }
+        QSlider#timeRangeSlider::handle:horizontal:hover { background: #8cc0f4; }
+        QPushButton#timeRangeReset {
+            min-height: 25px;
+            padding: 2px 8px;
+            border: 1px solid #666666;
+            border-radius: 5px;
+            background: #414141;
+            color: #f0f0f0;
+        }
+        QPushButton#timeRangeReset:hover { background: #505050; border-color: #858585; }
+        QPushButton#timeRangeReset:disabled { color: #747b83; background: #303030; border-color: #444a50; }
+        QToolButton#timeRangeOpen:checked {
+            background: #315b80;
+            border-color: #79aaff;
+        }
+        QLabel#fileNumbersHint {
+            color: #c7ced8;
+            font-size: 10px;
+        }
+        QTextEdit#fileNumbersEdit {
+            min-width: 280px;
+            background: #202020;
+            border: 1px solid #1b1b1b;
+            border-radius: 4px;
+            color: #f0f0f0;
+            padding: 4px;
+        }
+        QToolButton#fileNumbersBadge {
+            min-height: 20px;
+            padding: 1px 5px;
+            border: 1px solid #4f82b8;
+            border-radius: 9px;
+            background: #294866;
+            color: #e5f1ff;
+            font-size: 9px;
+        }
+        QToolButton#fileNumbersReset {
+            min-height: 20px;
+            padding: 1px 5px;
+            font-size: 9px;
+        }
         QWidget#viewerToolbar QComboBox:hover, QWidget#viewerToolbar QPushButton:hover,
         QWidget#viewerToolbar QToolButton:hover {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -1938,8 +2024,21 @@ def apply_theme(app: QApplication) -> None:
             min-width: 0;
             background: transparent;
             border: 0;
-            color: #9fa7b3;
+            color: #7f8994;
+            font-size: 10px;
+        }
+        QWidget#viewerExifPanel, QWidget#viewerExifPanel QLabel {
+            background: transparent;
+            border: 0;
+        }
+        QLabel#viewerFilename {
+            color: #d6dce4;
             font-size: 11px;
+            font-weight: 600;
+        }
+        QLabel#viewerCaptureDate {
+            color: #7f8994;
+            font-size: 10px;
         }
         QMenu QPushButton#quickMarkMenuItem {
             min-width: 170px;

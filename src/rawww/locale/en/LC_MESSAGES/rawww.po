@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-19 21:25+0300\n"
+"POT-Creation-Date: 2026-08-25 19:05+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -249,6 +249,37 @@ msgstr "By rating"
 
 msgid "Поиск"
 msgstr "Search"
+
+#, fuzzy
+msgid "Сбросить"
+msgstr "Reset color"
+
+msgid "Фильтр по времени"
+msgstr "Time filter"
+
+msgid ""
+"Вставьте список имён или номеров файлов. Подойдут любые разделители: "
+"IMG_0239.jpg, 0239, 239."
+msgstr ""
+"Paste a list of file names or numbers. Any separators work: IMG_0239.jpg,"
+" 0239, 239."
+
+msgid ""
+"IMG_0239.jpg, 0240\n"
+"IMG_0241"
+msgstr ""
+"IMG_0239.jpg, 0240\n"
+"IMG_0241"
+
+#, fuzzy
+msgid "Показать"
+msgstr "Show in folder"
+
+msgid "Открыть список номеров файлов"
+msgstr "Open file number list"
+
+msgid "Сбросить фильтр по списку номеров"
+msgstr "Reset number-list filter"
 
 msgid "AI: серии и лица"
 msgstr "AI: series and faces"
@@ -807,6 +838,18 @@ msgstr "Reading previews: {done}/{total}"
 msgid "Закрытые глаза  {n}"
 msgstr "Closed eyes  {n}"
 
+#, python-brace-format
+msgid "Номера: {count}"
+msgstr "Numbers: {count}"
+
+#, python-brace-format
+msgid "От: {time}"
+msgstr "From: {time}"
+
+#, python-brace-format
+msgid "До: {time}"
+msgstr "To: {time}"
+
 msgid "Без названия"
 msgstr "Untitled"
 
@@ -1147,7 +1190,9 @@ msgstr "Choose executable"
 msgid ""
 "Выберите приложение для Shift+E: в него передаются текущий файл и всё "
 "выделение."
-msgstr "Choose the app for Shift+E; it receives the current file and all selected files."
+msgstr ""
+"Choose the app for Shift+E; it receives the current file and all selected"
+" files."
 
 msgid "Интеграция с Проводником"
 msgstr "File Explorer integration"

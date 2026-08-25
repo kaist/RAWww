@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-19 21:25+0300\n"
+"POT-Creation-Date: 2026-08-25 19:05+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -249,6 +249,35 @@ msgstr "按评分"
 
 msgid "Поиск"
 msgstr "搜索"
+
+#, fuzzy
+msgid "Сбросить"
+msgstr "重置颜色"
+
+msgid "Фильтр по времени"
+msgstr "时间筛选"
+
+msgid ""
+"Вставьте список имён или номеров файлов. Подойдут любые разделители: "
+"IMG_0239.jpg, 0239, 239."
+msgstr "粘贴文件名或文件编号列表。可使用任意分隔符：IMG_0239.jpg、0239、239。"
+
+msgid ""
+"IMG_0239.jpg, 0240\n"
+"IMG_0241"
+msgstr ""
+"IMG_0239.jpg, 0240\n"
+"IMG_0241"
+
+#, fuzzy
+msgid "Показать"
+msgstr "在文件夹中显示"
+
+msgid "Открыть список номеров файлов"
+msgstr "打开文件编号列表"
+
+msgid "Сбросить фильтр по списку номеров"
+msgstr "重置编号列表筛选"
 
 msgid "AI: серии и лица"
 msgstr "AI：连拍与人脸"
@@ -799,6 +828,18 @@ msgstr "读取预览：{done}/{total}"
 #, python-brace-format
 msgid "Закрытые глаза  {n}"
 msgstr "闭眼  {n}"
+
+#, python-brace-format
+msgid "Номера: {count}"
+msgstr "编号：{count}"
+
+#, python-brace-format
+msgid "От: {time}"
+msgstr "从：{time}"
+
+#, python-brace-format
+msgid "До: {time}"
+msgstr "至：{time}"
 
 msgid "Без названия"
 msgstr "未命名"
