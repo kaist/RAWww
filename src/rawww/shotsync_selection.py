@@ -13,8 +13,8 @@ from pathlib import Path
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, QTimer, QUrl, Signal
-from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
+from PySide6.QtCore import QFile, QObject, QTimer, QUrl, Signal
+from PySide6.QtNetwork import QHttpMultiPart, QHttpPart, QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from .shotsync_receiver import _reply_bytes, safe_filename
 
@@ -85,6 +85,7 @@ class SelectionDownloader(QObject):
             "mapping": [],    # (имя, photo_id,shoot_id)
             "selection": [],  # (имя, рейтинг, color_label, комментарий, original_datetime)
             "ai": [],         # (имя, image_embedding_q8 base64, список лиц)
+            "annotations": [],
             "queue": [],
             "inflight": 0,
             "retrying": 0,
@@ -156,9 +157,13 @@ class SelectionDownloader(QObject):
             str(photo.get("image_embedding_q8") or ""),
             faces if isinstance(faces, list) else [],
         ))
+        if isinstance(photo.get("annotations"), dict):
+            run["annotations"].append((name, photo["annotations"]))
         destination = run["folder"] / name
         if destination.is_file() and destination.stat().st_size > 0:
             self._advance(shooting_id)
+            self._download_audio(shooting_id, photo, destination)
+            self._pump(shooting_id)
             return
         run["inflight"] += 1
         reply = self._manager.get(self._request(self._absolute(url)))
@@ -182,6 +187,7 @@ class SelectionDownloader(QObject):
                 except OSError:
                     temp.unlink(missing_ok=True)
                 self._advance(shooting_id)
+                self._download_audio(shooting_id, photo, destination)
                 self._pump(shooting_id)
                 return
         run["retrying"] += 1
@@ -197,6 +203,34 @@ class SelectionDownloader(QObject):
         run["queue"].append((photo, attempt))
         self._pump(shooting_id)
 
+    def _download_audio(self, shooting_id: int, photo: dict, image_destination: Path) -> None:
+        """Downloads a ready Ogg comment next to the local photo."""
+        run = self._runs.get(shooting_id)
+        url = str(photo.get("audio_comment_url") or "")
+        if run is None or not url:
+            return
+        destination = image_destination.with_suffix(".ogg")
+        run["inflight"] += 1
+        reply = self._manager.get(self._request(self._absolute(url)))
+        reply.finished.connect(lambda: self._on_audio(reply, shooting_id, destination))
+
+    def _on_audio(self, reply: QNetworkReply, shooting_id: int, destination: Path) -> None:
+        reply.deleteLater()
+        run = self._runs.get(shooting_id)
+        if run is None:
+            return
+        run["inflight"] -= 1
+        if reply.error() == QNetworkReply.NetworkError.NoError:
+            data = _reply_bytes(reply)
+            if data:
+                temp = destination.with_suffix(destination.suffix + ".part")
+                try:
+                    temp.write_bytes(data)
+                    temp.replace(destination)
+                except OSError:
+                    temp.unlink(missing_ok=True)
+        self._pump(shooting_id)
+
     def shutdown(self) -> None:
         """Запрещает повторные попытки и забывает незавершённые сетевые запуски."""
         self._closing = True
@@ -208,8 +242,6 @@ class SelectionDownloader(QObject):
             return
         run["done"] += 1
         self.progress.emit(shooting_id, run["done"], run["total"])
-        if run["done"] >= run["total"]:
-            self._finalize(shooting_id)
 
     def _finalize(self, shooting_id: int) -> None:
         """Фиксирует соответствия в кэше и завершает успешно скачанный отбор."""
@@ -239,6 +271,8 @@ class SelectionDownloader(QObject):
             if metadata:
                 cache.store_photo_metadata(metadata)
             self._store_server_ai(cache, folder, run["ai"])
+            for name, document in run["annotations"]:
+                cache.store_photo_annotations(name, document)
             cache.close(flush=True)
         except Exception as exc:  # noqa: BLE001 — превращаем исключение в понятное сообщение
             self.failed.emit(shooting_id, f"Не удалось сохранить кэш: {exc}")
@@ -320,6 +354,8 @@ class SelectionMarkSyncer(QObject):
         self._cache = cache
         self._shooting_id = int(shooting_id)
         self._inflight: dict[str, tuple[int, str]] = {}  # запрос -> (фотография, вид метки)
+        self._audio_manager = QNetworkAccessManager(self)
+        self._audio_uploads: dict[QNetworkReply, QFile] = {}
         hub.ackReceived.connect(self._on_ack)
         hub.connectionChanged.connect(self._on_connection)
         self.flush()
@@ -362,6 +398,57 @@ class SelectionMarkSyncer(QObject):
         self.pendingChanged.emit(self.pending_count())
         self.flush()
 
+    def queue_annotation(self, name: str, operation: dict) -> None:
+        """Queues one ordered annotation change after it was applied locally."""
+        photo_id = self._cache.shotsync_photo_id(name)
+        if not photo_id or not isinstance(operation, dict):
+            return
+        self._cache.enqueue_shotsync_annotation(
+            operation_id=uuid.uuid4().hex, photo_id=photo_id, shooting_id=self._shooting_id,
+            operation_json=json.dumps(operation, ensure_ascii=False, separators=(",", ":")),
+        )
+        self.pendingChanged.emit(self.pending_count())
+        self.flush()
+
+    def upload_audio(self, name: str, path: str) -> None:
+        """Uploads a locally recorded Ogg comment without converting it to WAV."""
+        photo_id = self._cache.shotsync_photo_id(name)
+        source = QFile(path)
+        if not photo_id or not source.open(QFile.OpenModeFlag.ReadOnly):
+            return
+        request = QNetworkRequest(QUrl(
+            f"{self._hub.socket._base_url}/api/shootings/{self._shooting_id}/photos/{photo_id}/audio-comment/"
+        ))
+        request.setRawHeader(API_KEY_HEADER, self._hub.socket._api_key.encode("utf-8"))
+        multi = QHttpMultiPart(QHttpMultiPart.ContentType.FormDataType)
+        part = QHttpPart()
+        part.setHeader(QNetworkRequest.KnownHeaders.ContentDispositionHeader, f'form-data; name="audio"; filename="{Path(path).name}"')
+        part.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "audio/ogg")
+        part.setBodyDevice(source)
+        source.setParent(multi)
+        multi.append(part)
+        reply = self._audio_manager.post(request, multi)
+        multi.setParent(reply)
+        self._audio_uploads[reply] = source
+        reply.finished.connect(lambda: self._on_audio_uploaded(reply))
+
+    def delete_audio(self, name: str) -> None:
+        photo_id = self._cache.shotsync_photo_id(name)
+        if not photo_id:
+            return
+        request = QNetworkRequest(QUrl(
+            f"{self._hub.socket._base_url}/api/shootings/{self._shooting_id}/photos/{photo_id}/audio-comment/delete/"
+        ))
+        request.setRawHeader(API_KEY_HEADER, self._hub.socket._api_key.encode("utf-8"))
+        reply = self._audio_manager.post(request, b"")
+        reply.finished.connect(lambda: reply.deleteLater())
+
+    def _on_audio_uploaded(self, reply: QNetworkReply) -> None:
+        source = self._audio_uploads.pop(reply, None)
+        if source is not None:
+            source.close()
+        reply.deleteLater()
+
     def flush(self) -> None:
         """Отправляет все ожидающие метки, которые ещё не ждут подтверждения."""
         if not self._hub.connected:
@@ -385,6 +472,23 @@ class SelectionMarkSyncer(QObject):
             }
             if self._hub.send_json(message):
                 self._inflight[request_id] = (photo_id, kind)
+        for pending in self._cache.pending_shotsync_annotations():
+            operation_id = pending["operation_id"]
+            # In-flight values are (photo_id, operation_id) tuples. Compare the
+            # operation id, otherwise each flush resends this ordered operation.
+            if any(sent_operation_id == operation_id for _photo_id, sent_operation_id in self._inflight.values()):
+                continue
+            try:
+                operation = json.loads(pending["operation_json"])
+            except (ValueError, TypeError):
+                self._cache.clear_shotsync_annotation(operation_id)
+                continue
+            request_id = uuid.uuid4().hex
+            if self._hub.send_json({
+                "type": "photo.annotations", "shooting_id": pending["shooting_id"],
+                "photo_id": pending["photo_id"], "operation": operation, "request_id": request_id,
+            }):
+                self._inflight[request_id] = (0, operation_id)
 
     def _on_ack(self, data: dict) -> None:
         request_id = data.get("request_id")
@@ -393,7 +497,10 @@ class SelectionMarkSyncer(QObject):
             return
         photo_id, kind = target
         if data.get("ok"):
-            self._cache.clear_shotsync_mark(photo_id, kind)
+            if photo_id:
+                self._cache.clear_shotsync_mark(photo_id, kind)
+            else:
+                self._cache.clear_shotsync_annotation(kind)
             self.pendingChanged.emit(self.pending_count())
 
     def _on_connection(self, connected: bool) -> None:

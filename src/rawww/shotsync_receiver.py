@@ -114,11 +114,17 @@ class ShotSyncReceiver(QObject):
         filename = safe_filename(photo.get("name") or f"photo-{photo.get('id')}.jpg")
         destination = target.folder / filename
         self._queue_download(int(shooting_id), self._absolute_url(url), destination)
+        self._queue_audio(int(shooting_id), photo, destination, force=False)
 
-    def _queue_download(self, shooting_id: int, url: str, destination: Path, attempt: int = 0) -> None:
+    def _queue_audio(self, shooting_id: int, photo: dict, image_destination: Path, *, force: bool) -> None:
+        url = str(photo.get("audio_comment_url") or "")
+        if url:
+            self._queue_download(shooting_id, self._absolute_url(url), image_destination.with_suffix(".ogg"), force=force)
+
+    def _queue_download(self, shooting_id: int, url: str, destination: Path, attempt: int = 0, *, force: bool = False) -> None:
         if self._closing:
             return
-        if destination.exists():
+        if destination.exists() and not force:
             self._mark_done(shooting_id, destination.name)
             return
         key = (shooting_id, str(destination))
@@ -132,6 +138,8 @@ class ShotSyncReceiver(QObject):
         target = self._targets.get(int(shooting_id))
         if target is None:
             return
+        filename = safe_filename(photo.get("name") or f"photo-{photo.get('id')}.jpg")
+        self._queue_audio(int(shooting_id), photo, target.folder / filename, force=True)
         self.markUpdated.emit(int(shooting_id), str(target.folder), photo)
 
     def _absolute_url(self, url: str) -> str:

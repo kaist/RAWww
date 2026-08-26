@@ -35,9 +35,9 @@ from typing import Callable
 
 from send2trash import send2trash
 
-from PySide6.QtCore import QBuffer, QDir, QEasingCurve, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
+from PySide6.QtCore import QBuffer, QDir, QEasingCurve, QEvent, QFileInfo, QFileSystemWatcher, QLibraryInfo, QPoint, QPointF, QProcess, QPropertyAnimation, QRect, QRectF, QIODevice, QMimeData, QSettings, QSize, QSizeF, Qt, QTimer, QTranslator, Signal, QObject, QStorageInfo, QItemSelectionModel, QStandardPaths, QUrl, QStringListModel
 from PySide6.QtGui import QAction, QColor, QCursor, QDesktopServices, QDrag, QFont, QFontMetricsF, QGuiApplication, QIcon, QImage, QKeySequence, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPixmapCache, QPolygon, QScreen, QTextCharFormat, QTextFormat, QTextObjectInterface, QWindow
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+from PySide6.QtMultimedia import QAudioInput, QAudioOutput, QMediaCaptureSession, QMediaFormat, QMediaPlayer, QMediaRecorder, QVideoSink
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication,
@@ -77,6 +77,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMenu,
     QMessageBox,
+    QInputDialog,
 )
 
 from .cache import FolderCache, cache_size, clear_cache, maintain_folder_caches, persist_burst_materialization, prune_folder_cache, relocate_folder_caches, remove_folder_cache
@@ -177,6 +178,37 @@ FULL_STRIP_PAGE_SIZE = 160
 PREVIEW_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 DETAIL_ROLE = PREVIEW_ROLE + 1
 SERIES_ROLE = DETAIL_ROLE + 1
+
+
+def _has_visible_annotations(detail: dict) -> bool:
+    """Возвращает True, когда у фотографии есть рисунок или текстовая метка."""
+    document = detail.get("annotations") if isinstance(detail, dict) else None
+    items = document.get("i") if isinstance(document, dict) else None
+    return isinstance(items, list) and any(
+        isinstance(item, dict) and item.get("t") in {"s", "t"}
+        for item in items
+    )
+
+
+def _apply_annotation_operation_to_document(document: dict | None, operation: dict) -> dict:
+    """Применяет одну операцию к документу без потери уже полученных блоков."""
+    current = document if isinstance(document, dict) else {}
+    items = list(current.get("i") or [])
+    kind = operation.get("kind") if isinstance(operation, dict) else ""
+    if kind == "add" and isinstance(operation.get("item"), dict):
+        item = operation["item"]
+        if not any(isinstance(row, dict) and str(row.get("id") or "") == str(item.get("id") or "") for row in items):
+            items.append(item)
+    elif kind == "delete":
+        identifier = str(operation.get("id") or "")
+        items = [row for row in items if not isinstance(row, dict) or str(row.get("id") or "") != identifier]
+    elif kind == "update" and isinstance(operation.get("item"), dict):
+        replacement = operation["item"]
+        items = [
+            replacement if isinstance(row, dict) and str(row.get("id") or "") == str(replacement.get("id") or "") else row
+            for row in items
+        ]
+    return {"v": 1, "i": items}
 CURRENT_DECODE_WORKERS = 3
 BACKGROUND_DECODE_WORKERS = 5
 VISIBLE_THUMB_DECODE_WORKERS = 2
@@ -1588,7 +1620,7 @@ class PhotoCardDelegate(QStyledItemDelegate):
                 painter.drawText(video_badge, Qt.AlignmentFlag.AlignCenter, theme.FOMANTIC_ICON_CODES["film"] if theme.FOMANTIC_ICON_FAMILY else "▶")
 
             if detail.get("audio_comment_path"):
-                audio_badge = QRect(image_rect.left() + 5, image_rect.bottom() - 25, 22, 22)
+                audio_badge = QRect(image_rect.left() + 5, image_rect.bottom() - 21, 18, 18)
                 painter.setBrush(QColor(243, 245, 247, 235))
                 painter.setPen(QPen(QColor(255, 255, 255, 220), 1))
                 painter.drawEllipse(audio_badge)
@@ -1600,6 +1632,21 @@ class PhotoCardDelegate(QStyledItemDelegate):
                     audio_badge,
                     Qt.AlignmentFlag.AlignCenter,
                     theme.FOMANTIC_ICON_CODES.get("microphone", "M") if theme.FOMANTIC_ICON_FAMILY else "M",
+                )
+
+            if _has_visible_annotations(detail):
+                annotation_badge = QRect(image_rect.left() + (25 if detail.get("audio_comment_path") else 5), image_rect.bottom() - 21, 18, 18)
+                painter.setBrush(QColor(243, 245, 247, 235))
+                painter.setPen(QPen(QColor(255, 255, 255, 220), 1))
+                painter.drawEllipse(annotation_badge)
+                icon_font = QFont(theme.FOMANTIC_ICON_FAMILY or option.font.family())
+                icon_font.setPixelSize(10)
+                painter.setFont(icon_font)
+                painter.setPen(QColor("#30363d"))
+                painter.drawText(
+                    annotation_badge,
+                    Qt.AlignmentFlag.AlignCenter,
+                    theme.FOMANTIC_ICON_CODES.get("pencil", "*") if theme.FOMANTIC_ICON_FAMILY else "*",
                 )
 
             if expanded_series:
@@ -2317,7 +2364,6 @@ class ViewerMetaBar(QWidget):
     quickMarkConfigured = Signal(str, object)
     autoAdvanceChanged = Signal(bool)
     commentSubmitted = Signal(str)
-
     def __init__(self, *, settings: QSettings | None = None) -> None:
         super().__init__()
         self.setObjectName("viewerMeta")
@@ -2589,6 +2635,9 @@ class FullView(QFrame):
     videoPlaybackChanged = Signal(bool)
     originalRequested = Signal(object)
     markIndicatorRequested = Signal()
+    annotationOperation = Signal(dict)
+    audioRecorded = Signal(str)
+    audioDeleteRequested = Signal()
     deleteRequested = Signal(bool)  # нажат ли Shift
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -2611,6 +2660,7 @@ class FullView(QFrame):
         self.image_view.zoomPressed.connect(self._request_mouse_zoom)
         self.image_view.zoomReleased.connect(self._release_mouse_zoom)
         self.image_view.wheelScrolled.connect(self._navigate_wheel)
+        self.image_view.annotationOperation.connect(self._complete_annotation_operation)
         self.video_widget: QVideoWidget | None = None
         self.media_stack = QStackedWidget()
         self.media_stack.addWidget(self.image_view)
@@ -2741,6 +2791,15 @@ class FullView(QFrame):
         self.audio_toggle.setToolTip(_("Аудиокомментарий"))
         self.audio_toggle.clicked.connect(self._toggle_audio)
         self.audio_toggle.hide()
+        self.audio_capture = QMediaCaptureSession(self)
+        self.audio_input = QAudioInput(self)
+        self.audio_recorder = QMediaRecorder(self)
+        self.audio_capture.setAudioInput(self.audio_input)
+        self.audio_capture.setRecorder(self.audio_recorder)
+        self.audio_recorder.recorderStateChanged.connect(self._annotation_recording_state_changed)
+        self._recording_audio_path = ""
+        self._recording_audio_source_path = ""
+        self._audio_transcoder: QProcess | None = None
         strip_header = QWidget()
         strip_header.setObjectName("stripHeader")
         strip_header_layout = QHBoxLayout(strip_header)
@@ -2752,6 +2811,61 @@ class FullView(QFrame):
         self.strip_toggle.setToolTip(_("Свернуть ленту превью"))
         self.strip_toggle.clicked.connect(self.toggle_strip)
         strip_header_layout.addWidget(self.strip_toggle)
+        self.annotation_toolbar = QFrame()
+        self.annotation_toolbar.setObjectName("annotationToolbar")
+        self.annotation_toolbar.setFixedHeight(24)
+        self.annotation_toolbar.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        annotation_layout = QHBoxLayout(self.annotation_toolbar)
+        annotation_layout.setContentsMargins(0, 0, 0, 0)
+        annotation_layout.setSpacing(0)
+        self.annotation_buttons: dict[str, QToolButton] = {}
+        for tool, icon, tip in (
+            ("r", None, _("Рисовать красным")), ("y", None, _("Рисовать жёлтым")),
+            ("g", None, _("Рисовать зелёным")), ("b", None, _("Рисовать синим")),
+            ("erase", "eraser", _("Стереть аннотацию")), ("text", "font", _("Текстовая метка")),
+        ):
+            button = QToolButton()
+            button.setObjectName("annotationTool")
+            button.setFixedSize(24, 24)
+            button.setIconSize(QSize(16, 16))
+            button.setToolTip(tip)
+            button.setCheckable(True)
+            if icon:
+                button.setIcon(_fomantic_icon(icon, 16))
+                if tool == "text":
+                    pixmap = QPixmap(16, 16)
+                    pixmap.fill(Qt.GlobalColor.transparent)
+                    painter = QPainter(pixmap)
+                    font = QFont(painter.font())
+                    font.setPixelSize(13)
+                    font.setBold(True)
+                    painter.setFont(font)
+                    painter.setPen(QColor("#d6d6d6"))
+                    painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "T")
+                    painter.end()
+                    button.setIcon(QIcon(pixmap))
+            else:
+                color = {"r": "#ef4444", "y": "#facc15", "g": "#22c55e", "b": "#3b82f6"}[tool]
+                pixmap = QPixmap(16, 16)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(color))
+                painter.drawEllipse(QRectF(2, 2, 12, 12))
+                painter.end()
+                button.setIcon(QIcon(pixmap))
+            button.clicked.connect(lambda checked=False, value=tool: self._set_annotation_tool(value, checked))
+            self.annotation_buttons[tool] = button
+            annotation_layout.addWidget(button)
+        self.annotation_record_button = QToolButton()
+        self.annotation_record_button.setObjectName("annotationTool")
+        self.annotation_record_button.setFixedSize(24, 24)
+        self.annotation_record_button.setIconSize(QSize(16, 16))
+        self.annotation_record_button.setIcon(_fomantic_icon("microphone", 16))
+        self.annotation_record_button.setToolTip(_("Записать аудиокомментарий"))
+        self.annotation_record_button.clicked.connect(self._show_annotation_record_popover)
+        annotation_layout.addWidget(self.annotation_record_button)
         self.burst_extract_button = QToolButton()
         self.burst_extract_button.setObjectName("burstExtract")
         self.burst_extract_button.setIcon(_fomantic_icon("download", 13))
@@ -2788,6 +2902,64 @@ class FullView(QFrame):
         self.rating_buttons = self.meta_bar.rating_buttons
         self.full_comment_edit = self.meta_bar.comment_edit
         strip_header_layout.addWidget(self.meta_bar, 1)
+        # Meta bar takes all free space; tools deliberately stay at the far right.
+        strip_header_layout.addWidget(self.annotation_toolbar)
+        self.annotation_record_popover = QFrame(self.media_panel)
+        self.annotation_record_popover.setObjectName("annotationRecordPopover")
+        record_layout = QVBoxLayout(self.annotation_record_popover)
+        record_layout.setContentsMargins(14, 13, 14, 13)
+        record_layout.setSpacing(5)
+        record_header = QWidget()
+        record_header.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        header_layout = QHBoxLayout(record_header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(0)
+        record_title = QLabel(_("Аудиокомментарий"))
+        record_title.setObjectName("annotationRecordTitle")
+        record_close = QToolButton()
+        record_close.setObjectName("annotationRecordClose")
+        record_close.setIcon(_fomantic_icon("close", 12))
+        record_close.setToolTip(_("Закрыть"))
+        record_close.clicked.connect(self.annotation_record_popover.hide)
+        header_layout.addWidget(record_title)
+        header_layout.addStretch(1)
+        header_layout.addWidget(record_close)
+        record_hint = QLabel(_("Запишите комментарий к этой фотографии"))
+        record_hint.setWordWrap(True)
+        record_hint.setObjectName("annotationRecordHint")
+        self.annotation_record_timer = QLabel("0:00")
+        self.annotation_record_timer.setObjectName("annotationRecordTimer")
+        self.annotation_record_action = QToolButton()
+        self.annotation_record_action.setObjectName("annotationRecordAction")
+        self.annotation_record_action.setText(_("Запись"))
+        self.annotation_record_action.setIcon(_fomantic_icon("circle", 15, "#fb6b6b"))
+        self.annotation_record_action.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.annotation_record_action.clicked.connect(self._toggle_annotation_recording)
+        self.annotation_audio_delete_button = QToolButton()
+        self.annotation_audio_delete_button.setObjectName("annotationRecordDelete")
+        self.annotation_audio_delete_button.setIcon(_fomantic_icon("trash", 14))
+        self.annotation_audio_delete_button.setToolTip(_("Удалить аудиокомментарий"))
+        self.annotation_audio_delete_button.clicked.connect(self.audioDeleteRequested)
+        record_layout.addWidget(record_header)
+        record_layout.addWidget(record_hint)
+        record_layout.addSpacing(10)
+        record_controls = QWidget()
+        record_controls.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        controls_layout = QHBoxLayout(record_controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(10)
+        controls_layout.addWidget(self.annotation_record_action)
+        controls_layout.addWidget(self.annotation_record_timer)
+        controls_layout.addStretch(1)
+        controls_layout.addWidget(self.annotation_audio_delete_button)
+        record_layout.addWidget(record_controls)
+        self.annotation_record_popover.setFixedWidth(285)
+        self.annotation_record_popover.hide()
+        self.annotation_audio_delete_button.hide()
+        self._annotation_record_seconds = 0
+        self._annotation_record_timer = QTimer(self)
+        self._annotation_record_timer.setInterval(1000)
+        self._annotation_record_timer.timeout.connect(self._tick_annotation_recording)
 
         self.strip_panel = QFrame(self)
         self.strip_panel.setObjectName("stripPanel")
@@ -3055,9 +3227,92 @@ class FullView(QFrame):
         self._mark_detail = detail
         self._update_mark_indicator()
         self._set_audio_detail(detail)
+        self.annotation_audio_delete_button.setVisible(bool(detail.get("audio_comment_path")))
+        self.image_view.set_annotations(detail.get("annotations") if isinstance(detail, dict) else {})
         for path in paths or ((self._path,) if self._path is not None else ()):
             self.photo_strip.update_details(path, detail)
             self.series_strip.update_details(path, detail)
+
+    def _set_annotation_tool(self, tool: str, checked: bool) -> None:
+        active = tool if checked else ""
+        self.annotation_record_popover.hide()
+        self.image_view.set_annotation_tool(active)
+        for name, button in self.annotation_buttons.items():
+            button.blockSignals(True)
+            button.setChecked(name == active)
+            button.blockSignals(False)
+
+    def _complete_annotation_operation(self, operation: dict) -> None:
+        """Forward one completed edit, then return the image to navigation mode."""
+        self.annotationOperation.emit(operation)
+        self._set_annotation_tool("", False)
+
+    def toggle_annotations(self) -> None:
+        """Enables/disables the last selected drawing tool."""
+        active = self.image_view.annotation_tool or "r"
+        self._set_annotation_tool(active, not bool(self.image_view.annotation_tool))
+
+    def _toggle_annotation_recording(self, checked: bool) -> None:
+        """Writes a mono Ogg comment beside the currently displayed photo."""
+        recording = self.audio_recorder.recorderState() == QMediaRecorder.RecorderState.RecordingState
+        if not recording and self._path is not None:
+            # Qt's bundled FFmpeg exposes FLAC recording only on Windows. Record
+            # that temporary source honestly, then use the system FFmpeg to make
+            # the required compact mono Ogg/Opus beside the photo.
+            target = self._path.with_suffix(".ogg")
+            source = self._path.with_suffix(".recording.flac")
+            media_format = QMediaFormat()
+            media_format.setFileFormat(QMediaFormat.FileFormat.FLAC)
+            media_format.setAudioCodec(QMediaFormat.AudioCodec.FLAC)
+            self.audio_recorder.setMediaFormat(media_format)
+            self.audio_recorder.setOutputLocation(QUrl.fromLocalFile(str(source)))
+            self._recording_audio_path = str(target)
+            self._recording_audio_source_path = str(source)
+            self.audio_recorder.record()
+            self._annotation_record_seconds = 0
+            self.annotation_record_timer.setText("0:00")
+            self._annotation_record_timer.start()
+            self.annotation_record_action.setText(_("Стоп"))
+            return
+        self.audio_recorder.stop()
+        self._annotation_record_timer.stop()
+        self.annotation_record_action.setText(_("Запись"))
+        self.annotation_record_popover.hide()
+
+    def _show_annotation_record_popover(self) -> None:
+        if self.annotation_record_popover.isVisible():
+            self.annotation_record_popover.hide()
+            return
+        self.annotation_record_popover.adjustSize()
+        self.annotation_record_popover.move(
+            self.media_panel.width() - self.annotation_record_popover.width() - 16,
+            max(12, self.media_panel.height() - self.annotation_record_popover.height() - 16),
+        )
+        self.annotation_record_popover.show()
+        self.annotation_record_popover.raise_()
+
+    def _tick_annotation_recording(self) -> None:
+        self._annotation_record_seconds += 1
+        self.annotation_record_timer.setText(f"{self._annotation_record_seconds // 60}:{self._annotation_record_seconds % 60:02d}")
+
+    def _annotation_recording_state_changed(self, state) -> None:
+        if state == QMediaRecorder.RecorderState.StoppedState and self._recording_audio_path:
+            path, source = self._recording_audio_path, self._recording_audio_source_path
+            self._recording_audio_path = ""
+            self._recording_audio_source_path = ""
+            if not source or not Path(source).is_file():
+                return
+            process = QProcess(self)
+            process.finished.connect(lambda exit_code, _status, src=source, dst=path, proc=process: self._finish_annotation_audio_transcode(proc, src, dst, exit_code))
+            process.start("ffmpeg", ["-y", "-i", source, "-map", "0:a:0", "-vn", "-c:a", "libopus", "-b:a", "24k", "-application", "voip", "-ac", "1", "-ar", "16000", path])
+            self._audio_transcoder = process
+
+    def _finish_annotation_audio_transcode(self, process: QProcess, source: str, target: str, exit_code: int) -> None:
+        Path(source).unlink(missing_ok=True)
+        process.deleteLater()
+        self._audio_transcoder = None
+        if exit_code == 0 and Path(target).is_file():
+            self.audioRecorded.emit(target)
 
     def _move_series(self, delta: int) -> None:
         if not self._series_paths:
@@ -3288,6 +3543,8 @@ class FullView(QFrame):
         path = str(detail.get("audio_comment_path") or "")
         available = bool(path and Path(path).is_file())
         self.audio_toggle.setVisible(available)
+        if available:
+            self._position_audio_toggle()
         if not available:
             self.stop_audio()
             self.audio_path = ""
@@ -3297,12 +3554,14 @@ class FullView(QFrame):
     def _toggle_audio(self) -> None:
         if not self.audio_path:
             return
-        if self.audio_player.source().toLocalFile() != self.audio_path:
+        source_path = self.audio_player.source().toLocalFile()
+        if os.path.normcase(os.path.normpath(source_path)) != os.path.normcase(os.path.normpath(self.audio_path)):
             self.audio_player.setSource(QUrl.fromLocalFile(self.audio_path))
-        if self.audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            self.audio_player.stop()
-            self.audio_player.setPosition(0)
-            self.audio_toggle.set_progress(0)
+        state = self.audio_player.playbackState()
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.audio_player.pause()
+        elif state == QMediaPlayer.PlaybackState.PausedState:
+            self.audio_player.play()
         else:
             self.audio_player.setPosition(0)
             self.audio_player.play()
@@ -3327,6 +3586,7 @@ class FullView(QFrame):
             self._position_face_filter_chip()
             self._position_mark_indicator()
             self._position_face_search_loader()
+            self._position_audio_toggle()
         return super().eventFilter(obj, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -3337,6 +3597,7 @@ class FullView(QFrame):
         QTimer.singleShot(0, self._position_counter)
         QTimer.singleShot(0, self._position_mark_indicator)
         QTimer.singleShot(0, self._position_face_search_loader)
+        QTimer.singleShot(0, self._position_audio_toggle)
 
     def _position_face_filter_chip(self) -> None:
         if not self.face_filter_chip.isVisible():
@@ -3375,6 +3636,15 @@ class FullView(QFrame):
             12,
         )
         self.mark_indicator.raise_()
+
+    def _position_audio_toggle(self) -> None:
+        if not self.audio_toggle.isVisible():
+            return
+        self.audio_toggle.move(
+            14,
+            max(12, self.media_panel.height() - self.audio_toggle.height() - 14),
+        )
+        self.audio_toggle.raise_()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()
@@ -3436,6 +3706,7 @@ class FullImageView(QWidget):
     zoomPressed = Signal(object)
     zoomReleased = Signal()
     wheelScrolled = Signal(int)
+    annotationOperation = Signal(dict)
 
     def __init__(self) -> None:
         super().__init__()
@@ -3467,10 +3738,15 @@ class FullImageView(QWidget):
         self._spinner_timer.timeout.connect(self._advance_spinner)
         self._cursor_timer = QTimer(self)
         self._cursor_timer.setSingleShot(True)
-        self._cursor_timer.setInterval(3000)
+        self._cursor_timer.setInterval(2000)
         self._cursor_timer.timeout.connect(self._hide_cursor)
         self._cursor_hidden = False
         self._wheel_delta = 0
+        self.annotation_tool = ""
+        self._annotations: dict = {}
+        self._annotation_points: list[tuple[int, int]] | None = None
+        self._annotation_editor: QLineEdit | None = None
+        self._annotation_editor_item: dict | None = None
         self.setMinimumSize(1, 1)
         self.setAutoFillBackground(False)
         self.setMouseTracking(True)
@@ -3479,7 +3755,6 @@ class FullImageView(QWidget):
     def set_pixmap(self, pixmap: QPixmap, *, smooth: bool) -> None:
         self._pixmap = pixmap
         self._smooth = smooth
-        self._note_mouse_activity()
         self.update()
 
     def set_color_management(self, config: ColorManagementConfig) -> None:
@@ -3566,6 +3841,8 @@ class FullImageView(QWidget):
         self.update()
 
     def _set_zoom_cursor(self) -> None:
+        if self._cursor_hidden:
+            return
         self.setCursor(QCursor(_fomantic_icon("zoom", 20).pixmap(20, 20), 10, 10))
 
     def _update_cursor(self) -> None:
@@ -3573,6 +3850,12 @@ class FullImageView(QWidget):
             return
         if self._zoom_requested and not self._zoomed:
             self.setCursor(Qt.CursorShape.BlankCursor)
+        elif self.annotation_tool in {"r", "y", "g", "b"}:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif self.annotation_tool == "erase":
+            self.setCursor(QCursor(_fomantic_icon("eraser", 20).pixmap(20, 20), 10, 10))
+        elif self.annotation_tool == "text":
+            self.setCursor(Qt.CursorShape.IBeamCursor)
         elif self._hovered_face >= 0:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
         else:
@@ -3586,6 +3869,10 @@ class FullImageView(QWidget):
     def _hide_cursor(self) -> None:
         self._cursor_hidden = True
         self.setCursor(Qt.CursorShape.BlankCursor)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._note_mouse_activity()
+        super().enterEvent(event)
 
     def _advance_spinner(self) -> None:
         self._spinner_angle = (self._spinner_angle + 24) % 360
@@ -3636,8 +3923,149 @@ class FullImageView(QWidget):
         self._hovered_face = -1
         self.update()
 
+    def set_annotations(self, document: dict | None) -> None:
+        self._annotations = document if isinstance(document, dict) else {}
+        self._annotation_points = None
+        self.update()
+
+    def set_annotation_tool(self, tool: str) -> None:
+        self.annotation_tool = tool if tool in {"r", "y", "g", "b", "erase", "text"} else ""
+        self._annotation_points = None
+        if self.annotation_tool:
+            self._hovered_face = -1
+        self._update_cursor()
+        self.update()
+
+    def _annotation_point(self, position: QPointF) -> tuple[int, int] | None:
+        rect = self._image_rect()
+        if rect.isEmpty() or not rect.contains(position.toPoint()):
+            return None
+        x = round((position.x() - rect.left()) / rect.width() * 65535)
+        y = round((position.y() - rect.top()) / rect.height() * 65535)
+        return max(0, min(65535, x)), max(0, min(65535, y))
+
+    @staticmethod
+    def _encode_annotation_points(points: list[tuple[int, int]]) -> str:
+        if not points:
+            return ""
+        values: list[int] = [*points[0]]
+        previous = points[0]
+        for point in points[1:]:
+            values.extend((max(0, min(65535, point[0] - previous[0] + 32768)), max(0, min(65535, point[1] - previous[1] + 32768))))
+            previous = point
+        raw = b"".join(value.to_bytes(2, "little") for value in values)
+        return base64.b64encode(raw).decode("ascii")
+
+    @staticmethod
+    def _decode_annotation_points(encoded: str) -> list[tuple[int, int]]:
+        try:
+            raw = base64.b64decode(encoded)
+            if len(raw) < 4 or len(raw) % 4:
+                return []
+            values = [int.from_bytes(raw[index:index + 2], "little") for index in range(0, len(raw), 2)]
+            result = [(values[0], values[1])]
+            for index in range(2, len(values), 2):
+                previous = result[-1]
+                result.append((previous[0] + values[index] - 32768, previous[1] + values[index + 1] - 32768))
+            return result
+        except (ValueError, TypeError):
+            return []
+
+    def _annotation_item_at(self, point: tuple[int, int]) -> dict | None:
+        threshold = 900
+        for item in reversed(self._annotations.get("i") or []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("t") == "t" and abs(int(item.get("a", -99999)) - point[0]) < threshold and abs(int(item.get("b", -99999)) - point[1]) < threshold:
+                return item
+            if item.get("t") == "s":
+                for x, y in self._decode_annotation_points(str(item.get("p") or "")):
+                    if abs(x - point[0]) < threshold and abs(y - point[1]) < threshold:
+                        return item
+        return None
+
+    def _text_annotation_at_position(self, position: QPointF) -> dict | None:
+        """Finds a label by its full on-screen area, not only its anchor dot."""
+        rect = self._image_rect()
+        if rect.isEmpty():
+            return None
+        for item in reversed(self._annotations.get("i") or []):
+            if not isinstance(item, dict) or item.get("t") != "t":
+                continue
+            try:
+                x, y = int(item["a"]), int(item["b"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            point_x = rect.left() + x / 65535 * rect.width()
+            point_y = rect.top() + y / 65535 * rect.height()
+            text = str(item.get("x") or "")
+            metrics = QFontMetricsF(self.font())
+            width = max(50.0, min(200.0, metrics.horizontalAdvance(text) + 12))
+            flags = Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap
+            height = max(24.0, metrics.boundingRect(QRectF(0, 0, width - 10, 1000), flags, text).height() + 8)
+            left = point_x - width - 7 if point_x > rect.center().x() else point_x + 7
+            hit_rect = QRectF(left, point_y - height / 2, width, height).adjusted(-4, -4, 4, 4)
+            if hit_rect.contains(position):
+                return item
+        return None
+
+    def _edit_annotation_text(self, item: dict, point: tuple[int, int]) -> None:
+        """Edits a text label in place instead of opening a modal prompt."""
+        if self._annotation_editor is not None:
+            self._finish_annotation_text_edit()
+        rect = self._image_rect()
+        x = rect.left() + point[0] / 65535 * rect.width()
+        y = rect.top() + point[1] / 65535 * rect.height()
+        width = 180
+        left = x - width - 7 if x > rect.center().x() else x + 7
+        editor = QLineEdit(self)
+        editor.setObjectName("annotationTextEditor")
+        editor.setText(str(item.get("x") or ""))
+        editor.setGeometry(round(left), round(y - 13), width, 26)
+        editor.installEventFilter(self)
+        editor.returnPressed.connect(self._finish_annotation_text_edit)
+        editor.editingFinished.connect(self._finish_annotation_text_edit)
+        self._annotation_editor = editor
+        self._annotation_editor_item = item
+        editor.show()
+        editor.setFocus()
+        editor.selectAll()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if watched is self._annotation_editor and event.type() == QEvent.Type.KeyPress:
+            if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+                self._finish_annotation_text_edit()
+                return True
+            if event.key() == Qt.Key.Key_Escape:
+                editor = self._annotation_editor
+                self._annotation_editor = self._annotation_editor_item = None
+                if editor is not None:
+                    editor.deleteLater()
+                return True
+        return super().eventFilter(watched, event)
+
+    def _finish_annotation_text_edit(self) -> None:
+        editor, item = self._annotation_editor, self._annotation_editor_item
+        self._annotation_editor = self._annotation_editor_item = None
+        if editor is None or item is None:
+            return
+        value = editor.text().strip()
+        editor.deleteLater()
+        if value:
+            if item.get("id"):
+                self.annotationOperation.emit({"kind": "update", "item": {**item, "x": value[:500]}})
+            else:
+                self.annotationOperation.emit({"kind": "add", "item": {**item, "id": uuid4().hex, "x": value[:500]}})
+
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
         self._note_mouse_activity()
+        if self._annotation_points is not None:
+            point = self._annotation_point(event.position())
+            if point is not None and (not self._annotation_points or point != self._annotation_points[-1]):
+                self._annotation_points.append(point)
+                self.update()
+            event.accept()
+            return
         if self._zoomed and self._drag_position is not None and self._pixmap is not None:
             start = self._drag_center or self._view_center
             self._view_center = QPointF(
@@ -3665,6 +4093,14 @@ class FullImageView(QWidget):
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self._note_mouse_activity()
+            if self._annotation_points is not None:
+                points = self._annotation_points
+                self._annotation_points = None
+                if len(points) >= 2:
+                    self.annotationOperation.emit({"kind": "add", "item": {"id": uuid4().hex, "t": "s", "c": self.annotation_tool, "p": self._encode_annotation_points(points)}})
+                self.update()
+                event.accept()
+                return
             self._drag_position = None
             if self._temporary_zoom:
                 self.zoomReleased.emit()
@@ -3680,6 +4116,29 @@ class FullImageView(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self._note_mouse_activity()
+            if text_item := self._text_annotation_at_position(event.position()):
+                self._edit_annotation_text(text_item, (int(text_item["a"]), int(text_item["b"])))
+                event.accept()
+                return
+            point = self._annotation_point(event.position()) if self.annotation_tool else None
+            if point is not None:
+                if self.annotation_tool in {"r", "y", "g", "b"}:
+                    self._annotation_points = [point]
+                elif self.annotation_tool == "erase":
+                    if item := self._annotation_item_at(point):
+                        self.annotationOperation.emit({"kind": "delete", "id": str(item.get("id") or "")})
+                elif self.annotation_tool == "text":
+                    self._edit_annotation_text({"t": "t", "x": "", "a": point[0], "b": point[1]}, point)
+                self.update()
+                event.accept()
+                return
+            clicked_annotation = self._annotation_point(event.position())
+            if clicked_annotation is not None:
+                item = self._annotation_item_at(clicked_annotation)
+                if item is not None and item.get("t") == "t":
+                    self._edit_annotation_text(item, clicked_annotation)
+                    event.accept()
+                    return
             if self._face_at(event.position()) >= 0:
                 event.accept()
                 return
@@ -3695,6 +4154,7 @@ class FullImageView(QWidget):
         super().mousePressEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
+        self._note_mouse_activity()
         if self._zoom_requested:
             event.ignore()
             return
@@ -3712,6 +4172,8 @@ class FullImageView(QWidget):
         event.accept()
 
     def _face_at(self, position) -> int:
+        if self.annotation_tool:
+            return -1
         if self._pixmap is None or self._pixmap.isNull():
             return -1
         image_rect = self._image_rect()
@@ -3783,6 +4245,7 @@ class FullImageView(QWidget):
             self._draw_zoomed(painter, target)
         else:
             painter.drawPixmap(target, self._fitted_for(target.size()))
+        self._draw_annotations(painter, target)
         if self._zoom_requested and not self._zoomed:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             spinner = QRect(self.rect().center().x() - 16, self.rect().center().y() - 16, 32, 32)
@@ -3790,13 +4253,69 @@ class FullImageView(QWidget):
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             painter.drawArc(spinner, self._spinner_angle * 16, 250 * 16)
-        if 0 <= self._hovered_face < len(self._faces):
+        if not self.annotation_tool and 0 <= self._hovered_face < len(self._faces):
             face_rect = self._face_rect(self._faces[self._hovered_face], target)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(QPen(QColor(138, 180, 248, 242), 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(face_rect, 4, 4)
         painter.end()
+
+    def _draw_annotations(self, painter: QPainter, rect: QRect) -> None:
+        colors = {"r": "#ef4444", "y": "#facc15", "g": "#22c55e", "b": "#3b82f6"}
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        items = self._annotations.get("i") if isinstance(self._annotations.get("i"), list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("t") == "s":
+                points = self._decode_annotation_points(str(item.get("p") or ""))
+                if len(points) < 2:
+                    continue
+                path = QPainterPath()
+                for index, (x, y) in enumerate(points):
+                    position = QPointF(rect.left() + x / 65535 * rect.width(), rect.top() + y / 65535 * rect.height())
+                    if index:
+                        path.lineTo(position)
+                    else:
+                        path.moveTo(position)
+                # Текстовая метка задаёт кисть для своей плашки. Штрихи должны
+                # быть только линиями независимо от порядка аннотаций.
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                stroke_width = max(2.0, 360 / 65535 * min(rect.width(), rect.height()))
+                painter.setPen(QPen(QColor(colors.get(item.get("c"), "#ef4444")), stroke_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                painter.drawPath(path)
+            elif item.get("t") == "t":
+                try:
+                    x, y = int(item["a"]), int(item["b"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                point = QPointF(rect.left() + x / 65535 * rect.width(), rect.top() + y / 65535 * rect.height())
+                painter.setBrush(QColor("#f4f4f5"))
+                painter.setPen(QPen(QColor("#101114"), 1.2))
+                painter.drawEllipse(point, 3.3, 3.3)
+                text = str(item.get("x") or "")
+                metrics = QFontMetricsF(painter.font())
+                width = max(50.0, min(200.0, metrics.horizontalAdvance(text) + 12))
+                text_flags = Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap
+                text_bounds = metrics.boundingRect(QRectF(0, 0, width - 10, 1000), text_flags, text)
+                height = max(24.0, text_bounds.height() + 8)
+                left = point.x() - width - 7 if point.x() > rect.center().x() else point.x() + 7
+                label = QRectF(left, point.y() - height / 2, width, height)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor(18, 18, 18, 175))
+                painter.drawRoundedRect(label, 3, 3)
+                painter.setPen(QColor("#f4f4f5"))
+                painter.drawText(label.adjusted(5, 1, -5, -1), text_flags, text)
+        if self._annotation_points and len(self._annotation_points) > 1:
+            draft = {"t": "s", "c": self.annotation_tool, "p": self._encode_annotation_points(self._annotation_points)}
+            saved = self._annotations
+            points = self._annotation_points
+            self._annotations = {"i": [draft]}
+            self._annotation_points = None
+            self._draw_annotations(painter, rect)
+            self._annotation_points = points
+            self._annotations = saved
 
     def _draw_zoomed(self, painter: QPainter, target: QRect) -> None:
         """Рисует кадр в зуме 1:1, корректируя цвет только видимой области.
@@ -4802,6 +5321,9 @@ class Workspace(QMainWindow):
         self.full_view.set_quick_mark(*self.quick_mark)
         self.full_view.set_auto_advance(self.auto_advance)
         self.full_view.commentSubmitted.connect(self._save_full_comment)
+        self.full_view.annotationOperation.connect(self._apply_annotation_operation)
+        self.full_view.audioRecorded.connect(self._annotation_audio_recorded)
+        self.full_view.audioDeleteRequested.connect(self._delete_annotation_audio)
         self.stack.addWidget(self.grid_page)
         self.stack.addWidget(self.full_view)
         self.shotsync_action_page = self._build_shotsync_action_page()
@@ -5915,6 +6437,7 @@ class Workspace(QMainWindow):
         add_hotkey("fullscreen", self.toggle_fullscreen)
         add_hotkey("quick_mark", self._apply_quick_mark)
         add_hotkey("comment", self._show_comment_dialog)
+        add_hotkey("annotations", self.full_view.toggle_annotations, target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         add_hotkey("create_folder", self._create_new_folder)
         add_hotkey("quick_copy", lambda: self._show_quick_transfer(move=False))
         add_hotkey("quick_move", lambda: self._show_quick_transfer(move=True))
@@ -7821,6 +8344,7 @@ class Workspace(QMainWindow):
             rating=photo.get("rating"),
             color_label=photo.get("color_label") or "",
             comment=photo.get("comment") or "",
+            annotations=photo.get("annotations"),
         )
 
     def _on_shotsync_photo_updated(self, shooting_id: int, photo: dict) -> None:
@@ -7844,6 +8368,7 @@ class Workspace(QMainWindow):
             rating=photo.get("rating"),
             color_label=photo.get("color_label") or "",
             comment=photo.get("comment") or "",
+            annotations=photo.get("annotations"),
         )
 
     def _on_shotsync_shooting_deleted(self, shooting_id: int) -> None:
@@ -7872,12 +8397,29 @@ class Workspace(QMainWindow):
         )
 
     def _apply_external_selection(
-        self, name: str, *, rating: int | None, color_label: str | None, comment: str
+        self, name: str, *, rating: int | None, color_label: str | None, comment: str, annotations: dict | None = None,
     ) -> None:
         """Обновляет рейтинг, цвет и комментарий файла и перерисовывает карточку."""
         color_label = str(color_label or "")
         detail = self.photo_details.setdefault(name, {})
         detail.update(rating=rating, color_label=color_label, comment=comment)
+        if isinstance(annotations, dict):
+            # Снимок из сокета может прийти, пока у этого клиента ещё есть
+            # неотправленные операции. Накладываем их поверх снимка, чтобы
+            # ни одна сторона синхронизации не стирала чужие блоки.
+            document = annotations
+            if self.folder_cache is not None and self.cache_ready:
+                photo_id = self.folder_cache.shotsync_photo_id(name)
+                if photo_id:
+                    for pending in self.folder_cache.pending_shotsync_annotations():
+                        if int(pending.get("photo_id") or 0) != photo_id:
+                            continue
+                        try:
+                            operation = json.loads(pending["operation_json"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        document = _apply_annotation_operation_to_document(document, operation)
+            detail["annotations"] = document
         for path, item in self.items_by_path.items():
             if path.name == name:
                 item.setData(DETAIL_ROLE, dict(detail))
@@ -7886,14 +8428,17 @@ class Workspace(QMainWindow):
             self.folder_cache.store_photo_selection(
                 name, rating=rating, color_label=color_label, comment=comment
             )
+            if isinstance(annotations, dict):
+                self.folder_cache.store_photo_annotations(name, detail["annotations"])
         if self._xmp_auto_enabled():
             path = next((candidate for candidate in self.all_paths if candidate.name == name), None)
             if path is not None:
                 self._queue_xmp(path)
         self.grid.viewport().update()
         if self.current_path is not None and self.current_path.name == name:
-            if self.stack.currentWidget() is self.full_view:
-                self.full_view.set_metadata(dict(detail), (self.current_path,))
+            # Открытый кадр перерисовываем сразу: FullView владеет его векторным
+            # слоем и не должен ждать следующего перехода между фото.
+            self.full_view.set_metadata(dict(detail), (self.current_path,))
 
     def _shotsync_select_requested(self, shooting: dict) -> None:
         """Загружает превью съёмки в локальную папку для отбора."""
@@ -8002,6 +8547,20 @@ class Workspace(QMainWindow):
         )
         self._shotsync_syncer.pendingChanged.connect(self._on_shotsync_pending_changed)
         self._on_shotsync_pending_changed(self._shotsync_syncer.pending_count())
+
+    def _queue_uploaded_annotation_documents(self) -> None:
+        """Отправляет локальные аннотации, уже существовавшие до выгрузки папки."""
+        if self._shotsync_syncer is None:
+            return
+        for name, detail in self.photo_details.items():
+            document = detail.get("annotations") if isinstance(detail, dict) else None
+            items = document.get("i") if isinstance(document, dict) else None
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict) or item.get("t") not in {"s", "t"} or not item.get("id"):
+                    continue
+                self._shotsync_syncer.queue_annotation(name, {"kind": "add", "item": item})
 
     def _detach_shotsync_syncer(self) -> None:
         if getattr(self, "_shotsync_syncer", None) is not None:
@@ -8187,6 +8746,7 @@ class Workspace(QMainWindow):
             self.shotsync_client.fetch_shootings()
         if Path(folder) == self.current_dir:
             self._attach_shotsync_syncer()
+            self._queue_uploaded_annotation_documents()
             self._refresh_shotsync_shortcuts()
 
     def _on_shotsync_upload_finished_with_errors(self, shooting_id: int, folder: str, failed: int) -> None:
@@ -11131,6 +11691,78 @@ class Workspace(QMainWindow):
             self.comment_edit.setText(str(self.photo_details.get(selected[0].name, {}).get("comment", "")))
         elif not selected:
             self.comment_edit.clear()
+
+    def _apply_annotation_operation(self, operation: dict) -> None:
+        """Applies a compact vector operation immediately and queues server sync."""
+        if self.current_path is None or not isinstance(operation, dict):
+            return
+        detail = self.photo_details.setdefault(self.current_path.name, {})
+        document = detail.get("annotations") if isinstance(detail.get("annotations"), dict) else {"v": 1, "i": []}
+        items = list(document.get("i") or [])
+        kind = operation.get("kind")
+        if kind == "add" and isinstance(operation.get("item"), dict):
+            items.append(operation["item"])
+        elif kind == "delete":
+            identifier = str(operation.get("id") or "")
+            items = [item for item in items if not isinstance(item, dict) or str(item.get("id") or "") != identifier]
+        elif kind == "update" and isinstance(operation.get("item"), dict):
+            replacement = operation["item"]
+            items = [replacement if isinstance(item, dict) and str(item.get("id") or "") == str(replacement.get("id") or "") else item for item in items]
+        else:
+            return
+        detail["annotations"] = {"v": 1, "i": items}
+        if self.folder_cache is not None and self.cache_ready:
+            self.folder_cache.store_photo_annotations(self.current_path.name, detail["annotations"])
+        if self._shotsync_syncer is not None:
+            self._shotsync_syncer.queue_annotation(self.current_path.name, operation)
+        item = self.items_by_path.get(self.current_path)
+        if item is not None:
+            item.setData(DETAIL_ROLE, dict(detail))
+        self.full_view.set_metadata(detail, (self.current_path,))
+        self.grid.viewport().update()
+
+    def _annotation_audio_recorded(self, audio_path: str) -> None:
+        """Makes a just-recorded local comment playable immediately."""
+        if self.current_path is None or not audio_path or not Path(audio_path).is_file():
+            return
+        detail = self.photo_details.setdefault(self.current_path.name, {})
+        detail["audio_comment_path"] = audio_path
+        self.full_view.set_metadata(detail, (self.current_path,))
+        if self._shotsync_syncer is not None:
+            self._shotsync_syncer.upload_audio(self.current_path.name, audio_path)
+
+    def _delete_annotation_audio(self) -> None:
+        """Removes the local comment and mirrors the deletion to ShotSync."""
+        if self.current_path is None:
+            return
+        photo_name = self.current_path.name
+        detail = self.photo_details.setdefault(photo_name, {})
+        local_path = Path(str(detail.get("audio_comment_path") or ""))
+
+        # On Windows QMediaPlayer releases the file handle on the next event-loop
+        # turn.  Do not remove the remote comment until the local file is gone:
+        # otherwise a later sync could restore a comment the user just deleted.
+        self.full_view.stop_audio()
+
+        def finish_delete(attempt: int = 0) -> None:
+            try:
+                if local_path.is_file():
+                    local_path.unlink()
+            except PermissionError as error:
+                if attempt < 6:
+                    QTimer.singleShot(50, lambda: finish_delete(attempt + 1))
+                    return
+                print(f"[RAWww] Не удалось удалить аудиокомментарий {local_path}: {error}")
+                return
+
+            current_detail = self.photo_details.setdefault(photo_name, {})
+            current_detail.pop("audio_comment_path", None)
+            if self.current_path is not None and self.current_path.name == photo_name:
+                self.full_view.set_metadata(current_detail, (self.current_path,))
+            if self._shotsync_syncer is not None:
+                self._shotsync_syncer.delete_audio(photo_name)
+
+        QTimer.singleShot(0, finish_delete)
 
     def _update_selection(self, **changes) -> None:
         """Применяет метаданные к выделению, кэшу, XMP и открытому просмотрщику."""

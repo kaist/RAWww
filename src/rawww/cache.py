@@ -112,6 +112,20 @@ CREATE TABLE IF NOT EXISTS shotsync_pending (
     updated_ns INTEGER NOT NULL,
     PRIMARY KEY (photo_id, kind)
 );
+-- Annotation operations cannot be coalesced: a delete refers to one exact
+-- vector block and must preserve ordering relative to adds/edits.
+CREATE TABLE IF NOT EXISTS photo_annotations (
+    name TEXT PRIMARY KEY,
+    document_json TEXT NOT NULL DEFAULT '{}',
+    updated_ns INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS shotsync_pending_annotations (
+    operation_id TEXT PRIMARY KEY,
+    photo_id INTEGER NOT NULL,
+    shooting_id INTEGER NOT NULL,
+    operation_json TEXT NOT NULL,
+    updated_ns INTEGER NOT NULL
+);
 """
 
 
@@ -462,19 +476,22 @@ class FolderCache:
 
     def load_audio_details(self) -> dict[str, dict]:
         details = {}
-        wavs = {}
+        audio_files = {}
         try:
             entries = self.folder.iterdir()
             for path in entries:
                 try:
-                    if path.is_file() and path.suffix.casefold() == ".wav":
-                        wavs[path.stem.casefold()] = path
+                    if path.is_file() and path.suffix.casefold() in {".wav", ".ogg"}:
+                        # Ogg is the compact current format; retain WAV for old folders.
+                        key = path.stem.casefold()
+                        if path.suffix.casefold() == ".ogg" or key not in audio_files:
+                            audio_files[key] = path
                 except OSError:
                     continue
         except OSError:
             return details
         for name in self.live_names:
-            audio = wavs.get(Path(name).stem.casefold())
+            audio = audio_files.get(Path(name).stem.casefold())
             if audio is not None:
                 details[name] = {"audio_comment_path": str(audio)}
         return details
@@ -508,6 +525,12 @@ class FolderCache:
                     keywords=keywords if isinstance(keywords, list) else [],
                     _selection_updated_ns=int(updated_ns),
                 )
+            for name, payload in db.execute("SELECT name, document_json FROM photo_annotations"):
+                try:
+                    document = json.loads(payload)
+                except (TypeError, ValueError):
+                    document = {}
+                details.setdefault(name, {})["annotations"] = document if isinstance(document, dict) else {}
         for name, audio in self.load_audio_details().items():
             details.setdefault(name, {}).update(audio)
         return details
@@ -775,6 +798,7 @@ class FolderCache:
             db.execute("DELETE FROM shotsync_session")
             db.execute("DELETE FROM shotsync_photos")
             db.execute("DELETE FROM shotsync_pending")
+            db.execute("DELETE FROM shotsync_pending_annotations")
             db.commit()
 
     def set_shotsync_photos(self, mapping: list[tuple[str, int, int]]) -> None:
@@ -864,9 +888,45 @@ class FolderCache:
     def pending_shotsync_count(self) -> int:
         with self._lock:
             row = self._db_or_raise().execute(
-                "SELECT COUNT(*) FROM shotsync_pending"
+                "SELECT (SELECT COUNT(*) FROM shotsync_pending) + (SELECT COUNT(*) FROM shotsync_pending_annotations)"
             ).fetchone()
         return int(row[0]) if row else 0
+
+    def store_photo_annotations(self, name: str, document: dict) -> None:
+        """Stores the compact shared annotation document for one local file."""
+        payload = json.dumps(document if isinstance(document, dict) else {}, ensure_ascii=False, separators=(",", ":"))
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute(
+                "INSERT OR REPLACE INTO photo_annotations (name, document_json, updated_ns) VALUES (?, ?, ?)",
+                (name, payload, time.time_ns()),
+            )
+            db.commit()
+
+    def enqueue_shotsync_annotation(self, *, operation_id: str, photo_id: int, shooting_id: int, operation_json: str) -> None:
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute(
+                "INSERT OR REPLACE INTO shotsync_pending_annotations (operation_id, photo_id, shooting_id, operation_json, updated_ns) VALUES (?, ?, ?, ?, ?)",
+                (operation_id, int(photo_id), int(shooting_id), operation_json, time.time_ns()),
+            )
+            db.commit()
+
+    def pending_shotsync_annotations(self) -> list[dict]:
+        with self._lock:
+            rows = self._db_or_raise().execute(
+                "SELECT operation_id, photo_id, shooting_id, operation_json FROM shotsync_pending_annotations ORDER BY updated_ns ASC"
+            ).fetchall()
+        return [
+            {"operation_id": str(row[0]), "photo_id": int(row[1]), "shooting_id": int(row[2]), "operation_json": str(row[3])}
+            for row in rows
+        ]
+
+    def clear_shotsync_annotation(self, operation_id: str) -> None:
+        with self._lock:
+            db = self._db_or_raise()
+            db.execute("DELETE FROM shotsync_pending_annotations WHERE operation_id = ?", (operation_id,))
+            db.commit()
 
     def _store_ai_results(self, table: str, value_column: str, results: list[tuple[str, object]]) -> None:
         with self._lock:

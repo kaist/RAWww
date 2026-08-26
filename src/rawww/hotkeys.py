@@ -22,6 +22,7 @@ HOTKEY_DEFAULTS: dict[str, tuple[str, str]] = {
     "fullscreen": (_("Полный экран"), "F11"),
     "quick_mark": (_("Быстрая метка"), "M"),
     "comment": (_("Комментарий"), "C"),
+    "annotations": (_("Аннотации"), "A"),
     "create_folder": (_("Создать новую папку"), "Ctrl+Shift+N"),
     "quick_copy": (_("Быстрое копирование"), "Shift+C"),
     "quick_move": (_("Быстрое перемещение"), "Shift+M"),

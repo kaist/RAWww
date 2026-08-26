@@ -32,6 +32,7 @@ PREVIEW_QUALITY = 85
 MAX_INFLIGHT_UPLOADS = 3
 MAX_UPLOAD_ATTEMPTS = 5          # попыток на файл при транспортных сбоях
 _UPLOAD_RETRY_MAX_MS = 30_000    # верхняя граница экспоненциальной паузы
+UPLOAD_TRANSFER_TIMEOUT_MS = 120_000
 ENCODE_WINDOW = MAX_INFLIGHT_UPLOADS * 2  # сколько превью держим в памяти сверх отправки
 
 
@@ -141,18 +142,18 @@ class _EncodeTask(QRunnable):
     def run(self) -> None:  # noqa: D401 — точка входа QRunnable
         try:
             data = encode_preview(self.path)
-        except Exception as exc:  # noqa: BLE001 — сообщаем понятную причину ошибки
+            original_datetime = self.original_datetime or exif_original_datetime(self.path)
+            embedding = b""
+            faces_json = ""
+            if self.attacher is not None:
+                try:
+                    embedding, resolved = self.attacher.resolve(self.path, data)
+                    faces_json = resolved if resolved is not None else ""
+                except Exception:  # noqa: BLE001 — ошибка AI не должна отменять загрузку
+                    embedding, faces_json = b"", ""
+        except Exception as exc:  # noqa: BLE001 — любой сбой обязан освободить окно кодирования
             self.signals.failed.emit(self.path, str(exc))
             return
-        original_datetime = self.original_datetime or exif_original_datetime(self.path)
-        embedding = b""
-        faces_json = ""
-        if self.attacher is not None:
-            try:
-                embedding, resolved = self.attacher.resolve(self.path, data)
-                faces_json = resolved if resolved is not None else ""
-            except Exception:  # noqa: BLE001 — ошибка AI не должна отменять загрузку
-                embedding, faces_json = b"", ""
         self.signals.done.emit(self.path, data, original_datetime, embedding, faces_json)
 
 
@@ -333,6 +334,7 @@ class FolderUploader(QObject):
         request = QNetworkRequest(
             QUrl(f"{self._base_url}/api/shootings/{self._shooting_id}/downloads/photos/")
         )
+        request.setTransferTimeout(UPLOAD_TRANSFER_TIMEOUT_MS)
         self._apply_http_version_preference(request)
         request.setRawHeader(API_KEY_HEADER, self._api_key.encode("utf-8"))
         reply = self._manager.get(request)
@@ -342,10 +344,11 @@ class FolderUploader(QObject):
         payload = _read_json(reply)
         error = reply.error()
         error_string = reply.errorString()
+        status = int(reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute) or 0)
         reply.deleteLater()
         if self._folder is None or self._aborted:
             return
-        if error != QNetworkReply.NetworkError.NoError:
+        if error != QNetworkReply.NetworkError.NoError or status == 408 or status == 429 or status >= 500:
             if _is_http2_stream_error(error_string):
                 self._http2_failed = True
             self._abort("Не удалось связаться с сервером ShotSync.")
@@ -387,6 +390,7 @@ class FolderUploader(QObject):
 
     def _create_shooting(self) -> None:
         request = QNetworkRequest(QUrl(f"{self._base_url}/api/shootings/create/"))
+        request.setTransferTimeout(UPLOAD_TRANSFER_TIMEOUT_MS)
         request.setHeader(QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
         request.setRawHeader(API_KEY_HEADER, self._api_key.encode("utf-8"))
         body = QByteArray(json.dumps({
@@ -522,6 +526,7 @@ class FolderUploader(QObject):
         request = QNetworkRequest(
             QUrl(f"{self._base_url}/api/shootings/{self._shooting_id}/photos/upload/")
         )
+        request.setTransferTimeout(UPLOAD_TRANSFER_TIMEOUT_MS)
         self._apply_http_version_preference(request)
         request.setRawHeader(API_KEY_HEADER, self._api_key.encode("utf-8"))
         reply = self._manager.post(request, multipart)
@@ -546,6 +551,7 @@ class FolderUploader(QObject):
                 self._http2_failed = True
             self._schedule_retry(item)
             self._pump()
+            self._submit_encodes()
             return
         photo_id = int(((payload or {}).get("photo") or {}).get("id") or 0)
         if not (payload or {}).get("ok") or not photo_id:
@@ -579,6 +585,7 @@ class FolderUploader(QObject):
             return
         self._queue.append(item)
         self._pump()
+        self._submit_encodes()
 
     def _record_failure(self, name: str) -> None:
         self._failed_names.append(name)

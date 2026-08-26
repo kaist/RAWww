@@ -22,10 +22,10 @@ from .runtime_paths import data_path
 
 
 FOMANTIC_ICON_CODES = {
-    "images": "\uf302", "grid": "\uf00a", "user": "\uf007", "brush": "\uf1fc", "media": "\uf87c",
+    "images": "\uf302", "grid": "\uf00a", "user": "\uf007", "brush": "\uf1fc", "pencil": "\uf303", "media": "\uf87c",
     "sort": "\uf160", "search": "\uf002", "list": "\uf03a", "star": "\uf005", "ban": "\uf05e",
     "chevron-down": "\uf078", "chevron-up": "\uf077", "bookmark": "\uf02e",
-    "chevron-left": "\uf053", "chevron-right": "\uf054",
+    "chevron-left": "\uf053", "chevron-right": "\uf054", "eraser": "\uf12d", "font": "\uf031", "circle": "\uf111",
     "step-forward": "\uf051", "keyboard": "\uf11c", "folder": "\uf07c",
     "filter": "\uf0b0", "lightbulb": "\uf0eb", "volume": "\uf028", "microphone": "\uf130", "close": "\uf00d",
     "plus": "\uf067", "trash": "\uf1f8",
@@ -1848,6 +1848,50 @@ def apply_theme(app: QApplication) -> None:
             font-size: 13px;
         }
         QToolButton#stripToggle:hover { background: #242424; }
+        QFrame#annotationToolbar {
+            min-height: 24px; max-height: 24px; border: 0; border-radius: 0;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #4a4a4a, stop:1 #3b3b3b);
+        }
+        QToolButton#annotationTool {
+            min-width: 24px; max-width: 24px; min-height: 24px; max-height: 24px;
+            border: 0; border-radius: 0; background: transparent;
+            padding: 0; text-align: center; font-size: 16px;
+        }
+        QToolButton#annotationTool:hover { background: #505050; }
+        QToolButton#annotationTool:checked { background: #606060; border-color: #9fc3f5; }
+        QToolButton#annotationTool[annotationColor="r"] { color: #ef4444; }
+        QToolButton#annotationTool[annotationColor="y"] { color: #facc15; }
+        QToolButton#annotationTool[annotationColor="g"] { color: #22c55e; }
+        QToolButton#annotationTool[annotationColor="b"] { color: #3b82f6; }
+        QToolButton#annotationTool:last-child { border-right: 0; }
+        QFrame#annotationRecordPopover {
+            border: 1px solid #55575f; border-radius: 7px; background: #303030;
+        }
+        QFrame#annotationRecordPopover QWidget { background: transparent; border: 0; }
+        QLabel#annotationRecordTitle { color: #f0f0f2; font-size: 16px; font-weight: 600; background: none; border: 0; }
+        QLabel#annotationRecordHint { color: #b4b4bc; font-size: 13px; background: none; border: 0; }
+        QLabel#annotationRecordTimer { color: #d6d6da; font-size: 16px; font-weight: 400; background: none; border: 0; }
+        QToolButton#annotationRecordAction {
+            min-width: 110px; max-width: 110px; min-height: 36px; max-height: 36px;
+            border: 1px solid #111; border-radius: 3px; background: #4a4a4a;
+            color: #e5e5e7; font-size: 14px; padding: 0 9px;
+        }
+        QFrame#annotationRecordPopover QToolButton#annotationRecordAction { background: #4a4a4a; border: 1px solid #111; }
+        QToolButton#annotationRecordAction:hover { background: #5a5a5a; }
+        QToolButton#annotationRecordDelete {
+            min-width: 30px; max-width: 30px; min-height: 36px; max-height: 36px;
+            border: 1px solid #222; border-radius: 3px; background: #3d3d3d; color: #c7c7cb;
+        }
+        QToolButton#annotationRecordDelete:hover { background: #5a4141; color: #fb8a8a; }
+        QToolButton#annotationRecordClose {
+            min-width: 24px; max-width: 24px; min-height: 24px; max-height: 24px;
+            border: 0; background: transparent; color: #a5a5aa;
+        }
+        QToolButton#annotationRecordClose:hover { color: #f0f0f2; background: rgba(255,255,255,0.08); }
+        QLineEdit#annotationTextEditor {
+            border: 1px solid #9fc3f5; border-radius: 3px; background: rgba(24, 24, 24, 230);
+            color: #f4f4f5; padding: 2px 5px;
+        }
         QToolButton#fullQuickMark {
             min-width: 96px;
             max-width: 96px;
