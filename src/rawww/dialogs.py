@@ -28,6 +28,7 @@ from .hotkeys import FIXED_HOTKEYS, HOTKEY_DEFAULTS, _hotkey_sequence, _uses_res
 from .error_log import clear_error_log, read_error_log
 from .runtime_paths import filesystem_name_key
 from .shotsync_client import ShotSyncClient
+from .storage_sources import YandexAccounts
 from .theme import _fomantic_icon
 from .widgets import (
     BatchProgressBar,
@@ -149,12 +150,14 @@ class SettingsDialog(QDialog):
     половина интерфейса не успевает обновиться раньше второй.
     """
 
-    def __init__(self, settings: QSettings, client: ShotSyncClient, changed: Callable[[list[dict]], None], login_requested: Callable[[], bool], update_requested: Callable[[], None], cache_size_provider: Callable[[], int], clear_cache_requested: Callable[[], None], parent=None) -> None:
+    def __init__(self, settings: QSettings, client: ShotSyncClient, changed: Callable[[list[dict]], None], login_requested: Callable[[], bool], update_requested: Callable[[], None], cache_size_provider: Callable[[], int], clear_cache_requested: Callable[[], None], yandex_login_requested: Callable[[], bool] | None = None, yandex_remove_requested: Callable[[str], None] | None = None, parent=None) -> None:
         super().__init__(parent)
         self.settings = settings
         self.update_requested = update_requested
         self.cache_size_provider = cache_size_provider
         self.clear_cache_requested = clear_cache_requested
+        self.yandex_login_requested = yandex_login_requested
+        self.yandex_remove_requested = yandex_remove_requested
         self.setObjectName("settingsDialog")
         self.setWindowTitle(_("Настройки"))
         self.setModal(True)
@@ -178,6 +181,7 @@ class SettingsDialog(QDialog):
         self.code_replacements_editor = CodeReplacementsEditor(client, settings, changed, login_requested)
         tabs.addTab(self._scrollable_settings_tab(self.code_replacements_editor), _("Коды замен"))
         tabs.addTab(self._scrollable_settings_tab(self._interface_tab()), _("Интерфейс"))
+        tabs.addTab(self._scrollable_settings_tab(self._cloud_tab()), _("Облачные диски"))
         tabs.addTab(self._scrollable_settings_tab(self._about_tab()), _("О приложении"))
         layout.addWidget(tabs, 1)
 
@@ -452,6 +456,62 @@ class SettingsDialog(QDialog):
         layout.addStretch(1)
         self._update_editor_choice_state(self.custom_editor.isChecked())
         return tab
+
+    def _cloud_tab(self) -> QWidget:
+        """Управляет независимыми OAuth-подключениями облачных дисков."""
+        tab = QWidget()
+        tab.setObjectName("settingsTabPage")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(18, 20, 18, 18)
+        layout.setSpacing(10)
+        self.yandex_accounts = QListWidget()
+        self.yandex_accounts.setObjectName("settingsList")
+        self.yandex_accounts.setMinimumHeight(120)
+        layout.addWidget(self.yandex_accounts)
+        buttons = QHBoxLayout()
+        self.yandex_login_button = QPushButton(_("Добавить Яндекс.Диск"))
+        self.yandex_login_button.setObjectName("settingsPrimaryButton")
+        self.yandex_login_button.setEnabled(self.yandex_login_requested is not None)
+        if self.yandex_login_requested is not None:
+            self.yandex_login_button.clicked.connect(self._add_yandex_disk)
+        buttons.addWidget(self.yandex_login_button)
+        self.yandex_disconnect_button = QPushButton(_("Удалить подключение"))
+        self.yandex_disconnect_button.setObjectName("settingsSecondaryButton")
+        self.yandex_disconnect_button.clicked.connect(self._disconnect_yandex_disk)
+        buttons.addWidget(self.yandex_disconnect_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+        self.yandex_accounts.currentItemChanged.connect(
+            lambda current, _previous: self.yandex_disconnect_button.setEnabled(current is not None)
+        )
+        self._refresh_yandex_accounts()
+        layout.addStretch(1)
+        return tab
+
+    def _refresh_yandex_accounts(self) -> None:
+        self.yandex_accounts.clear()
+        for account in YandexAccounts(self.settings).list():
+            item = QListWidgetItem(account.title)
+            item.setData(Qt.ItemDataRole.UserRole, account.id)
+            self.yandex_accounts.addItem(item)
+        self.yandex_disconnect_button.setEnabled(self.yandex_accounts.currentItem() is not None)
+
+    def _add_yandex_disk(self) -> None:
+        if self.yandex_login_requested is not None and self.yandex_login_requested():
+            self._refresh_yandex_accounts()
+
+    def _disconnect_yandex_disk(self) -> None:
+        """Удаляет локальную OAuth-сессию, не затрагивая файлы пользователя в облаке."""
+        item = self.yandex_accounts.currentItem()
+        if item is None or QMessageBox.question(
+            self,
+            _("Отключить Яндекс.Диск"),
+            _("Удалить это подключение только из Контрольки? Файлы на Диске останутся без изменений."),
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        if self.yandex_remove_requested is not None:
+            self.yandex_remove_requested(str(item.data(Qt.ItemDataRole.UserRole)))
+        self._refresh_yandex_accounts()
 
     def _update_editor_choice_state(self, use_custom: bool) -> None:
         self.custom_editor_controls.setVisible(use_custom)

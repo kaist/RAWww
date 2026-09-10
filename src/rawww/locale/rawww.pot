@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-25 19:05+0300\n"
+"POT-Creation-Date: 2026-09-10 19:42+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -84,7 +84,40 @@ msgstr ""
 msgid "Свернуть ленту превью"
 msgstr ""
 
+msgid "Рисовать красным"
+msgstr ""
+
+msgid "Рисовать жёлтым"
+msgstr ""
+
+msgid "Рисовать зелёным"
+msgstr ""
+
+msgid "Рисовать синим"
+msgstr ""
+
+msgid "Стереть аннотацию"
+msgstr ""
+
+msgid "Текстовая метка"
+msgstr ""
+
+msgid "Записать аудиокомментарий"
+msgstr ""
+
 msgid "Воспроизвести / пауза (Пробел)"
+msgstr ""
+
+msgid "Закрыть"
+msgstr ""
+
+msgid "Запишите комментарий к этой фотографии"
+msgstr ""
+
+msgid "Запись"
+msgstr ""
+
+msgid "Удалить аудиокомментарий"
 msgstr ""
 
 msgid "Развернуть ленту превью"
@@ -100,6 +133,9 @@ msgid "Показать фото с этим лицом"
 msgstr ""
 
 msgid "Добавить лицо в набор"
+msgstr ""
+
+msgid "Стоп"
 msgstr ""
 
 msgid "Снять все метки"
@@ -163,6 +199,9 @@ msgid "Удалить выбранную папку из избранного и
 msgstr ""
 
 msgid "Добавить текущую папку в избранное"
+msgstr ""
+
+msgid "Удалить выбранную папку из избранного"
 msgstr ""
 
 msgid "Все рейтинги"
@@ -473,6 +512,74 @@ msgid "Не удалось удалить:\n"
 msgstr ""
 
 #, python-brace-format
+msgid "Яндекс.Диск: {account}"
+msgstr ""
+
+msgid "Яндекс.Диск"
+msgstr ""
+
+msgid "Загрузка…"
+msgstr ""
+
+msgid "Имя новой папки:"
+msgstr ""
+
+msgid "Скопировать на компьютер…"
+msgstr ""
+
+msgid "Переместить на компьютер…"
+msgstr ""
+
+msgid "Копировать на Яндекс.Диске…"
+msgstr ""
+
+msgid "Переместить на Яндекс.Диске…"
+msgstr ""
+
+msgid "Новое имя:"
+msgstr ""
+
+msgid "Переместить"
+msgstr ""
+
+msgid "Копировать"
+msgstr ""
+
+msgid "Полный путь назначения на Диске:"
+msgstr ""
+
+msgid "Переместить выбранные объекты Яндекс.Диска в корзину?"
+msgstr ""
+
+msgid "Папка назначения"
+msgstr ""
+
+#, python-brace-format
+msgid "Файл уже существует: {path}"
+msgstr ""
+
+msgid "Перемещение из Яндекс.Диска"
+msgstr ""
+
+msgid "Копирование из Яндекс.Диска"
+msgstr ""
+
+msgid "Перемещение между Яндекс.Дисками"
+msgstr ""
+
+msgid "Копирование между Яндекс.Дисками"
+msgstr ""
+
+msgid "Перемещение на Яндекс.Диск"
+msgstr ""
+
+msgid "Копирование на Яндекс.Диск"
+msgstr ""
+
+msgid "Операция с Яндекс.Диском"
+msgstr ""
+
+#, python-brace-format
 msgid ""
 "Съёмный носитель\n"
 "{label}"
@@ -753,6 +860,17 @@ msgstr ""
 msgid " (выделено: {n})"
 msgstr ""
 
+msgid "Чтение папки Яндекс.Диска…"
+msgstr ""
+
+#, python-brace-format
+msgid "Предзагрузка 1920: {done}/{total}"
+msgstr ""
+
+#, python-brace-format
+msgid "Миниатюры Яндекс.Диска: {done}/{total}"
+msgstr ""
+
 #, python-brace-format
 msgid "Отправка: {done}/{total}"
 msgstr ""
@@ -826,9 +944,6 @@ msgid "Лицо добавлено в набор."
 msgstr ""
 
 msgid "Наборы лиц"
-msgstr ""
-
-msgid "Закрыть"
 msgstr ""
 
 msgid "Добавьте лицо, нажав «В набор» на фотографии."
@@ -933,6 +1048,18 @@ msgstr ""
 msgid "Позже"
 msgstr ""
 
+msgid "Не настроен публичный client_id OAuth для Яндекс.Диска."
+msgstr ""
+
+msgid "Вход в Яндекс.Диск"
+msgstr ""
+
+msgid "Введите код, показанный Яндексом в браузере:"
+msgstr ""
+
+msgid "Яндекс.Диск подключён."
+msgstr ""
+
 msgid "Одна из выбранных карт больше недоступна."
 msgstr ""
 
@@ -1033,9 +1160,6 @@ msgstr ""
 msgid "Очистить"
 msgstr ""
 
-msgid "Копировать"
-msgstr ""
-
 msgid "Поведение"
 msgstr ""
 
@@ -1043,6 +1167,9 @@ msgid "Коды замен"
 msgstr ""
 
 msgid "Интерфейс"
+msgstr ""
+
+msgid "Облачные диски"
 msgstr ""
 
 msgid "О приложении"
@@ -1142,6 +1269,26 @@ msgid ""
 msgstr ""
 
 msgid "Выбрать по умолчанию для JPG и RAW…"
+msgstr ""
+
+msgid ""
+"Просматривайте серверные превью и выполняйте файловые операции, не "
+"скачивая оригиналы для просмотра. EXIF, XMP и AI для облака не "
+"используются."
+msgstr ""
+
+msgid "Добавить Яндекс.Диск"
+msgstr ""
+
+msgid "Удалить подключение"
+msgstr ""
+
+msgid "Отключить Яндекс.Диск"
+msgstr ""
+
+msgid ""
+"Удалить это подключение только из Контрольки? Файлы на Диске останутся "
+"без изменений."
 msgstr ""
 
 msgid "Программы (*.exe);;Все файлы (*)"
@@ -1597,6 +1744,9 @@ msgid "Обновить"
 msgstr ""
 
 msgid "Полный экран"
+msgstr ""
+
+msgid "Аннотации"
 msgstr ""
 
 msgid "Создать новую папку"

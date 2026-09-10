@@ -31,3 +31,4 @@ src/rawww/_build_version.py
 .vscode/
 .DS_Store
 Thumbs.db
+ya_auth.txt

@@ -71,6 +71,8 @@ from PySide6.QtWidgets import (
     QTabBar,
     QTextEdit,
     QTreeView,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -101,7 +103,7 @@ from .shotsync_panel import ShotSyncPanel
 from .shotsync_selection import SelectionMarkSyncer, selection_folder, selection_root
 from .imaging import JPEG_EXTENSIONS, RAW_EXTENSIONS, DecodedImage, PixelImage, is_supported_image, is_supported_media, is_supported_video
 from .launch import target_from_argv
-from .runtime_paths import PORTABLE, data_path, filesystem_name_key, filesystem_path_key, work_path
+from .runtime_paths import PORTABLE, application_directory, data_path, filesystem_name_key, filesystem_path_key, work_path
 from .single_instance import SingleInstance
 from .process_guard import install_process_tree_guard
 from .task_lifecycle import retire_executor, wait_for_retired_executors
@@ -140,6 +142,9 @@ from .dialogs import (
 )
 from .retouch_dialog import BatchRetouchDialog
 from .workspace import WorkspaceRequest, WorkspaceState
+from .storage_sources import YandexAccounts
+from .yandex_cloud import YandexPreviewCache
+from .yandex_disk import YandexDiskClient, YandexDiskError, YandexDiskItem, YandexOAuth, YandexOAuthConfig
 from .xmp import (
     XmpChangedError,
     XmpFields,
@@ -231,6 +236,7 @@ FOLDER_POLL_INTERVAL_MS = 3_000
 VOLUME_REFRESH_INTERVAL_MS = 2_000
 SHOTSYNC_BASE_URL = "https://shotsync.ru"
 SHOTSYNC_VOLUME_KEY = "__shotsync__"
+YANDEX_VOLUME_PREFIX = "__yandex__:"
 ENABLE_EXIF_METADATA = True
 APP_NAME = _("Контролька")
 APP_VERSION = __version__
@@ -469,6 +475,9 @@ class DecodeBridge(QObject):
     folderChecked = Signal(object)
     schedulerFinished = Signal(object)
     faceSearchFinished = Signal(object)
+    cloudDirectoryLoaded = Signal(object)
+    cloudPreviewLoaded = Signal(object)
+    cloudOperationFinished = Signal(object)
 
 
 class AiProgressBar(QProgressBar):
@@ -805,6 +814,7 @@ def _local_paths_from_mime(mime: QMimeData) -> list[Path]:
 
 
 _PREFERRED_DROP_EFFECT_MIME = 'application/x-qt-windows-mime;value="Preferred DropEffect"'
+_YANDEX_CLIPBOARD_MIME = "application/x-rawww-yandex-items"
 
 
 def _mime_requests_move(mime: QMimeData) -> bool:
@@ -2628,6 +2638,9 @@ class FullView(QFrame):
     seriesToggleRequested = Signal(object)
     burstExtractRequested = Signal()
     quickMarkRequested = Signal()
+    copyRequested = Signal()
+    cutRequested = Signal()
+    pasteRequested = Signal()
     quickMarkConfigured = Signal(str, object)
     autoAdvanceChanged = Signal(bool)
     commentSubmitted = Signal(str)
@@ -3648,7 +3661,13 @@ class FullView(QFrame):
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()
-        if key in {Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_C:
+            self.copyRequested.emit()
+        elif event.modifiers() & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_X:
+            self.cutRequested.emit()
+        elif event.modifiers() & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_V:
+            self.pasteRequested.emit()
+        elif key in {Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter}:
             self.exitRequested.emit()
         elif key == Qt.Key.Key_Delete:
             self.deleteRequested.emit(bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier))
@@ -5056,6 +5075,9 @@ class Workspace(QMainWindow):
         self._rename_control: BatchJobControl | None = None
         self._rename_entry: UtilityJob | None = None
         self.file_mutation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="file-mutation")
+        self.cloud_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="yandex-thumbnail")
+        self.cloud_full_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yandex-full-preview")
+        self.cloud_operation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yandex-operation")
         self.burst_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-materialize")
         self.face_search_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="face-search")
         self._preview_cache_write_buffer: dict[
@@ -5138,6 +5160,9 @@ class Workspace(QMainWindow):
         )
         self.bridge.schedulerFinished.connect(self._on_scheduler_finished)
         self.bridge.faceSearchFinished.connect(self._on_face_search_finished)
+        self.bridge.cloudDirectoryLoaded.connect(self._on_cloud_directory_loaded)
+        self.bridge.cloudPreviewLoaded.connect(self._on_cloud_preview_loaded)
+        self.bridge.cloudOperationFinished.connect(self._on_cloud_operation_finished)
         self.items_by_path: dict[Path, QListWidgetItem] = {}
         self.all_paths: list[Path] = []
         self._custom_order: list[str] = []
@@ -5172,6 +5197,20 @@ class Workspace(QMainWindow):
         self._media_stamps: dict[Path, tuple[int, int]] = {}
         self._metadata_view_refresh_needed = False
         self.settings = _application_settings()
+        self.cloud_accounts = YandexAccounts(self.settings)
+        self.cloud_preview_cache = YandexPreviewCache(work_path() / "yandex-previews")
+        self.cloud_account_id: str | None = None
+        self.cloud_path = "disk:/"
+        self.cloud_generation = 0
+        self.cloud_items_by_key: dict[Path, YandexDiskItem] = {}
+        self.cloud_keys_by_remote_path: dict[str, Path] = {}
+        self._cloud_clients: dict[str, YandexDiskClient] = {}
+        self._cloud_preview_pending: set[tuple[int, Path, int]] = set()
+        self._cloud_tree_requests: set[tuple[int, str]] = set()
+        self._cloud_preview_totals: dict[int, int] = {THUMB_SIZE: 0, 1920: 0}
+        self._cloud_preview_completed: dict[int, set[Path]] = {THUMB_SIZE: set(), 1920: set()}
+        self._cloud_full_previews: dict[Path, QImage] = {}
+        self._cloud_full_preview_targets: set[Path] = set()
         self.transfer_manager = transfer_manager
         self.destination_paths_provider: Callable[[], list[Path]] | None = None
 
@@ -5315,6 +5354,9 @@ class Workspace(QMainWindow):
         self.full_view.seriesToggleRequested.connect(self._toggle_grid_series)
         self.full_view.burstExtractRequested.connect(self._extract_current_burst)
         self.full_view.quickMarkRequested.connect(self._apply_quick_mark)
+        self.full_view.copyRequested.connect(lambda: self._copy_file_selection(cut=False))
+        self.full_view.cutRequested.connect(lambda: self._copy_file_selection(cut=True))
+        self.full_view.pasteRequested.connect(self._paste_file_selection)
         self.full_view.markIndicatorRequested.connect(self._toggle_full_view_mark_indicator)
         self.full_view.quickMarkConfigured.connect(self._configure_quick_mark)
         self.full_view.autoAdvanceChanged.connect(self._set_auto_advance)
@@ -5372,10 +5414,15 @@ class Workspace(QMainWindow):
 
         self._create_actions()
         initial_scan_delay = 350 if defer_initial_scan else 0
-        QTimer.singleShot(initial_scan_delay, lambda: self.load_directory(self.current_dir))
+        QTimer.singleShot(initial_scan_delay, self._load_initial_local_directory)
         QTimer.singleShot(0, self._focus_grid_panel)
         QTimer.singleShot(0, self._restore_face_filter_chip)
         QTimer.singleShot(5_000, self._start_cache_maintenance)
+
+    def _load_initial_local_directory(self) -> None:
+        """Не даёт отложенному стартовому сканированию затереть уже выбранное облако."""
+        if not self.closing and self.cloud_account_id is None:
+            self.load_directory(self.current_dir)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.begin_shutdown()
@@ -5431,6 +5478,9 @@ class Workspace(QMainWindow):
         retire_executor(self.cache_flush_executor, cancel_futures=False)
         retire_executor(self.rename_executor, cancel_futures=False)
         retire_executor(self.file_mutation_executor, cancel_futures=False)
+        retire_executor(self.cloud_executor)
+        retire_executor(self.cloud_full_executor)
+        retire_executor(self.cloud_operation_executor, cancel_futures=False)
         retire_executor(self.burst_executor, cancel_futures=False)
         retire_executor(self.face_search_executor)
         retire_executor(self.cache_maintenance_executor)
@@ -5850,6 +5900,7 @@ class Workspace(QMainWindow):
         self.drive_button_layout.addWidget(self.shotsync_button)
         self._register_grid_page_focus_widget(self.shotsync_button)
 
+        self._refresh_cloud_account_buttons()
         self._refresh_volume_buttons()
 
         directory_panel = QWidget()
@@ -5953,10 +6004,99 @@ class Workspace(QMainWindow):
         self.shotsync_panel.shootingActivated.connect(self._shotsync_shooting_activated)
         self.shotsync_panel.sendFolderRequested.connect(self._shotsync_send_current_folder)
 
+        self.cloud_tree = QTreeWidget()
+        self.cloud_tree.setObjectName("directoryTree")
+        self.cloud_tree.setHeaderHidden(True)
+        self.cloud_tree.setMinimumWidth(260)
+        self.cloud_tree.itemClicked.connect(self._cloud_tree_item_clicked)
+        self.cloud_tree.itemExpanded.connect(self._cloud_tree_item_expanded)
+        self.cloud_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.cloud_tree.customContextMenuRequested.connect(self._show_cloud_tree_context_menu)
+        cloud_page = QWidget()
+        cloud_layout = QVBoxLayout(cloud_page)
+        cloud_layout.setContentsMargins(0, 0, 0, 0)
+        cloud_layout.setSpacing(4)
+        cloud_header = QHBoxLayout()
+        cloud_header.setContentsMargins(2, 0, 2, 0)
+        cloud_header.addWidget(QLabel(_("ПАПКИ")))
+        cloud_header.addStretch(1)
+        cloud_up = QToolButton()
+        cloud_up.setObjectName("directoryAction")
+        cloud_up.setIcon(_fomantic_icon("arrow-up", 20, "#e6e6e6"))
+        cloud_up.setToolTip(_("На уровень вверх"))
+        cloud_up.clicked.connect(self._go_up_cloud_directory)
+        cloud_header.addWidget(cloud_up)
+        cloud_new_folder = QToolButton()
+        cloud_new_folder.setObjectName("directoryAction")
+        cloud_new_folder.setIcon(_fomantic_icon("folder-plus", 20, "#e6e6e6"))
+        cloud_new_folder.setToolTip(_("Создать папку"))
+        cloud_new_folder.clicked.connect(self._create_cloud_folder)
+        cloud_header.addWidget(cloud_new_folder)
+        cloud_directory_panel = QWidget()
+        cloud_directory_layout = QVBoxLayout(cloud_directory_panel)
+        cloud_directory_layout.setContentsMargins(0, 0, 0, 0)
+        cloud_directory_layout.setSpacing(4)
+        cloud_directory_layout.addLayout(cloud_header)
+        cloud_directory_layout.addWidget(self.cloud_tree, 1)
+
+        cloud_favorites = QWidget()
+        cloud_favorites.setObjectName("favoritesPanel")
+        cloud_favorites_layout = QVBoxLayout(cloud_favorites)
+        cloud_favorites_layout.setContentsMargins(0, 2, 0, 0)
+        cloud_favorites_layout.setSpacing(4)
+        cloud_favorites_header = QHBoxLayout()
+        cloud_favorites_header.setContentsMargins(2, 0, 2, 0)
+        cloud_favorites_title = QLabel(_("ИЗБРАННОЕ"))
+        cloud_favorites_title.setObjectName("favoritesTitle")
+        cloud_favorites_header.addWidget(cloud_favorites_title)
+        cloud_favorites_header.addStretch(1)
+        cloud_favorites_remove = FavoritesTrashButton()
+        cloud_favorites_remove.setIcon(_fomantic_icon("trash", 13, "#a8a8a8"))
+        cloud_favorites_remove.setIconSize(QSize(13, 13))
+        cloud_favorites_remove.setToolTip(
+            _("Удалить выбранную папку из избранного или перетащить её сюда")
+        )
+        cloud_favorites_remove.clicked.connect(self._remove_cloud_favorite)
+        cloud_favorites_remove.favoriteDropped.connect(self._remove_favorite)
+        cloud_favorites_header.addWidget(cloud_favorites_remove)
+        cloud_favorites_add = QToolButton()
+        cloud_favorites_add.setObjectName("favoritesAdd")
+        cloud_favorites_add.setIcon(_fomantic_icon("plus", 13))
+        cloud_favorites_add.setToolTip(_("Добавить текущую папку в избранное"))
+        cloud_favorites_add.clicked.connect(self._add_cloud_favorite)
+        cloud_favorites_header.addWidget(cloud_favorites_add)
+        cloud_favorites_layout.addLayout(cloud_favorites_header)
+        self.cloud_favorites_list = FavoritesList()
+        self.cloud_favorites_list.itemActivated.connect(self._open_favorite)
+        self.cloud_favorites_list.itemClicked.connect(self._open_favorite)
+        self.cloud_favorites_list.foldersDropped.connect(self._add_folders_to_favorites)
+        self.cloud_favorites_list.model().rowsMoved.connect(
+            lambda *_: self._save_favorites(self.cloud_favorites_list)
+        )
+        cloud_favorites_layout.addWidget(self.cloud_favorites_list, 1)
+        self._load_favorites()
+
+        self.cloud_favorites_splitter = FavoritesSplitter(Qt.Orientation.Vertical)
+        self.cloud_favorites_splitter.setObjectName("favoritesSplitter")
+        self.cloud_favorites_splitter.setChildrenCollapsible(False)
+        self.cloud_favorites_splitter.addWidget(cloud_directory_panel)
+        self.cloud_favorites_splitter.addWidget(cloud_favorites)
+        if self.transfer_manager is not None:
+            self.cloud_transfer_queue_panel = TransferQueuePanel(self.transfer_manager)
+            self.cloud_favorites_splitter.addWidget(self.cloud_transfer_queue_panel)
+        self.cloud_favorites_splitter.setStretchFactor(0, 1)
+        self.cloud_favorites_splitter.setStretchFactor(1, 0)
+        if self.cloud_favorites_splitter.count() == 3:
+            self.cloud_favorites_splitter.setStretchFactor(2, 0)
+        self.cloud_favorites_splitter.setSizes([500, 140])
+        cloud_layout.addWidget(self.cloud_favorites_splitter, 1)
+
         self.sidebar_stack.addWidget(local_page)
         self.sidebar_stack.addWidget(self.shotsync_panel)
+        self.sidebar_stack.addWidget(cloud_page)
         self.sidebar_stack.setCurrentWidget(local_page)
         self._sidebar_local_page = local_page
+        self._sidebar_cloud_page = cloud_page
 
         sidebar_layout.addWidget(self.sidebar_stack, 1)
 
@@ -6475,7 +6615,12 @@ class Workspace(QMainWindow):
 
     def _show_quick_transfer(self, *, move: bool) -> None:
         """Запрашивает цель быстрого копирования или перемещения выделения."""
-        sources = [path for path in self._file_panel_paths() if path.exists()]
+        candidates = self._file_panel_paths()
+        sources = (
+            [path for path in candidates if path in self.cloud_items_by_key]
+            if getattr(self, "cloud_account_id", None) is not None
+            else [path for path in candidates if path.exists()]
+        )
         if not sources:
             return
         identifier = "quick_move" if move else "quick_copy"
@@ -6505,6 +6650,10 @@ class Workspace(QMainWindow):
     def _quick_transfer_to(self, sources: list[Path], destination: Path, move: bool, update_recent: bool) -> None:
         if update_recent:
             self._remember_quick_transfer_destination(destination)
+        if getattr(self, "cloud_account_id", None) is not None:
+            items = [self.cloud_items_by_key[path] for path in sources if path in self.cloud_items_by_key]
+            self._download_cloud_items(items, destination, move=move)
+            return
         self._receive_dropped_paths(
             sources,
             destination,
@@ -6523,9 +6672,18 @@ class Workspace(QMainWindow):
         return widget is not None and (widget is self.grid_page or self.grid_page.isAncestorOf(widget))
 
     def _is_directory_focus_widget(self, widget: QWidget | None) -> bool:
-        return widget is not None and (widget is self.dir_tree or self.dir_tree.isAncestorOf(widget))
+        if widget is None:
+            return False
+        if getattr(self, "cloud_account_id", None) is not None:
+            return widget is self.cloud_tree or self.cloud_tree.isAncestorOf(widget)
+        return widget is self.dir_tree or self.dir_tree.isAncestorOf(widget)
 
     def _focus_directory_panel(self) -> None:
+        if getattr(self, "cloud_account_id", None) is not None:
+            if self.cloud_tree.currentItem() is None and self.cloud_tree.topLevelItemCount():
+                self.cloud_tree.setCurrentItem(self.cloud_tree.topLevelItem(0))
+            self.cloud_tree.setFocus(Qt.FocusReason.TabFocusReason)
+            return
         index = self.dir_tree.currentIndex()
         if not index.isValid():
             index = self.dir_model.index(str(self.current_dir))
@@ -6655,11 +6813,17 @@ class Workspace(QMainWindow):
                         return True
                     if event.key() == Qt.Key.Key_D:
                         if self._is_directory_focus_widget(focus_widget):
-                            self.dir_tree.clearSelection()
+                            (self.cloud_tree if self.cloud_account_id is not None else self.dir_tree).clearSelection()
                         else:
                             self.grid.clearSelection()
                         return True
                 if event.key() == Qt.Key.Key_Delete and self._is_directory_focus_widget(focus_widget):
+                    if self.cloud_account_id is not None:
+                        item = self.cloud_tree.currentItem()
+                        remote = item.data(0, Qt.ItemDataRole.UserRole + 2) if item else None
+                        if isinstance(remote, YandexDiskItem):
+                            self._delete_cloud_items([remote])
+                        return True
                     index = self.dir_tree.currentIndex()
                     if index.isValid():
                         self._delete_paths(
@@ -6673,6 +6837,11 @@ class Workspace(QMainWindow):
                     self._toggle_primary_panel_focus()
                     return True
                 if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self._is_directory_focus_widget(focus_widget):
+                    if self.cloud_account_id is not None:
+                        item = self.cloud_tree.currentItem()
+                        if item is not None:
+                            self._cloud_tree_item_clicked(item, 0)
+                        return True
                     index = self.dir_tree.currentIndex()
                     if index.isValid():
                         self._directory_selected(index)
@@ -6877,6 +7046,26 @@ class Workspace(QMainWindow):
     def _favorite_path_key(path: Path) -> str:
         return filesystem_path_key(path)
 
+    @staticmethod
+    def _cloud_location_value(account_id: str, remote_path: str) -> str:
+        """Кодирует облачный путь вместе с аккаунтом для сессии и избранного."""
+        return f"yandex://{account_id}/{remote_path.removeprefix('disk:/')}"
+
+    @staticmethod
+    def _parse_cloud_location(value: str) -> tuple[str, str] | None:
+        if not value.startswith("yandex://"):
+            return None
+        account_id, separator, relative = value.removeprefix("yandex://").partition("/")
+        if not separator or not account_id:
+            return None
+        return account_id, f"disk:/{relative}" if relative else "disk:/"
+
+    def _favorite_value_key(self, value: str) -> str:
+        cloud = self._parse_cloud_location(value)
+        if cloud is not None:
+            return self._cloud_location_value(*cloud)
+        return self._favorite_path_key(Path(value).expanduser())
+
     def _default_favorite_paths(self) -> list[Path]:
         locations = (
             QStandardPaths.StandardLocation.DocumentsLocation,
@@ -6898,29 +7087,76 @@ class Workspace(QMainWindow):
         else:
             raw_paths = [str(path) for path in self._default_favorite_paths()]
             self.settings.setValue(key, raw_paths)
-        paths: list[Path] = []
+        values = [str(value) for value in raw_paths]
+        # Переносит избранное ранней реализации в единый список без потери путей.
+        for account in self.cloud_accounts.list():
+            legacy_key = f"yandex_disk/accounts/{account.id}/favorites"
+            legacy = self.settings.value(legacy_key, "[]", str)
+            try:
+                remote_paths = json.loads(legacy)
+            except (TypeError, ValueError):
+                remote_paths = []
+            values.extend(
+                self._cloud_location_value(account.id, str(remote_path))
+                for remote_path in remote_paths
+                if str(remote_path).startswith("disk:/")
+            )
+            if remote_paths:
+                self.settings.remove(legacy_key)
+        accepted: list[str] = []
         seen: set[str] = set()
-        for raw_path in raw_paths:
-            path = Path(str(raw_path)).expanduser()
-            path_key = self._favorite_path_key(path)
-            if path.is_dir() and path_key not in seen:
-                paths.append(path)
-                seen.add(path_key)
-        self._set_favorites(paths)
+        account_ids = {account.id for account in self.cloud_accounts.list()}
+        for value in values:
+            cloud = self._parse_cloud_location(value)
+            if cloud is not None:
+                if cloud[0] not in account_ids:
+                    continue
+            elif not Path(value).expanduser().is_dir():
+                continue
+            value_key = self._favorite_value_key(value)
+            if value_key not in seen:
+                accepted.append(value)
+                seen.add(value_key)
+        self._set_favorites(accepted)
+        self.settings.setValue(key, accepted)
 
-    def _set_favorites(self, paths: list[Path]) -> None:
-        self.favorites_list.clear()
-        for path in paths:
-            item = QListWidgetItem(self.volume_icon_provider.icon(QFileInfo(str(path))), path.name or str(path))
-            item.setData(Qt.ItemDataRole.UserRole, str(path))
-            item.setToolTip(str(path))
-            self.favorites_list.addItem(item)
+    def _set_favorites(self, values: list[str]) -> None:
+        lists = [self.favorites_list]
+        if hasattr(self, "cloud_favorites_list"):
+            lists.append(self.cloud_favorites_list)
+        accounts = {account.id: account.title for account in self.cloud_accounts.list()}
+        for favorite_list in lists:
+            favorite_list.clear()
+            for value in values:
+                cloud = self._parse_cloud_location(value)
+                if cloud is not None:
+                    account_id, remote_path = cloud
+                    folder = remote_path.rstrip("/").rpartition("/")[2]
+                    account_title = accounts.get(account_id, _("Яндекс.Диск"))
+                    title = f"{folder or account_title} · {account_title}"
+                    icon = _folder_icon_provider().icon(QFileIconProvider.IconType.Folder)
+                    tooltip = f"{account_title}\n{remote_path}"
+                else:
+                    path = Path(value).expanduser()
+                    title = path.name or str(path)
+                    icon = self.volume_icon_provider.icon(QFileInfo(str(path)))
+                    tooltip = str(path)
+                item = QListWidgetItem(icon, title)
+                item.setData(Qt.ItemDataRole.UserRole, value)
+                item.setToolTip(tooltip)
+                favorite_list.addItem(item)
 
-    def _save_favorites(self) -> None:
+    def _save_favorites(self, source: QListWidget | None = None) -> None:
+        source = source or self.favorites_list
+        values = [
+            str(source.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(source.count())
+        ]
         self.settings.setValue(
             "sidebar/favorite_paths",
-            [self.favorites_list.item(row).data(Qt.ItemDataRole.UserRole) for row in range(self.favorites_list.count())],
+            values,
         )
+        self._set_favorites(values)
 
     def _restore_favorites_height(self) -> None:
         if not hasattr(self, "favorites_splitter"):
@@ -6953,10 +7189,10 @@ class Workspace(QMainWindow):
 
     def _favorite_item_for_path(self, path: Path) -> QListWidgetItem | None:
         """Ищет пункт избранного с тем же путём, что и ``path``."""
-        path_key = self._favorite_path_key(path)
+        path_key = self._favorite_value_key(str(path))
         for row in range(self.favorites_list.count()):
             item = self.favorites_list.item(row)
-            if self._favorite_path_key(Path(item.data(Qt.ItemDataRole.UserRole))) == path_key:
+            if self._favorite_value_key(str(item.data(Qt.ItemDataRole.UserRole))) == path_key:
                 return item
         return None
 
@@ -6994,7 +7230,13 @@ class Workspace(QMainWindow):
             self._save_favorites()
 
     def _open_favorite(self, item: QListWidgetItem) -> None:
-        path = Path(item.data(Qt.ItemDataRole.UserRole))
+        value = str(item.data(Qt.ItemDataRole.UserRole))
+        cloud = self._parse_cloud_location(value)
+        if cloud is not None:
+            account_id, remote_path = cloud
+            self._activate_yandex_account(account_id, remote_path)
+            return
+        path = Path(value)
         if path.is_dir():
             self.load_directory(path)
             self._reveal_favorite_in_tree(path)
@@ -7019,13 +7261,16 @@ class Workspace(QMainWindow):
             self._remove_favorite(str(item.data(Qt.ItemDataRole.UserRole)))
 
     def _remove_favorite(self, path_text: str) -> None:
-        path_key = self._favorite_path_key(Path(path_text))
-        for row in range(self.favorites_list.count()):
-            item = self.favorites_list.item(row)
-            if self._favorite_path_key(Path(item.data(Qt.ItemDataRole.UserRole))) == path_key:
-                self.favorites_list.takeItem(row)
-                self._save_favorites()
-                break
+        path_key = self._favorite_value_key(path_text)
+        values = [
+            str(self.favorites_list.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(self.favorites_list.count())
+            if self._favorite_value_key(
+                str(self.favorites_list.item(row).data(Qt.ItemDataRole.UserRole))
+            ) != path_key
+        ]
+        self.settings.setValue("sidebar/favorite_paths", values)
+        self._set_favorites(values)
 
     def _show_directory_context_menu(self, position: QPoint) -> None:
         """Строит контекстное меню папки с учётом корня и текущего выбора."""
@@ -7068,6 +7313,11 @@ class Workspace(QMainWindow):
 
     def _show_grid_context_menu(self, path: Path, global_position: QPoint) -> None:
         """Показывает меню папки или нативное меню файла для карточки сетки."""
+        if getattr(self, "cloud_account_id", None) is not None and path in self.cloud_items_by_key:
+            menu = QMenu(self.grid)
+            self._populate_cloud_context_menu(menu, self.cloud_items_by_key[path])
+            menu.exec(global_position)
+            return
         if isinstance(path, BurstFrame):
             menu = QMenu(self.grid)
             if path in self.burst_materialized:
@@ -7140,6 +7390,12 @@ class Workspace(QMainWindow):
         return default_permanent != shift_pressed
 
     def _delete_grid_selection(self, shift_pressed: bool) -> None:
+        if getattr(self, "cloud_account_id", None) is not None:
+            self._delete_cloud_items(
+                [self.cloud_items_by_key[path] for path in self._selected_paths()
+                 if path in self.cloud_items_by_key]
+            )
+            return
         self._delete_paths(
             [path for path in self._selected_paths() if isinstance(path, Path)],
             permanent=self._delete_permanently_for_shortcut(shift_pressed),
@@ -7147,6 +7403,9 @@ class Workspace(QMainWindow):
 
     def _delete_full_view_photo(self, shift_pressed: bool) -> None:
         """Удаляет открытый кадр, не полагаясь на оставшееся в гриде выделение."""
+        if getattr(self, "cloud_account_id", None) is not None and self.current_path in self.cloud_items_by_key:
+            self._delete_cloud_items([self.cloud_items_by_key[self.current_path]])
+            return
         if self.current_path is None or isinstance(self.current_path, BurstFrame):
             return
         self._delete_paths(
@@ -7160,6 +7419,20 @@ class Workspace(QMainWindow):
             return [self.current_path] if isinstance(self.current_path, Path) else []
         focus = QApplication.focusWidget()
         if self._is_directory_focus_widget(focus):
+            if getattr(self, "cloud_account_id", None) is not None:
+                result: list[Path] = []
+                for item in self.cloud_tree.selectedItems():
+                    remote_path = str(item.data(0, Qt.ItemDataRole.UserRole) or "")
+                    key = self.cloud_keys_by_remote_path.get(remote_path)
+                    remote = item.data(0, Qt.ItemDataRole.UserRole + 2)
+                    if key is None and isinstance(remote, YandexDiskItem):
+                        digest = sha1(remote.path.encode("utf-8")).hexdigest()
+                        key = work_path() / "yandex-items" / str(self.cloud_account_id) / digest / remote.name
+                        self.cloud_items_by_key[key] = remote
+                        self.cloud_keys_by_remote_path[remote.path] = key
+                    if key is not None:
+                        result.append(key)
+                return result
             selection = self.dir_tree.selectionModel()
             if selection is None:
                 return []
@@ -7173,6 +7446,10 @@ class Workspace(QMainWindow):
     def _paste_destination(self) -> Path:
         focus = QApplication.focusWidget()
         if self._is_directory_focus_widget(focus):
+            if getattr(self, "cloud_account_id", None) is not None:
+                item = self.cloud_tree.currentItem()
+                remote_path = str(item.data(0, Qt.ItemDataRole.UserRole) or "") if item else ""
+                return self.cloud_keys_by_remote_path.get(remote_path, self.current_dir)
             index = self.dir_tree.currentIndex()
             if index.isValid():
                 candidate = Path(self.dir_model.filePath(index))
@@ -7181,7 +7458,30 @@ class Workspace(QMainWindow):
         return self.current_dir
 
     def _copy_file_selection(self, *, cut: bool) -> None:
-        paths = [path for path in self._file_panel_paths() if path.exists()]
+        candidates = self._file_panel_paths()
+        if getattr(self, "cloud_account_id", None) is not None:
+            items = [self.cloud_items_by_key[path] for path in candidates if path in self.cloud_items_by_key]
+            if not items:
+                return
+            payload = {
+                "account": self.cloud_account_id,
+                "cut": cut,
+                "items": [
+                    {
+                        "path": item.path, "name": item.name, "is_dir": item.is_dir,
+                        "size": item.size, "modified": item.modified,
+                        "preview_url": item.preview_url, "mime_type": item.mime_type,
+                        "resource_id": item.resource_id, "revision": item.revision,
+                    }
+                    for item in items
+                ],
+            }
+            mime = QMimeData()
+            mime.setData(_YANDEX_CLIPBOARD_MIME, json.dumps(payload).encode("utf-8"))
+            mime.setData(_PREFERRED_DROP_EFFECT_MIME, (2 if cut else 1).to_bytes(4, "little"))
+            QApplication.clipboard().setMimeData(mime)
+            return
+        paths = [path for path in candidates if path.exists()]
         if not paths:
             return
         mime = QMimeData()
@@ -7193,6 +7493,24 @@ class Workspace(QMainWindow):
 
     def _paste_file_selection(self) -> None:
         mime = QApplication.clipboard().mimeData()
+        if mime.hasFormat(_YANDEX_CLIPBOARD_MIME):
+            try:
+                payload = json.loads(bytes(mime.data(_YANDEX_CLIPBOARD_MIME)).decode("utf-8"))
+                items = [YandexDiskItem(**item) for item in payload.get("items") or []]
+                source_account = str(payload.get("account") or "")
+            except (TypeError, ValueError):
+                return
+            move = bool(payload.get("cut"))
+            if getattr(self, "cloud_account_id", None) is not None:
+                self._paste_cloud_items_to_cloud(items, source_account, move=move)
+            else:
+                self._download_cloud_items(
+                    items,
+                    self._paste_destination(),
+                    move=move,
+                    account_id=source_account,
+                )
+            return
         paths = _local_paths_from_mime(mime)
         if not paths:
             return
@@ -7241,6 +7559,14 @@ class Workspace(QMainWindow):
         _consumers_released: bool = False,
     ) -> None:
         """Копирует внешние файлы или переносит внутреннее перетаскивание в цель."""
+        if getattr(self, "cloud_account_id", None) is not None:
+            remote = self.cloud_items_by_key.get(destination) if destination is not None else None
+            self._upload_paths_to_cloud(
+                paths,
+                move=action == Qt.DropAction.MoveAction,
+                remote_root=remote.path if remote is not None and remote.is_dir else self.cloud_path,
+            )
+            return
         if destination is None:
             destination = self.current_dir
         if not destination.is_dir():
@@ -7634,6 +7960,780 @@ class Workspace(QMainWindow):
         elif self.stack.currentWidget() is self.full_view and self.current_path is not None:
             self._refresh_full_view_navigation(self.current_path)
 
+    def _yandex_client(self, account_id: str) -> YandexDiskClient:
+        """Возвращает REST-клиент нужного аккаунта с общей публичной OAuth-конфигурацией."""
+        client = self._cloud_clients.get(account_id)
+        if client is not None:
+            return client
+        client_id = self.settings.value("yandex_disk/client_id", "", str)
+        if not client_id:
+            raise YandexDiskError("Не настроен публичный client_id OAuth для Яндекс.Диска.")
+        config = YandexOAuthConfig(
+            client_id,
+            self.settings.value(
+                "yandex_disk/redirect_uri",
+                "https://oauth.yandex.ru/verification_code",
+                str,
+            ),
+        )
+        client = YandexDiskClient(YandexOAuth(self.settings, config, account_id))
+        self._cloud_clients[account_id] = client
+        return client
+
+    def _refresh_cloud_account_buttons(self) -> None:
+        """Пересобирает кнопки всех подключённых Яндекс.Дисков в панели томов."""
+        if not hasattr(self, "drive_buttons"):
+            return
+        for button in list(self.drive_buttons.buttons()):
+            if str(button.property("volumeKey") or "").startswith(YANDEX_VOLUME_PREFIX):
+                self.drive_buttons.removeButton(button)
+                self.drive_button_layout.removeWidget(button)
+                button.deleteLater()
+        account_ids = {account.id for account in self.cloud_accounts.list()}
+        if self.cloud_account_id and self.cloud_account_id not in account_ids:
+            self._leave_cloud_source()
+            QTimer.singleShot(0, lambda: self.load_directory(self.current_dir))
+        for account in self.cloud_accounts.list():
+            button = QToolButton()
+            button.setObjectName("driveButton")
+            button.setCheckable(True)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            button.setIconSize(QSize(16, 16))
+            button.setIcon(_fomantic_icon("cloud", 16, "#8fb8ff"))
+            button.setText(account.title)
+            button.setToolTip(_("Яндекс.Диск: {account}").format(account=account.title))
+            button.setProperty("volumeKey", f"{YANDEX_VOLUME_PREFIX}{account.id}")
+            button.clicked.connect(
+                lambda _checked=False, account_id=account.id: self._activate_yandex_account(account_id)
+            )
+            self.drive_buttons.addButton(button)
+            self.drive_button_layout.addWidget(button)
+            self._register_grid_page_focus_widget(button)
+            button.setChecked(account.id == self.cloud_account_id)
+
+    def _activate_yandex_account(self, account_id: str, remote_path: str = "disk:/") -> None:
+        """Показывает облачный источник в тех же дереве, сетке и Full View."""
+        self._deactivate_shotsync()
+        self.cloud_account_id = account_id
+        self.cloud_path = remote_path
+        self.sidebar_stack.setCurrentWidget(self._sidebar_cloud_page)
+        for button in self.drive_buttons.buttons():
+            key = str(button.property("volumeKey") or "")
+            button.setChecked(key == f"{YANDEX_VOLUME_PREFIX}{account_id}")
+        account = next((item for item in self.cloud_accounts.list() if item.id == account_id), None)
+        self.cloud_tree.clear()
+        root = QTreeWidgetItem([account.title if account else _("Яндекс.Диск")])
+        root.setIcon(0, _fomantic_icon("cloud", 16, "#8fb8ff"))
+        root.setData(0, Qt.ItemDataRole.UserRole, "disk:/")
+        root.setData(0, Qt.ItemDataRole.UserRole + 1, False)
+        root.addChild(QTreeWidgetItem([_("Загрузка…")]))
+        self.cloud_tree.addTopLevelItem(root)
+        root.setExpanded(True)
+        self._refresh_cloud_favorites()
+        self._ensure_cloud_tree_path(remote_path)
+        self._load_cloud_directory(remote_path)
+
+    def _leave_cloud_source(self) -> None:
+        """Инвалидирует поздние сетевые ответы перед возвратом к локальной папке."""
+        if self.cloud_account_id is None:
+            return
+        self.cloud_generation += 1
+        self.cloud_account_id = None
+        self.cloud_items_by_key.clear()
+        self.cloud_keys_by_remote_path.clear()
+        self._cloud_preview_pending.clear()
+        self._cloud_preview_totals = {THUMB_SIZE: 0, 1920: 0}
+        self._cloud_preview_completed = {THUMB_SIZE: set(), 1920: set()}
+        self._cloud_full_previews.clear()
+        self._cloud_full_preview_targets.clear()
+        if hasattr(self, "sidebar_stack"):
+            self.sidebar_stack.setCurrentWidget(self._sidebar_local_page)
+
+    def _cloud_tree_item(self, remote_path: str) -> QTreeWidgetItem | None:
+        pending = [self.cloud_tree.topLevelItem(index) for index in range(self.cloud_tree.topLevelItemCount())]
+        while pending:
+            item = pending.pop()
+            if item is None:
+                continue
+            if item.data(0, Qt.ItemDataRole.UserRole) == remote_path:
+                return item
+            pending.extend(item.child(index) for index in range(item.childCount()))
+        return None
+
+    def _cloud_tree_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if path:
+            self._load_cloud_directory(str(path))
+
+    def _cloud_tree_item_expanded(self, item: QTreeWidgetItem) -> None:
+        path = item.data(0, Qt.ItemDataRole.UserRole)
+        if path and not item.data(0, Qt.ItemDataRole.UserRole + 1):
+            self._request_cloud_directory(str(path), tree_only=True)
+
+    def _go_up_cloud_directory(self) -> None:
+        if self.cloud_path == "disk:/":
+            return
+        relative = self.cloud_path.removeprefix("disk:").rstrip("/")
+        parent = relative.rpartition("/")[0]
+        self._load_cloud_directory(f"disk:{parent or '/'}")
+
+    def _load_cloud_directory(self, remote_path: str) -> None:
+        """Очищает локальное состояние и асинхронно открывает каталог Диска."""
+        if self.cloud_account_id is None:
+            return
+        self.cloud_generation += 1
+        self.cloud_path = remote_path
+        account = next(
+            (item for item in self.cloud_accounts.list() if item.id == self.cloud_account_id),
+            None,
+        )
+        folder_name = remote_path.rstrip("/").rpartition("/")[2]
+        self.setWindowTitle(folder_name or (account.title if account else _("Яндекс.Диск")))
+        self._select_cloud_tree_path(remote_path)
+        self.scheduler.cancel_pending()
+        self.populate_timer.stop()
+        self.thumb_timer.stop()
+        self.grid_full_request_timer.stop()
+        self.full_request_timer.stop()
+        self.folder_change_timer.stop()
+        self.cloud_items_by_key.clear()
+        self.cloud_keys_by_remote_path.clear()
+        self._cloud_full_previews.clear()
+        self._cloud_full_preview_targets.clear()
+        self._cloud_preview_totals = {THUMB_SIZE: 0, 1920: 0}
+        self._cloud_preview_completed = {THUMB_SIZE: set(), 1920: set()}
+        self.items_by_path.clear()
+        self.all_paths = []
+        self.paths = []
+        self.view_paths = []
+        self.photo_details = {}
+        self.series_cards = {}
+        self.grid.clear()
+        self.current_path = None
+        self.view_generation += 1
+        self.stack.setCurrentWidget(self.grid_page)
+        self.grid.setDragEnabled(False)
+        self.ai_button.setEnabled(False)
+        self.xmp_button.setEnabled(False)
+        self.utilities_button.setEnabled(False)
+        self.meta_bar.setEnabled(False)
+        self.full_view.meta_bar.setEnabled(False)
+        self._request_cloud_directory(remote_path, tree_only=False)
+
+    def _select_cloud_tree_path(self, remote_path: str) -> None:
+        """Синхронизирует дерево с каталогом, открытым из карточки или кнопки вверх."""
+        item = self._cloud_tree_item(remote_path) or self._ensure_cloud_tree_path(remote_path)
+        if item is None:
+            return
+        parent = item.parent()
+        while parent is not None:
+            parent.setExpanded(True)
+            parent = parent.parent()
+        self.cloud_tree.setCurrentItem(item)
+        self.cloud_tree.scrollToItem(item, QAbstractItemView.ScrollHint.EnsureVisible)
+
+    def _ensure_cloud_tree_path(self, remote_path: str) -> QTreeWidgetItem | None:
+        """Восстанавливает цепочку избранного пути, ещё не раскрытую ленивым деревом."""
+        root = self.cloud_tree.topLevelItem(0)
+        if root is None or not remote_path.startswith("disk:/"):
+            return None
+        current = root
+        current_path = "disk:/"
+        for name in (part for part in remote_path.removeprefix("disk:/").split("/") if part):
+            next_path = self._cloud_child_path(current_path, name)
+            child = next(
+                (current.child(index) for index in range(current.childCount())
+                 if current.child(index).data(0, Qt.ItemDataRole.UserRole) == next_path),
+                None,
+            )
+            if child is None:
+                child = QTreeWidgetItem([name])
+                child.setIcon(0, _folder_icon_provider().icon(QFileIconProvider.IconType.Folder))
+                child.setData(0, Qt.ItemDataRole.UserRole, next_path)
+                child.setData(0, Qt.ItemDataRole.UserRole + 1, False)
+                child.addChild(QTreeWidgetItem([_("Загрузка…")]))
+                current.addChild(child)
+            current.setExpanded(True)
+            current, current_path = child, next_path
+        return current
+
+    def _refresh_cloud_favorites(self) -> None:
+        self._load_favorites()
+
+    def _add_cloud_favorite(self) -> None:
+        if self.cloud_account_id is None:
+            return
+        value = self._cloud_location_value(self.cloud_account_id, self.cloud_path)
+        values = [
+            str(self.favorites_list.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(self.favorites_list.count())
+        ]
+        if self._favorite_value_key(value) not in {
+            self._favorite_value_key(existing) for existing in values
+        }:
+            values.append(value)
+            self.settings.setValue("sidebar/favorite_paths", values)
+            self._set_favorites(values)
+
+    def _remove_cloud_favorite(self) -> None:
+        item = self.cloud_favorites_list.currentItem()
+        if item is not None:
+            self._remove_favorite(str(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _request_cloud_directory(self, remote_path: str, *, tree_only: bool) -> None:
+        account_id = self.cloud_account_id
+        if account_id is None:
+            return
+        generation = self.cloud_generation
+        request_key = (generation, remote_path)
+        if tree_only and request_key in self._cloud_tree_requests:
+            return
+        self._cloud_tree_requests.add(request_key)
+        self._refresh_status_panel()
+        try:
+            client = self._yandex_client(account_id)
+        except YandexDiskError as exc:
+            self.bridge.cloudDirectoryLoaded.emit(
+                {"account": account_id, "generation": generation, "path": remote_path,
+                 "tree_only": tree_only, "items": None, "error": str(exc)}
+            )
+            return
+        future = self.cloud_executor.submit(client.list_directory, remote_path)
+
+        def finished(done: Future) -> None:
+            try:
+                items, error = done.result(), ""
+            except Exception as exc:  # ошибка будет показана только актуальной вкладке
+                items, error = None, str(exc)
+            self.bridge.cloudDirectoryLoaded.emit(
+                {"account": account_id, "generation": generation, "path": remote_path,
+                 "tree_only": tree_only, "items": items, "error": error}
+            )
+
+        future.add_done_callback(finished)
+
+    def _on_cloud_directory_loaded(self, result: dict) -> None:
+        request_key = (int(result["generation"]), str(result["path"]))
+        self._cloud_tree_requests.discard(request_key)
+        if (
+            self.closing
+            or result["account"] != self.cloud_account_id
+            or result["generation"] != self.cloud_generation
+        ):
+            return
+        if result["error"]:
+            self._refresh_status_panel()
+            QMessageBox.warning(self, _("Яндекс.Диск"), result["error"])
+            return
+        items: list[YandexDiskItem] = result["items"] or []
+        self._populate_cloud_tree(str(result["path"]), items)
+        if result["tree_only"] or result["path"] != self.cloud_path:
+            return
+        visible_items = sorted(
+            (
+                item for item in items
+                if item.is_dir or is_supported_image(Path(item.name))
+            ),
+            key=lambda item: (not item.is_dir, item.name.casefold()),
+        )
+        account_id = str(self.cloud_account_id)
+        for remote in visible_items:
+            digest = sha1(remote.path.encode("utf-8")).hexdigest()
+            key = work_path() / "yandex-items" / account_id / digest / remote.name
+            if remote.is_dir:
+                key.mkdir(parents=True, exist_ok=True)
+            self.cloud_items_by_key[key] = remote
+            self.cloud_keys_by_remote_path[remote.path] = key
+            item = QListWidgetItem(remote.name)
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setData(DETAIL_ROLE, {})
+            item.setData(SERIES_ROLE, {})
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
+            item.setToolTip(remote.path)
+            if not remote.is_dir:
+                cached = self.cloud_preview_cache.load(account_id, remote, THUMB_SIZE)
+                if cached is not None:
+                    item.setData(PREVIEW_ROLE, cached)
+            self.grid.addItem(item)
+            self.items_by_path[key] = item
+            self.all_paths.append(key)
+        self.paths = list(self.all_paths)
+        self.view_paths = list(self.all_paths)
+        self.populate_index = len(self.paths)
+        self.thumb_index = len(self.paths)
+        image_count = sum(not item.is_dir for item in visible_items)
+        self._cloud_preview_totals = {THUMB_SIZE: image_count, 1920: 0}
+        self._cloud_preview_completed = {
+            THUMB_SIZE: {
+                key for key in self.paths
+                if not self.cloud_items_by_key[key].is_dir
+                and self.items_by_path[key].data(PREVIEW_ROLE) is not None
+            },
+            1920: set(),
+        }
+        self._rebuild_status_index()
+        self._refresh_status_panel()
+        self._select_cloud_tree_path(self.cloud_path)
+        for key in self.paths:
+            remote = self.cloud_items_by_key[key]
+            if not remote.is_dir and self.items_by_path[key].data(PREVIEW_ROLE) is None:
+                self._submit_cloud_preview(key, remote, THUMB_SIZE, remote.preview_url)
+
+    def _populate_cloud_tree(self, parent_path: str, items: list[YandexDiskItem]) -> None:
+        parent = self._cloud_tree_item(parent_path)
+        if parent is None:
+            return
+        parent.takeChildren()
+        for remote in sorted((item for item in items if item.is_dir), key=lambda item: item.name.casefold()):
+            child = QTreeWidgetItem([remote.name])
+            child.setIcon(0, _folder_icon_provider().icon(QFileIconProvider.IconType.Folder))
+            child.setData(0, Qt.ItemDataRole.UserRole, remote.path)
+            child.setData(0, Qt.ItemDataRole.UserRole + 1, False)
+            child.setData(0, Qt.ItemDataRole.UserRole + 2, remote)
+            child.addChild(QTreeWidgetItem([_("Загрузка…")]))
+            parent.addChild(child)
+        parent.setData(0, Qt.ItemDataRole.UserRole + 1, True)
+
+    @staticmethod
+    def _cloud_child_path(parent: str, name: str) -> str:
+        return f"{parent.rstrip('/')}/{name}"
+
+    def _create_cloud_folder(self) -> None:
+        if self.cloud_account_id is None:
+            return
+        name, accepted = QInputDialog.getText(self, _("Создать папку"), _("Имя новой папки:"))
+        if not accepted or not name.strip() or Path(name.strip()).name != name.strip():
+            return
+        target = self._cloud_child_path(self.cloud_path, name.strip())
+        self._run_cloud_operation(lambda: self._yandex_client(str(self.cloud_account_id)).mkdir(target))
+
+    def _show_cloud_tree_context_menu(self, position: QPoint) -> None:
+        item = self.cloud_tree.itemAt(position)
+        if item is None:
+            return
+        remote = item.data(0, Qt.ItemDataRole.UserRole + 2)
+        menu = QMenu(self.cloud_tree)
+        create = menu.addAction(_("Создать папку"))
+        create.triggered.connect(
+            lambda: self._create_cloud_folder_in(str(item.data(0, Qt.ItemDataRole.UserRole)))
+        )
+        if isinstance(remote, YandexDiskItem):
+            menu.addSeparator()
+            self._populate_cloud_context_menu(menu, remote)
+        menu.exec(self.cloud_tree.viewport().mapToGlobal(position))
+
+    def _create_cloud_folder_in(self, parent_path: str) -> None:
+        name, accepted = QInputDialog.getText(self, _("Создать папку"), _("Имя новой папки:"))
+        if not accepted or not name.strip() or Path(name.strip()).name != name.strip():
+            return
+        target = self._cloud_child_path(parent_path, name.strip())
+        account_id = str(self.cloud_account_id)
+        self._run_cloud_operation(lambda: self._yandex_client(account_id).mkdir(target))
+
+    def _populate_cloud_context_menu(self, menu: QMenu, remote: YandexDiskItem) -> None:
+        download = menu.addAction(_("Скопировать на компьютер…"))
+        download.triggered.connect(lambda: self._download_cloud_item(remote, move=False))
+        move_local = menu.addAction(_("Переместить на компьютер…"))
+        move_local.triggered.connect(lambda: self._download_cloud_item(remote, move=True))
+        menu.addSeparator()
+        rename = menu.addAction(_("Переименовать"))
+        rename.triggered.connect(lambda: self._rename_cloud_item(remote))
+        copy = menu.addAction(_("Копировать на Яндекс.Диске…"))
+        copy.triggered.connect(lambda: self._relocate_cloud_item(remote, move=False))
+        move = menu.addAction(_("Переместить на Яндекс.Диске…"))
+        move.triggered.connect(lambda: self._relocate_cloud_item(remote, move=True))
+        delete = menu.addAction(_("Удалить"))
+        delete.triggered.connect(lambda: self._delete_cloud_items([remote]))
+
+    def _rename_cloud_item(self, remote: YandexDiskItem) -> None:
+        name, accepted = QInputDialog.getText(
+            self, _("Переименовать"), _("Новое имя:"), text=remote.name
+        )
+        if not accepted or not name.strip() or Path(name.strip()).name != name.strip():
+            return
+        parent, _separator, _old_name = remote.path.rpartition("/")
+        destination = f"{parent}/{name.strip()}"
+        account_id = str(self.cloud_account_id)
+        self._run_cloud_operation(
+            lambda: self._yandex_client(account_id).move(remote.path, destination)
+        )
+
+    def _relocate_cloud_item(self, remote: YandexDiskItem, *, move: bool) -> None:
+        destination, accepted = QInputDialog.getText(
+            self,
+            _("Переместить") if move else _("Копировать"),
+            _("Полный путь назначения на Диске:"),
+            text=remote.path,
+        )
+        if not accepted or not destination.strip() or destination.strip() == remote.path:
+            return
+        account_id = str(self.cloud_account_id)
+        client = self._yandex_client(account_id)
+        operation = client.move if move else client.copy
+        self._run_cloud_operation(lambda: operation(remote.path, destination.strip()))
+
+    def _delete_cloud_items(self, items: list[YandexDiskItem]) -> None:
+        if not items or QMessageBox.question(
+            self,
+            _("Удалить"),
+            _("Переместить выбранные объекты Яндекс.Диска в корзину?"),
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        account_id = str(self.cloud_account_id)
+
+        def operation() -> None:
+            client = self._yandex_client(account_id)
+            for item in items:
+                client.delete(item.path)
+
+        self._run_cloud_operation(operation)
+
+    def _download_cloud_item(self, remote: YandexDiskItem, *, move: bool) -> None:
+        destination = QFileDialog.getExistingDirectory(
+            self, _("Папка назначения"), str(Path.home())
+        )
+        if not destination:
+            return
+        self._download_cloud_items([remote], Path(destination), move=move)
+
+    def _download_cloud_items(
+        self,
+        remotes: list[YandexDiskItem],
+        destination: Path,
+        *,
+        move: bool,
+        account_id: str | None = None,
+    ) -> None:
+        """Выгружает выделение в одну задачу общей панели с суммарным прогрессом."""
+        if not remotes:
+            return
+        source_account = account_id or str(self.cloud_account_id)
+
+        def transfer(task: TransferTask | None = None, manager: TransferManager | None = None) -> None:
+            client = self._yandex_client(source_account)
+            files: list[tuple[YandexDiskItem, Path]] = []
+            folders: list[Path] = []
+
+            def collect(item: YandexDiskItem, target: Path) -> None:
+                if item.is_dir:
+                    folders.append(target)
+                    for child in client.list_directory(item.path):
+                        collect(child, target / Path(child.name).name)
+                else:
+                    files.append((item, target))
+
+            for remote in remotes:
+                collect(remote, destination / remote.name)
+            if manager is not None and task is not None:
+                manager.set_external_total(task, len(files), sum(item.size for item, _target in files))
+            for folder in folders:
+                folder.mkdir(parents=True, exist_ok=True)
+            for item, target in files:
+                if target.exists():
+                    raise OSError(_("Файл уже существует: {path}").format(path=target))
+                client.download_file(
+                    item.path,
+                    target,
+                    progress=(lambda count, t=task, m=manager: m.advance_external(t, byte_count=count, name=item.name))
+                    if manager is not None and task is not None else None,
+                    checkpoint=(lambda t=task, m=manager: m.checkpoint(t))
+                    if manager is not None and task is not None else None,
+                )
+                if manager is not None and task is not None:
+                    manager.advance_external(task, file_completed=True, name=item.name)
+            if move:
+                for remote in remotes:
+                    client.delete(remote.path)
+
+        title = _("Перемещение из Яндекс.Диска") if move else _("Копирование из Яндекс.Диска")
+        self._enqueue_cloud_transfer(
+            title,
+            transfer,
+            account_id=source_account,
+            refresh_cloud=move,
+            affected_directories={destination},
+        )
+
+    def _cloud_paste_destination(self) -> str:
+        focus = QApplication.focusWidget()
+        if self._is_directory_focus_widget(focus):
+            item = self.cloud_tree.currentItem()
+            remote = item.data(0, Qt.ItemDataRole.UserRole + 2) if item is not None else None
+            if isinstance(remote, YandexDiskItem) and remote.is_dir:
+                return remote.path
+        return self.cloud_path
+
+    def _paste_cloud_items_to_cloud(
+        self, remotes: list[YandexDiskItem], source_account: str, *, move: bool
+    ) -> None:
+        """Использует серверный fast path внутри аккаунта и потоковый мост между аккаунтами."""
+        if not remotes or self.cloud_account_id is None:
+            return
+        destination_account = self.cloud_account_id
+        destination_root = self._cloud_paste_destination()
+        if source_account == destination_account:
+            client = self._yandex_client(source_account)
+
+            def operation() -> None:
+                method = client.move if move else client.copy
+                for remote in remotes:
+                    method(remote.path, self._cloud_child_path(destination_root, remote.name))
+
+            self._run_cloud_operation(operation)
+            return
+
+        staging = work_path() / "yandex-transfer" / uuid4().hex
+
+        def transfer(task: TransferTask | None = None, manager: TransferManager | None = None) -> None:
+            source = self._yandex_client(source_account)
+            target = self._yandex_client(destination_account)
+            files: list[tuple[YandexDiskItem, Path, str]] = []
+            folders: list[tuple[Path, str]] = []
+
+            def collect(item: YandexDiskItem, local: Path, remote_target: str) -> None:
+                if item.is_dir:
+                    folders.append((local, remote_target))
+                    for child in source.list_directory(item.path):
+                        collect(
+                            child,
+                            local / Path(child.name).name,
+                            self._cloud_child_path(remote_target, child.name),
+                        )
+                else:
+                    files.append((item, local, remote_target))
+
+            for remote in remotes:
+                collect(
+                    remote,
+                    staging / remote.name,
+                    self._cloud_child_path(destination_root, remote.name),
+                )
+            total_size = sum(item.size for item, _local, _target in files)
+            if manager is not None and task is not None:
+                manager.set_external_total(task, len(files), total_size * 2)
+            try:
+                for local, _remote_target in folders:
+                    local.mkdir(parents=True, exist_ok=True)
+                for item, local, _remote_target in files:
+                    source.download_file(
+                        item.path, local,
+                        progress=(lambda count: manager.advance_external(task, byte_count=count, name=item.name))
+                        if manager is not None and task is not None else None,
+                        checkpoint=(lambda: manager.checkpoint(task))
+                        if manager is not None and task is not None else None,
+                    )
+                for _local, remote_target in folders:
+                    target.mkdir(remote_target)
+                for item, local, remote_target in files:
+                    target.upload_file(
+                        local, remote_target,
+                        progress=(lambda count: manager.advance_external(task, byte_count=count, name=item.name))
+                        if manager is not None and task is not None else None,
+                        checkpoint=(lambda: manager.checkpoint(task))
+                        if manager is not None and task is not None else None,
+                    )
+                    if manager is not None and task is not None:
+                        manager.advance_external(task, file_completed=True, name=item.name)
+                if move:
+                    for remote in remotes:
+                        source.delete(remote.path)
+            finally:
+                shutil.rmtree(staging, ignore_errors=True)
+
+        title = _("Перемещение между Яндекс.Дисками") if move else _("Копирование между Яндекс.Дисками")
+        self._enqueue_cloud_transfer(title, transfer)
+
+    def _upload_paths_to_cloud(
+        self, paths: list[Path], *, move: bool, remote_root: str | None = None
+    ) -> None:
+        """Загружает брошенные файлы и папки; источник удаляется лишь после полного успеха."""
+        account_id = str(self.cloud_account_id)
+        remote_root = remote_root or self.cloud_path
+        sources = list(dict.fromkeys(path for path in paths if path.exists()))
+        if not sources:
+            return
+
+        def transfer(task: TransferTask | None = None, manager: TransferManager | None = None) -> None:
+            client = self._yandex_client(account_id)
+            local_files = [
+                child
+                for source in sources
+                for child in ([source] if source.is_file() else source.rglob("*"))
+                if child.is_file()
+            ]
+            if manager is not None and task is not None:
+                manager.set_external_total(
+                    task, len(local_files), sum(path.stat().st_size for path in local_files)
+                )
+
+            def send(source: Path, destination: str) -> None:
+                if manager is not None and task is not None:
+                    manager.checkpoint(task)
+                if source.is_dir():
+                    client.mkdir(destination)
+                    for child in source.iterdir():
+                        send(child, self._cloud_child_path(destination, child.name))
+                elif source.is_file():
+                    client.upload_file(
+                        source,
+                        destination,
+                        progress=(lambda count: manager.advance_external(
+                            task, byte_count=count, name=source.name
+                        )) if manager is not None and task is not None else None,
+                        checkpoint=(lambda: manager.checkpoint(task))
+                        if manager is not None and task is not None else None,
+                    )
+                    if manager is not None and task is not None:
+                        manager.advance_external(task, file_completed=True, name=source.name)
+
+            for source in sources:
+                send(source, self._cloud_child_path(remote_root, source.name))
+            if move:
+                for source in sources:
+                    send2trash(str(source))
+
+        title = _("Перемещение на Яндекс.Диск") if move else _("Копирование на Яндекс.Диск")
+        self._enqueue_cloud_transfer(title, transfer)
+
+    def _enqueue_cloud_transfer(
+        self,
+        title: str,
+        transfer: Callable[[TransferTask | None, TransferManager | None], None],
+        *,
+        account_id: str | None = None,
+        refresh_cloud: bool = True,
+        affected_directories: set[Path] | None = None,
+    ) -> None:
+        """Подключает долгую сеть к общей очереди, прогрессу, паузе и отмене."""
+        operation_account = account_id or self.cloud_account_id
+        if operation_account is None:
+            return
+        if self.transfer_manager is not None:
+            def runner(task: TransferTask, manager: TransferManager) -> None:
+                transfer(task, manager)
+                if refresh_cloud and self.cloud_account_id == operation_account and not self.closing:
+                    self.bridge.cloudOperationFinished.emit({"account": operation_account, "error": ""})
+
+            self.transfer_manager.enqueue_external(
+                title,
+                runner,
+                affected_directories=affected_directories,
+            )
+            return
+        if refresh_cloud and self.cloud_account_id == operation_account:
+            self._run_cloud_operation(lambda: transfer(None, None), title=title)
+        else:
+            self.cloud_operation_executor.submit(transfer, None, None)
+
+    def _run_cloud_operation(self, operation: Callable[[], None], *, title: str | None = None) -> None:
+        """Выполняет мутацию вне GUI и после неё перечитывает текущую папку."""
+        account_id = self.cloud_account_id
+        if account_id is None:
+            return
+        if self.transfer_manager is not None:
+            def runner(task: TransferTask, manager: TransferManager) -> None:
+                manager.set_external_total(task, 1, 0)
+                operation()
+                manager.advance_external(task, file_completed=True)
+                self.bridge.cloudOperationFinished.emit({"account": account_id, "error": ""})
+
+            self.transfer_manager.enqueue_external(
+                title or _("Операция с Яндекс.Диском"), runner
+            )
+            return
+        future = self.cloud_operation_executor.submit(operation)
+
+        def finished(done: Future) -> None:
+            try:
+                done.result()
+                error = ""
+            except Exception as exc:
+                error = str(exc)
+            self.bridge.cloudOperationFinished.emit({"account": account_id, "error": error})
+
+        future.add_done_callback(finished)
+
+    def _on_cloud_operation_finished(self, result: dict) -> None:
+        if self.closing or result["account"] != self.cloud_account_id:
+            return
+        if result["error"]:
+            QMessageBox.warning(self, _("Яндекс.Диск"), result["error"])
+            return
+        self._load_cloud_directory(self.cloud_path)
+
+    def _submit_cloud_preview(
+        self, key: Path, remote: YandexDiskItem, size: int, url: str | None = None
+    ) -> None:
+        account_id = self.cloud_account_id
+        if account_id is None:
+            return
+        generation = self.cloud_generation
+        pending_key = (generation, key, size)
+        if pending_key in self._cloud_preview_pending:
+            return
+        cached = (
+            self.cloud_preview_cache.load(account_id, remote, size)
+            if size == THUMB_SIZE
+            else self._cloud_full_previews.get(key)
+        )
+        if cached is not None:
+            self._on_cloud_preview_loaded(
+                {"account": account_id, "generation": generation, "key": key,
+                 "size": size, "image": cached, "error": ""}
+            )
+            return
+        self._cloud_preview_pending.add(pending_key)
+        client = self._yandex_client(account_id)
+        executor = self.cloud_executor if size == THUMB_SIZE else self.cloud_full_executor
+        if size == THUMB_SIZE:
+            future = executor.submit(
+                self.cloud_preview_cache.obtain, client, account_id, remote, size, url
+            )
+        else:
+            future = executor.submit(self.cloud_preview_cache.fetch, client, remote, size, url)
+
+        def finished(done: Future) -> None:
+            try:
+                value = done.result()
+                image = value[1] if size == THUMB_SIZE else value
+                error = ""
+            except Exception as exc:
+                image, error = None, str(exc)
+            self.bridge.cloudPreviewLoaded.emit(
+                {"account": account_id, "generation": generation, "key": key,
+                 "size": size, "image": image, "error": error}
+            )
+
+        future.add_done_callback(finished)
+
+    def _on_cloud_preview_loaded(self, result: dict) -> None:
+        key = Path(result["key"])
+        size = int(result["size"])
+        self._cloud_preview_pending.discard((int(result["generation"]), key, int(result["size"])))
+        if (
+            self.closing
+            or result["account"] != self.cloud_account_id
+            or result["generation"] != self.cloud_generation
+        ):
+            return
+        if size == 1920 and key not in self._cloud_full_preview_targets:
+            return
+        self._cloud_preview_completed.setdefault(size, set()).add(key)
+        self._refresh_status_panel()
+        if result["error"]:
+            return
+        image = result["image"]
+        if not isinstance(image, QImage) or image.isNull():
+            return
+        if size == THUMB_SIZE:
+            item = self.items_by_path.get(key)
+            if item is not None:
+                item.setData(PREVIEW_ROLE, image)
+            return
+        self._cloud_full_previews[key] = image
+        if key == self.current_path and self.stack.currentWidget() is self.full_view:
+            self.full_view.set_image(DecodedImage(key, image, image.width(), image.height()))
+
     def _refresh_volume_buttons(self) -> None:
         """Синхронизирует боковую панель со смонтированными дисками.
 
@@ -7650,7 +8750,7 @@ class Workspace(QMainWindow):
         }
 
         for key, button in existing.items():
-            if key == SHOTSYNC_VOLUME_KEY:
+            if key == SHOTSYNC_VOLUME_KEY or str(key or "").startswith(YANDEX_VOLUME_PREFIX):
                 continue
             if key not in volume_keys:
                 self.drive_buttons.removeButton(button)
@@ -7691,7 +8791,13 @@ class Workspace(QMainWindow):
             if key == SHOTSYNC_VOLUME_KEY:
                 button.setChecked(self.shotsync_active)
                 continue
-            if self.shotsync_active:
+            if str(key or "").startswith(YANDEX_VOLUME_PREFIX):
+                button.setChecked(
+                    not self.shotsync_active
+                    and key == f"{YANDEX_VOLUME_PREFIX}{self.cloud_account_id}"
+                )
+                continue
+            if self.shotsync_active or self.cloud_account_id is not None:
                 button.setChecked(False)
             else:
                 button.setChecked(key == _drive_key(current_root) if current_root else False)
@@ -7709,6 +8815,7 @@ class Workspace(QMainWindow):
 
     def _drive_selected(self, drive_path: Path) -> None:
         """Открывает сохранённую папку диска, а повторным кликом — его корень."""
+        self._leave_cloud_source()
         self._deactivate_shotsync()
         if drive_path.is_dir():
             self._set_tree_root_for_path(drive_path)
@@ -7773,6 +8880,7 @@ class Workspace(QMainWindow):
 
     def _activate_shotsync(self) -> None:
         """Переключает боковую панель с папок на ShotSync."""
+        self._leave_cloud_source()
         self.shotsync_active = True
         self.shotsync_button.setChecked(True)
         for button in self.drive_buttons.buttons():
@@ -8825,6 +9933,8 @@ class Workspace(QMainWindow):
         """
         if self.closing:
             return
+        if getattr(self, "cloud_account_id", None) is not None:
+            self._leave_cloud_source()
         switching_directory = directory != self.current_dir
         if hasattr(self, "grid_content_stack"):
             self.grid_content_stack.setCurrentWidget(self.grid)
@@ -8871,7 +9981,12 @@ class Workspace(QMainWindow):
         self._cache_ai_waiting = False
         self._cache_ai_paths.clear()
         if hasattr(self, "ai_button"):
+            self.grid.setDragEnabled(True)
             self.ai_button.setEnabled(True)
+            self.xmp_button.setEnabled(True)
+            self.utilities_button.setEnabled(True)
+            self.meta_bar.setEnabled(True)
+            self.full_view.meta_bar.setEnabled(True)
             self._refresh_status_panel()
         self.cache_load_generation += 1
         self.directory_generation += 1
@@ -9485,6 +10600,14 @@ class Workspace(QMainWindow):
         item.setToolTip(str(path))
         item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
         item.setData(SERIES_ROLE, self.series_cards.get(path, {}))
+        if getattr(self, "cloud_account_id", None) is not None and path in self.cloud_items_by_key:
+            remote = self.cloud_items_by_key[path]
+            item.setToolTip(remote.path)
+            if not remote.is_dir:
+                preview = self.cloud_preview_cache.load(self.cloud_account_id, remote, THUMB_SIZE)
+                if preview is not None:
+                    item.setData(PREVIEW_ROLE, preview)
+            return item
         preview = self._thumbnail_cache_get(path)
         if preview is None:
             cached = self._cache_get((path, THUMB_SIZE))
@@ -10799,6 +11922,36 @@ class Workspace(QMainWindow):
         self._fit_status_text()
         self.status_label.setToolTip(text)
 
+        if getattr(self, "cloud_account_id", None) is not None:
+            reading_directory = any(
+                generation == self.cloud_generation
+                for generation, _path in self._cloud_tree_requests
+            )
+            if reading_directory:
+                self.status_progress.setRange(0, 0)
+                self.status_progress.setFormat(_("Чтение папки Яндекс.Диска…"))
+                self.status_progress.setToolTip(self.status_progress.format())
+                self.status_progress.show()
+                self._set_taskbar_progress(0, 0)
+                return
+            preview_steps = (
+                ((1920, _("Предзагрузка 1920: {done}/{total}")),
+                 (THUMB_SIZE, _("Миниатюры Яндекс.Диска: {done}/{total}")))
+                if self.stack.currentWidget() is self.full_view
+                else ((THUMB_SIZE, _("Миниатюры Яндекс.Диска: {done}/{total}")),)
+            )
+            for size, template in preview_steps:
+                total = self._cloud_preview_totals.get(size, 0)
+                done = len(self._cloud_preview_completed.get(size, set()))
+                if total and done < total:
+                    self.status_progress.setRange(0, total)
+                    self.status_progress.setValue(done)
+                    self.status_progress.setFormat(template.format(done=done, total=total))
+                    self.status_progress.setToolTip(self.status_progress.format())
+                    self.status_progress.show()
+                    self._set_taskbar_progress(done, total)
+                    return
+
         if self._upload_progress is not None:
             done, total = self._upload_progress
             self.status_progress.setRange(0, max(1, total))
@@ -11766,6 +12919,8 @@ class Workspace(QMainWindow):
 
     def _update_selection(self, **changes) -> None:
         """Применяет метаданные к выделению, кэшу, XMP и открытому просмотрщику."""
+        if getattr(self, "cloud_account_id", None) is not None:
+            return
         if "color_label" in changes:
             # Единое представление нужно фильтру «Без цвета» и SQLite-полю NOT NULL.
             changes["color_label"] = str(changes["color_label"] or "")
@@ -12620,6 +13775,10 @@ class Workspace(QMainWindow):
         self.current_path = path
         self.workspace_state.current_photo = path
         self._refresh_status_panel()
+        if getattr(self, "cloud_account_id", None) is not None and path in self.cloud_items_by_key:
+            self.pending_grid_full_request = None
+            self.grid_full_request_timer.stop()
+            return
         if hasattr(self, "meta_bar"):
             self.meta_bar.set_metadata(self.photo_details.get(path.name, {}), (path,))
         if not path.is_file() or not is_supported_image(path):
@@ -12631,6 +13790,12 @@ class Workspace(QMainWindow):
 
     def open_full(self, path: Path) -> None:
         """Переключает рабочую вкладку в полный просмотр выбранного файла."""
+        if getattr(self, "cloud_account_id", None) is not None and path in self.cloud_items_by_key:
+            if self.cloud_items_by_key[path].is_dir:
+                self._load_cloud_directory(self.cloud_items_by_key[path].path)
+                return
+            self._open_cloud_full(path)
+            return
         if path.is_dir():
             self.load_directory(path)
             return
@@ -12673,6 +13838,54 @@ class Workspace(QMainWindow):
             lambda current=path, rapid=rapid_navigation: self._finish_open_full(current, rapid),
         )
 
+    def _open_cloud_full(self, path: Path) -> None:
+        """Показывает серверное превью, не запуская декодер и чтение оригинала."""
+        remote = self.cloud_items_by_key[path]
+        self.current_path = path
+        self.workspace_state.current_photo = path
+        self.full_view.stop_audio()
+        self.full_view.cancel_zoom()
+        self.full_view.set_faces([])
+        self.full_view.set_metadata({}, (path,))
+        self.full_view.set_burst_extract_state(visible=False, extracted=False)
+        self.stack.setCurrentWidget(self.full_view)
+        self.fullViewRequested.emit(self)
+        self.full_view.setFocus(Qt.FocusReason.OtherFocusReason)
+        image = self._cloud_full_previews.get(path)
+        fallback = False
+        if image is None:
+            item = self.items_by_path.get(path)
+            candidate = item.data(PREVIEW_ROLE) if item is not None else None
+            image = candidate if isinstance(candidate, QImage) and not candidate.isNull() else None
+            fallback = image is not None
+        if image is not None:
+            self.full_view.set_image(
+                DecodedImage(path, image, image.width(), image.height()),
+                fallback=fallback,
+            )
+        self._refresh_full_view_navigation(path)
+        image_paths = [
+            candidate for candidate in self.view_paths
+            if not self.cloud_items_by_key[candidate].is_dir
+        ]
+        current_index = image_paths.index(path) if path in image_paths else -1
+        if current_index >= 0:
+            targets = image_paths[max(0, current_index - 1): current_index + 2]
+            self._cloud_full_preview_targets = set(targets)
+            self._cloud_full_previews = {
+                candidate: cached
+                for candidate, cached in self._cloud_full_previews.items()
+                if candidate in self._cloud_full_preview_targets
+            }
+            self._cloud_preview_totals[1920] = len(targets)
+            self._cloud_preview_completed[1920] = set(self._cloud_full_previews)
+            self._refresh_status_panel()
+            # Текущий кадр имеет приоритет, затем готовятся ровно два соседа.
+            for candidate in [path, *[item for item in targets if item != path]]:
+                self._submit_cloud_preview(
+                    candidate, self.cloud_items_by_key[candidate], 1920
+                )
+
     def _finish_open_full_video(self, path: Path) -> None:
         """Достраивает ленты видео после первой отрисовки его превью."""
         if not self.closing and path == self.current_path and self.stack.currentWidget() is self.full_view:
@@ -12702,6 +13915,8 @@ class Workspace(QMainWindow):
 
     def _request_original_zoom(self, _position: object) -> None:
         """Загружает оригинал только для масштаба 100 % и повторно использует RAM-кэш."""
+        if getattr(self, "cloud_account_id", None) is not None:
+            return
         if self.current_path is None or is_supported_video(self.current_path):
             return
         self._suspend_thumbnail_work()
@@ -12718,8 +13933,14 @@ class Workspace(QMainWindow):
             self.singlePhotoExitRequested.emit(self)
             return
         self.stack.setCurrentWidget(self.grid_page)
+        if getattr(self, "cloud_account_id", None) is not None:
+            self._cloud_full_previews.clear()
+            self._cloud_full_preview_targets.clear()
+            self._cloud_preview_totals[1920] = 0
+            self._cloud_preview_completed[1920] = set()
         self._restore_grid_context()
-        self._resume_incomplete_thumbnail_work()
+        if getattr(self, "cloud_account_id", None) is None:
+            self._resume_incomplete_thumbnail_work()
         self._refresh_status_panel()
         self.gridRequested.emit()
 
@@ -13038,7 +14259,13 @@ class Workspace(QMainWindow):
                 False,
             )
 
-        image_only_paths = [path for path in self.view_paths if path.is_file()]
+        if getattr(self, "cloud_account_id", None) is not None:
+            image_only_paths = [
+                path for path in self.view_paths
+                if path in self.cloud_items_by_key and not self.cloud_items_by_key[path].is_dir
+            ]
+        else:
+            image_only_paths = [path for path in self.view_paths if path.is_file()]
         burst_frames = getattr(self, "burst_frames", {})
         burst_materialized = getattr(self, "burst_materialized", {})
         result: list[Path] = []
@@ -13329,6 +14556,7 @@ class MainWindow(QMainWindow):
     def __init__(self, open_target: Path | None = None) -> None:
         super().__init__()
         self.settings = _application_settings()
+        self._seed_yandex_oauth_settings()
         self.transfer_manager = TransferManager(self.settings, self)
         self.transfer_manager.changed.connect(self._refresh_transfer_taskbar_progress)
         self.transfer_manager.taskFinished.connect(self._transfer_task_finished)
@@ -13706,6 +14934,8 @@ class MainWindow(QMainWindow):
             lambda: self._check_for_updates(interactive=True),
             cache_size,
             self._clear_all_caches,
+            self._connect_yandex_disk,
+            self._remove_yandex_disk,
             self,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -13719,13 +14949,87 @@ class MainWindow(QMainWindow):
                     candidate._refresh_status_panel()
                     candidate.full_view.refresh_mark_indicator()
                     candidate.full_view.apply_color_management()
+                    candidate._refresh_cloud_account_buttons()
         if workspace.shotsync_client.has_key():
             workspace._sync_code_replacements()
+
+    def _seed_yandex_oauth_settings(self) -> None:
+        """Подхватывает публичный OAuth ID из локального файла разработчика один раз.
+
+        Файл не входит в Git и сборку. После первого запуска публичный ID уже
+        находится в QSettings, а секрет из файла намеренно нигде не сохраняется.
+        """
+        if self.settings.value("yandex_disk/client_id", "", str):
+            return
+        try:
+            config = YandexOAuthConfig.from_local_file(application_directory() / "ya_auth.txt")
+        except YandexDiskError:
+            return
+        self.settings.setValue("yandex_disk/client_id", config.client_id)
+        self.settings.setValue("yandex_disk/redirect_uri", config.redirect_uri)
+
+    def _connect_yandex_disk(self) -> bool:
+        """Добавляет независимый аккаунт через локальный PKCE-вход без callback-сервера."""
+        client_id = self.settings.value("yandex_disk/client_id", "", str)
+        if not client_id:
+            QMessageBox.warning(
+                self,
+                _("Яндекс.Диск"),
+                _("Не настроен публичный client_id OAuth для Яндекс.Диска."),
+            )
+            return False
+        registry = YandexAccounts(self.settings)
+        account = registry.add(_("Яндекс.Диск"))
+        oauth = YandexOAuth(
+            self.settings,
+            YandexOAuthConfig(
+                client_id=client_id,
+                redirect_uri=self.settings.value(
+                    "yandex_disk/redirect_uri", "https://oauth.yandex.ru/verification_code", str
+                ),
+            ),
+            account.id,
+        )
+        QDesktopServices.openUrl(QUrl(oauth.authorization_url()))
+        code, accepted = QInputDialog.getText(
+            self,
+            _("Вход в Яндекс.Диск"),
+            _("Введите код, показанный Яндексом в браузере:"),
+        )
+        if not accepted or not code.strip():
+            registry.remove(account.id)
+            return False
+        try:
+            oauth.complete(code)
+            info = YandexDiskClient(oauth).disk_info()
+        except YandexDiskError as exc:
+            registry.remove(account.id)
+            QMessageBox.warning(self, _("Яндекс.Диск"), str(exc))
+            return False
+        user = info.get("user") if isinstance(info, dict) else {}
+        title = str((user or {}).get("display_name") or (user or {}).get("login") or _("Яндекс.Диск"))
+        registry.rename(account.id, title)
+        self._refresh_yandex_workspaces()
+        QMessageBox.information(self, _("Яндекс.Диск"), _("Яндекс.Диск подключён."))
+        return True
+
+    def _remove_yandex_disk(self, account_id: str) -> None:
+        """Удаляет локальные токены одного подключения и обновляет все вкладки."""
+        YandexAccounts(self.settings).remove(account_id)
+        self._refresh_yandex_workspaces()
+
+    def _refresh_yandex_workspaces(self) -> None:
+        for index in range(self.workspace_stack.count()):
+            workspace = self.workspace_stack.widget(index)
+            if isinstance(workspace, Workspace):
+                workspace._cloud_clients.pop(workspace.cloud_account_id or "", None)
+                workspace._refresh_cloud_account_buttons()
 
     def _transfer_task_finished(self, task: TransferTask) -> None:
         """Обновляет открытые папки и сообщает ошибки завершённой операции."""
         self._continue_card_import_backup(task)
         touched = {task.destination}
+        touched.update(task.affected_directories)
         if task.move:
             touched.update(entry.source.parent for entry in task.entries)
         for index in range(self.workspace_stack.count()):
@@ -13893,19 +15197,29 @@ class MainWindow(QMainWindow):
 
     def _clear_all_caches(self) -> None:
         """Закрывает активные базы кэша перед удалением их файлов."""
+        cloud_locations: dict[Workspace, tuple[str, str]] = {}
         for index in range(self.workspace_stack.count()):
             workspace = self.workspace_stack.widget(index)
             if not isinstance(workspace, Workspace):
                 continue
+            if workspace.cloud_account_id is not None:
+                cloud_locations[workspace] = (workspace.cloud_account_id, workspace.cloud_path)
+                workspace.cloud_generation += 1
             workspace._abandon_preview_decode_work()
             workspace._flush_folder_cache(wait=True, close=True)
             workspace.folder_cache = None
             workspace.cache_ready = False
             workspace.decode_cache.clear()
         clear_cache()
+        shutil.rmtree(work_path() / "yandex-previews", ignore_errors=True)
         for index in range(self.workspace_stack.count()):
             workspace = self.workspace_stack.widget(index)
-            if isinstance(workspace, Workspace) and workspace.current_dir.is_dir():
+            if isinstance(workspace, Workspace) and workspace in cloud_locations:
+                account_id, remote_path = cloud_locations[workspace]
+                workspace._activate_yandex_account(account_id)
+                if remote_path != "disk:/":
+                    workspace._load_cloud_directory(remote_path)
+            elif isinstance(workspace, Workspace) and workspace.current_dir.is_dir():
                 workspace.load_directory(workspace.current_dir)
 
     def _show_help_menu(self) -> None:
@@ -14018,11 +15332,20 @@ class MainWindow(QMainWindow):
             hub.stop_all()
         self._closing = True
         directories = [
-            str(workspace.current_dir)
+            (
+                Workspace._cloud_location_value(
+                    workspace.cloud_account_id, workspace.cloud_path
+                )
+                if workspace.cloud_account_id is not None
+                else str(workspace.current_dir)
+            )
             for index in range(self.workspace_stack.count())
             if (workspace := self.workspace_stack.widget(index)) is not None
             and not workspace.single_photo_mode
-            and workspace.current_dir.is_dir()
+            and (
+                workspace.cloud_account_id is not None
+                or workspace.current_dir.is_dir()
+            )
         ]
         self.settings.setValue("open_workspaces", directories)
         shotsync_paths = [
@@ -14081,6 +15404,13 @@ class MainWindow(QMainWindow):
         stored = self.settings.value("open_workspaces", [], list)
         directories = stored if isinstance(stored, list) else [stored]
         for value in directories:
+            cloud = Workspace._parse_cloud_location(str(value))
+            if cloud is not None:
+                account_id, remote_path = cloud
+                if any(account.id == account_id for account in YandexAccounts(self.settings).list()):
+                    workspace = self._add_workspace(defer_initial_scan=True)
+                    workspace._activate_yandex_account(account_id, remote_path)
+                continue
             directory = Path(str(value))
             if directory.is_dir():
                 self._add_workspace(directory)

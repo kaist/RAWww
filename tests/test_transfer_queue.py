@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,7 @@ from rawww.transfer_queue import (
     format_transfer_eta,
     format_transfer_size,
 )
+from rawww.yandex_disk import YandexDiskItem
 
 
 def _app() -> QApplication:
@@ -90,6 +92,93 @@ class TransferQueueTests(unittest.TestCase):
         copy_file.assert_not_called()
         self.assertFalse(source.exists())
         self.assertEqual(target.read_bytes(), b"raw-data")
+
+    def test_external_transfer_uses_shared_byte_progress(self) -> None:
+        finished = []
+        self.manager.taskFinished.connect(finished.append)
+
+        def runner(task: TransferTask, manager: TransferManager) -> None:
+            manager.set_external_total(task, 2, 30)
+            manager.advance_external(task, byte_count=10, file_completed=True, name="one.raw")
+            manager.advance_external(task, byte_count=20, file_completed=True, name="two.raw")
+
+        task = TransferTask([], Path(), False, title_override="Cloud", external_runner=runner)
+        self.manager.active[task.identifier] = task
+        self.manager._run_task(task)
+
+        self.assertTrue(finished)
+        self.assertEqual(finished[0].completed_files, 2)
+        self.assertEqual(finished[0].transferred_bytes, 30)
+        self.assertEqual(finished[0].title, "Cloud")
+
+    def test_external_transfer_keeps_affected_local_directory(self) -> None:
+        destination = Path(self.temp.name) / "destination"
+        with patch.object(self.manager, "_pump"):
+            identifier = self.manager.enqueue_external(
+                "Cloud",
+                lambda _task, _manager: None,
+                affected_directories={destination},
+            )
+
+        self.assertIsNotNone(identifier)
+        task = self.manager._tasks[str(identifier)]
+        self.assertEqual(task.affected_directories, {destination})
+
+    def test_cloud_download_copy_does_not_refresh_source_cloud(self) -> None:
+        emitted = Mock()
+        workspace = SimpleNamespace(
+            cloud_account_id="account",
+            transfer_manager=self.manager,
+            bridge=SimpleNamespace(cloudOperationFinished=SimpleNamespace(emit=emitted)),
+            closing=False,
+        )
+        transfer = Mock()
+        destination = Path(self.temp.name) / "destination"
+        with patch.object(self.manager, "enqueue_external") as enqueue:
+            Workspace._enqueue_cloud_transfer(
+                workspace,
+                "Cloud copy",
+                transfer,
+                refresh_cloud=False,
+                affected_directories={destination},
+            )
+
+        runner = enqueue.call_args.args[1]
+        task = TransferTask([], Path(), False)
+        runner(task, self.manager)
+
+        transfer.assert_called_once_with(task, self.manager)
+        emitted.assert_not_called()
+        self.assertEqual(
+            enqueue.call_args.kwargs["affected_directories"], {destination}
+        )
+
+    def test_ctrl_c_serializes_yandex_selection(self) -> None:
+        key = Path(self.temp.name) / "cloud-photo.jpg"
+        remote = YandexDiskItem(
+            path="disk:/cloud-photo.jpg",
+            name="cloud-photo.jpg",
+            is_dir=False,
+            size=42,
+            modified="",
+            preview_url="https://preview.invalid/photo",
+            mime_type="image/jpeg",
+            resource_id="id:42",
+            revision=1,
+        )
+        workspace = SimpleNamespace(
+            cloud_account_id="account",
+            cloud_items_by_key={key: remote},
+            _file_panel_paths=lambda: [key],
+        )
+
+        Workspace._copy_file_selection(workspace, cut=False)
+
+        mime = _app().clipboard().mimeData()
+        payload = json.loads(bytes(mime.data("application/x-rawww-yandex-items")))
+        self.assertEqual(payload["account"], "account")
+        self.assertEqual(payload["items"][0]["path"], remote.path)
+        self.assertFalse(payload["cut"])
 
     def test_sizes_and_short_eta_are_human_readable(self) -> None:
         self.assertEqual(format_transfer_size(5 * 1024**2), "5.0 МБ")

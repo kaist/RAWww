@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-25 19:05+0300\n"
+"POT-Creation-Date: 2026-09-10 19:42+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -85,8 +85,41 @@ msgstr "Audiokommentar"
 msgid "Свернуть ленту превью"
 msgstr "Vorschauleiste einklappen"
 
+msgid "Рисовать красным"
+msgstr "Rot zeichnen"
+
+msgid "Рисовать жёлтым"
+msgstr "Gelb zeichnen"
+
+msgid "Рисовать зелёным"
+msgstr "Grün zeichnen"
+
+msgid "Рисовать синим"
+msgstr "Blau zeichnen"
+
+msgid "Стереть аннотацию"
+msgstr "Anmerkung löschen"
+
+msgid "Текстовая метка"
+msgstr "Textmarkierung"
+
+msgid "Записать аудиокомментарий"
+msgstr "Audiokommentar aufnehmen"
+
 msgid "Воспроизвести / пауза (Пробел)"
 msgstr "Wiedergabe / Pause (Leertaste)"
+
+msgid "Закрыть"
+msgstr "Schließen"
+
+msgid "Запишите комментарий к этой фотографии"
+msgstr "Nehmen Sie einen Kommentar zu diesem Foto auf"
+
+msgid "Запись"
+msgstr "Aufnahme"
+
+msgid "Удалить аудиокомментарий"
+msgstr "Audiokommentar löschen"
 
 msgid "Развернуть ленту превью"
 msgstr "Vorschauleiste ausklappen"
@@ -102,6 +135,9 @@ msgstr "Fotos mit diesem Gesicht anzeigen"
 
 msgid "Добавить лицо в набор"
 msgstr "Gesicht zum Set hinzufügen"
+
+msgid "Стоп"
+msgstr "Stopp"
 
 msgid "Снять все метки"
 msgstr "Alle Markierungen entfernen"
@@ -165,6 +201,9 @@ msgstr "Ausgewählten Ordner aus Favoriten entfernen oder hierher ziehen"
 
 msgid "Добавить текущую папку в избранное"
 msgstr "Aktuellen Ordner zu Favoriten hinzufügen"
+
+msgid "Удалить выбранную папку из избранного"
+msgstr "Ausgewählten Ordner aus Favoriten entfernen"
 
 msgid "Все рейтинги"
 msgstr "Alle Bewertungen"
@@ -250,9 +289,8 @@ msgstr "Nach Bewertung"
 msgid "Поиск"
 msgstr "Suche"
 
-#, fuzzy
 msgid "Сбросить"
-msgstr "Farbe zurücksetzen"
+msgstr "Zurücksetzen"
 
 msgid "Фильтр по времени"
 msgstr "Zeitfilter"
@@ -271,9 +309,8 @@ msgstr ""
 "IMG_0239.jpg, 0240\n"
 "IMG_0241"
 
-#, fuzzy
 msgid "Показать"
-msgstr "Im Ordner anzeigen"
+msgstr "Anzeigen"
 
 msgid "Открыть список номеров файлов"
 msgstr "Liste der Dateinummern öffnen"
@@ -487,6 +524,74 @@ msgstr "Löschen läuft"
 
 msgid "Не удалось удалить:\n"
 msgstr "Konnte nicht gelöscht werden:\n"
+
+#, python-brace-format
+msgid "Яндекс.Диск: {account}"
+msgstr "Yandex Disk: {account}"
+
+msgid "Яндекс.Диск"
+msgstr "Yandex Disk"
+
+msgid "Загрузка…"
+msgstr "Wird geladen…"
+
+msgid "Имя новой папки:"
+msgstr "Name des neuen Ordners:"
+
+msgid "Скопировать на компьютер…"
+msgstr "Auf Computer kopieren…"
+
+msgid "Переместить на компьютер…"
+msgstr "Auf Computer verschieben…"
+
+msgid "Копировать на Яндекс.Диске…"
+msgstr "Auf Yandex Disk kopieren…"
+
+msgid "Переместить на Яндекс.Диске…"
+msgstr "Auf Yandex Disk verschieben…"
+
+msgid "Новое имя:"
+msgstr "Neuer Name:"
+
+msgid "Переместить"
+msgstr "Verschieben"
+
+msgid "Копировать"
+msgstr "Kopieren"
+
+msgid "Полный путь назначения на Диске:"
+msgstr "Vollständiger Zielpfad auf Disk:"
+
+msgid "Переместить выбранные объекты Яндекс.Диска в корзину?"
+msgstr "Ausgewählte Yandex-Disk-Objekte in den Papierkorb verschieben?"
+
+msgid "Папка назначения"
+msgstr "Zielordner"
+
+#, python-brace-format
+msgid "Файл уже существует: {path}"
+msgstr "Datei existiert bereits: {path}"
+
+msgid "Перемещение из Яндекс.Диска"
+msgstr "Von Yandex Disk verschieben"
+
+msgid "Копирование из Яндекс.Диска"
+msgstr "Von Yandex Disk kopieren"
+
+msgid "Перемещение между Яндекс.Дисками"
+msgstr "Zwischen Yandex Disks verschieben"
+
+msgid "Копирование между Яндекс.Дисками"
+msgstr "Zwischen Yandex Disks kopieren"
+
+msgid "Перемещение на Яндекс.Диск"
+msgstr "Auf Yandex Disk verschieben"
+
+msgid "Копирование на Яндекс.Диск"
+msgstr "Auf Yandex Disk kopieren"
+
+msgid "Операция с Яндекс.Диском"
+msgstr "Yandex-Disk-Vorgang"
 
 #, python-brace-format
 msgid ""
@@ -801,6 +906,17 @@ msgstr " (insgesamt {n})"
 msgid " (выделено: {n})"
 msgstr " (ausgewählt: {n})"
 
+msgid "Чтение папки Яндекс.Диска…"
+msgstr "Yandex-Disk-Ordner wird gelesen…"
+
+#, python-brace-format
+msgid "Предзагрузка 1920: {done}/{total}"
+msgstr "1920-Vorschauen werden vorgeladen: {done}/{total}"
+
+#, python-brace-format
+msgid "Миниатюры Яндекс.Диска: {done}/{total}"
+msgstr "Yandex-Disk-Miniaturen: {done}/{total}"
+
 #, python-brace-format
 msgid "Отправка: {done}/{total}"
 msgstr "Senden: {done}/{total}"
@@ -875,9 +991,6 @@ msgstr "Gesicht zum Set hinzugefügt."
 
 msgid "Наборы лиц"
 msgstr "Gesichts-Sets"
-
-msgid "Закрыть"
-msgstr "Schließen"
 
 msgid "Добавьте лицо, нажав «В набор» на фотографии."
 msgstr ""
@@ -988,6 +1101,18 @@ msgstr "Download-Seite öffnen"
 
 msgid "Позже"
 msgstr "Später"
+
+msgid "Не настроен публичный client_id OAuth для Яндекс.Диска."
+msgstr "Die öffentliche OAuth-client_id für Yandex Disk ist nicht konfiguriert."
+
+msgid "Вход в Яндекс.Диск"
+msgstr "Bei Yandex Disk anmelden"
+
+msgid "Введите код, показанный Яндексом в браузере:"
+msgstr "Geben Sie den von Yandex im Browser angezeigten Code ein:"
+
+msgid "Яндекс.Диск подключён."
+msgstr "Yandex Disk wurde verbunden."
 
 msgid "Одна из выбранных карт больше недоступна."
 msgstr "Eine der ausgewählten Karten ist nicht mehr verfügbar."
@@ -1103,9 +1228,6 @@ msgstr ""
 msgid "Очистить"
 msgstr "Leeren"
 
-msgid "Копировать"
-msgstr "Kopieren"
-
 msgid "Поведение"
 msgstr "Verhalten"
 
@@ -1114,6 +1236,9 @@ msgstr "Ersetzungscodes"
 
 msgid "Интерфейс"
 msgstr "Oberfläche"
+
+msgid "Облачные диски"
+msgstr "Cloud-Laufwerke"
 
 msgid "О приложении"
 msgstr "Über"
@@ -1228,6 +1353,31 @@ msgstr ""
 
 msgid "Выбрать по умолчанию для JPG и RAW…"
 msgstr "Als Standard für JPG und RAW festlegen…"
+
+msgid ""
+"Просматривайте серверные превью и выполняйте файловые операции, не "
+"скачивая оригиналы для просмотра. EXIF, XMP и AI для облака не "
+"используются."
+msgstr ""
+"Servervorschauen ansehen und Dateioperationen durchführen, ohne Originale"
+" für die Anzeige herunterzuladen. EXIF, XMP und AI werden für Cloud-"
+"Dateien nicht verwendet."
+
+msgid "Добавить Яндекс.Диск"
+msgstr "Yandex Disk hinzufügen"
+
+msgid "Удалить подключение"
+msgstr "Verbindung entfernen"
+
+msgid "Отключить Яндекс.Диск"
+msgstr "Yandex Disk trennen"
+
+msgid ""
+"Удалить это подключение только из Контрольки? Файлы на Диске останутся "
+"без изменений."
+msgstr ""
+"Nur diese Verbindung aus Controlka entfernen? Die Dateien auf Disk "
+"bleiben unverändert."
 
 msgid "Программы (*.exe);;Все файлы (*)"
 msgstr "Programme (*.exe);;Alle Dateien (*)"
@@ -1716,6 +1866,9 @@ msgstr "Aktualisieren"
 
 msgid "Полный экран"
 msgstr "Vollbild"
+
+msgid "Аннотации"
+msgstr "Anmerkungen"
 
 msgid "Создать новую папку"
 msgstr "Neuen Ordner erstellen"
@@ -2279,3 +2432,41 @@ msgstr "Schnelle Sichtung und Auswahl von RAW- und JPG-Fotos"
 
 #~ msgid "≈ {h} ч {m} мин"
 #~ msgstr "≈ {h} Std. {m} Min."
+
+#~ msgid "Подключён"
+#~ msgstr ""
+
+#~ msgid "Не подключён"
+#~ msgstr ""
+
+#~ msgid "Открыть Яндекс.Диск"
+#~ msgstr ""
+
+#~ msgid "Подключить Яндекс.Диск"
+#~ msgstr "Markierungen abrufen"
+
+#~ msgid "На уровень выше"
+#~ msgstr "Eine Ebene nach oben"
+
+#~ msgid "Серверные превью: оригиналы не скачиваются для просмотра."
+#~ msgstr ""
+
+#~ msgid "Новая папка"
+#~ msgstr "Neuer Ordner {n}"
+
+#~ msgid "Имя копии:"
+#~ msgstr "ORDNER"
+
+#~ msgid "Куда скопировать файл"
+#~ msgstr "kopieren"
+
+#~ msgid "Файл с таким именем уже существует."
+#~ msgstr "Ein Ordner mit diesem Namen existiert bereits."
+
+#~ msgid "Скачиваю оригинал…"
+#~ msgstr "Originale empfangen"
+#~ msgid "{title}: {done} из {total}"
+#~ msgstr "{title}: {done} von {total}"
+
+#~ msgid "{title}: {done}/{total}"
+#~ msgstr "{title}: {done}/{total}"

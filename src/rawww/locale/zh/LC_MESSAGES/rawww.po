@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-08-25 19:05+0300\n"
+"POT-Creation-Date: 2026-09-10 19:42+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -85,8 +85,41 @@ msgstr "语音评论"
 msgid "Свернуть ленту превью"
 msgstr "收起预览条"
 
+msgid "Рисовать красным"
+msgstr "用红色绘制"
+
+msgid "Рисовать жёлтым"
+msgstr "用黄色绘制"
+
+msgid "Рисовать зелёным"
+msgstr "用绿色绘制"
+
+msgid "Рисовать синим"
+msgstr "用蓝色绘制"
+
+msgid "Стереть аннотацию"
+msgstr "擦除批注"
+
+msgid "Текстовая метка"
+msgstr "文本标签"
+
+msgid "Записать аудиокомментарий"
+msgstr "录制语音评论"
+
 msgid "Воспроизвести / пауза (Пробел)"
 msgstr "播放 / 暂停（空格）"
+
+msgid "Закрыть"
+msgstr "关闭"
+
+msgid "Запишите комментарий к этой фотографии"
+msgstr "为此照片录制评论"
+
+msgid "Запись"
+msgstr "录制"
+
+msgid "Удалить аудиокомментарий"
+msgstr "删除语音评论"
 
 msgid "Развернуть ленту превью"
 msgstr "展开预览条"
@@ -102,6 +135,9 @@ msgstr "显示含此人脸的照片"
 
 msgid "Добавить лицо в набор"
 msgstr "将人脸加入集合"
+
+msgid "Стоп"
+msgstr "停止"
 
 msgid "Снять все метки"
 msgstr "清除所有标记"
@@ -165,6 +201,9 @@ msgstr "从收藏中移除所选文件夹，或将其拖到此处"
 
 msgid "Добавить текущую папку в избранное"
 msgstr "将当前文件夹加入收藏"
+
+msgid "Удалить выбранную папку из избранного"
+msgstr "从收藏中移除所选文件夹"
 
 msgid "Все рейтинги"
 msgstr "全部评分"
@@ -250,9 +289,8 @@ msgstr "按评分"
 msgid "Поиск"
 msgstr "搜索"
 
-#, fuzzy
 msgid "Сбросить"
-msgstr "重置颜色"
+msgstr "重置"
 
 msgid "Фильтр по времени"
 msgstr "时间筛选"
@@ -269,9 +307,8 @@ msgstr ""
 "IMG_0239.jpg, 0240\n"
 "IMG_0241"
 
-#, fuzzy
 msgid "Показать"
-msgstr "在文件夹中显示"
+msgstr "显示"
 
 msgid "Открыть список номеров файлов"
 msgstr "打开文件编号列表"
@@ -480,6 +517,74 @@ msgstr "正在删除"
 
 msgid "Не удалось удалить:\n"
 msgstr "无法删除：\n"
+
+#, python-brace-format
+msgid "Яндекс.Диск: {account}"
+msgstr "Yandex Disk：{account}"
+
+msgid "Яндекс.Диск"
+msgstr "Yandex Disk"
+
+msgid "Загрузка…"
+msgstr "加载中…"
+
+msgid "Имя новой папки:"
+msgstr "新文件夹名称："
+
+msgid "Скопировать на компьютер…"
+msgstr "复制到电脑…"
+
+msgid "Переместить на компьютер…"
+msgstr "移动到电脑…"
+
+msgid "Копировать на Яндекс.Диске…"
+msgstr "在 Yandex Disk 上复制…"
+
+msgid "Переместить на Яндекс.Диске…"
+msgstr "在 Yandex Disk 上移动…"
+
+msgid "Новое имя:"
+msgstr "新名称："
+
+msgid "Переместить"
+msgstr "移动"
+
+msgid "Копировать"
+msgstr "复制"
+
+msgid "Полный путь назначения на Диске:"
+msgstr "Disk 上的完整目标路径："
+
+msgid "Переместить выбранные объекты Яндекс.Диска в корзину?"
+msgstr "将所选 Yandex Disk 项目移到回收站？"
+
+msgid "Папка назначения"
+msgstr "目标文件夹"
+
+#, python-brace-format
+msgid "Файл уже существует: {path}"
+msgstr "文件已存在：{path}"
+
+msgid "Перемещение из Яндекс.Диска"
+msgstr "从 Yandex Disk 移动"
+
+msgid "Копирование из Яндекс.Диска"
+msgstr "从 Yandex Disk 复制"
+
+msgid "Перемещение между Яндекс.Дисками"
+msgstr "在 Yandex Disk 之间移动"
+
+msgid "Копирование между Яндекс.Дисками"
+msgstr "在 Yandex Disk 之间复制"
+
+msgid "Перемещение на Яндекс.Диск"
+msgstr "移动到 Yandex Disk"
+
+msgid "Копирование на Яндекс.Диск"
+msgstr "复制到 Yandex Disk"
+
+msgid "Операция с Яндекс.Диском"
+msgstr "Yandex Disk 操作"
 
 #, python-brace-format
 msgid ""
@@ -781,6 +886,17 @@ msgstr "（共 {n}）"
 msgid " (выделено: {n})"
 msgstr "（已选：{n}）"
 
+msgid "Чтение папки Яндекс.Диска…"
+msgstr "正在读取 Yandex Disk 文件夹…"
+
+#, python-brace-format
+msgid "Предзагрузка 1920: {done}/{total}"
+msgstr "预加载 1920：{done}/{total}"
+
+#, python-brace-format
+msgid "Миниатюры Яндекс.Диска: {done}/{total}"
+msgstr "Yandex Disk 缩略图：{done}/{total}"
+
 #, python-brace-format
 msgid "Отправка: {done}/{total}"
 msgstr "上传：{done}/{total}"
@@ -855,9 +971,6 @@ msgstr "已将人脸加入集合。"
 
 msgid "Наборы лиц"
 msgstr "人脸集合"
-
-msgid "Закрыть"
-msgstr "关闭"
 
 msgid "Добавьте лицо, нажав «В набор» на фотографии."
 msgstr "在照片上点击「加入集合」以添加人脸。"
@@ -963,6 +1076,18 @@ msgstr "打开下载页面"
 msgid "Позже"
 msgstr "以后"
 
+msgid "Не настроен публичный client_id OAuth для Яндекс.Диска."
+msgstr "尚未配置 Yandex Disk 的公共 OAuth client_id。"
+
+msgid "Вход в Яндекс.Диск"
+msgstr "登录 Yandex Disk"
+
+msgid "Введите код, показанный Яндексом в браузере:"
+msgstr "输入 Yandex 在浏览器中显示的代码："
+
+msgid "Яндекс.Диск подключён."
+msgstr "Yandex Disk 已连接。"
+
 msgid "Одна из выбранных карт больше недоступна."
 msgstr "所选存储卡之一已不可用。"
 
@@ -1067,9 +1192,6 @@ msgstr "应用和后台线程的未处理错误。日志仅保留在本机。"
 msgid "Очистить"
 msgstr "清除"
 
-msgid "Копировать"
-msgstr "复制"
-
 msgid "Поведение"
 msgstr "行为"
 
@@ -1078,6 +1200,9 @@ msgstr "替换代码"
 
 msgid "Интерфейс"
 msgstr "界面"
+
+msgid "Облачные диски"
+msgstr "云盘"
 
 msgid "О приложении"
 msgstr "关于"
@@ -1177,6 +1302,26 @@ msgstr "为受支持的文件和文件夹添加「在 Controlka 中打开」。�
 
 msgid "Выбрать по умолчанию для JPG и RAW…"
 msgstr "设为 JPG 和 RAW 的默认程序…"
+
+msgid ""
+"Просматривайте серверные превью и выполняйте файловые операции, не "
+"скачивая оригиналы для просмотра. EXIF, XMP и AI для облака не "
+"используются."
+msgstr "浏览服务器预览并执行文件操作，无需为查看而下载原始文件。云端文件不使用 EXIF、XMP 和 AI。"
+
+msgid "Добавить Яндекс.Диск"
+msgstr "添加 Yandex Disk"
+
+msgid "Удалить подключение"
+msgstr "删除连接"
+
+msgid "Отключить Яндекс.Диск"
+msgstr "断开 Yandex Disk"
+
+msgid ""
+"Удалить это подключение только из Контрольки? Файлы на Диске останутся "
+"без изменений."
+msgstr "仅从 Controlka 中删除此连接？Disk 上的文件将保持不变。"
 
 msgid "Программы (*.exe);;Все файлы (*)"
 msgstr "程序 (*.exe);;所有文件 (*)"
@@ -1642,6 +1787,9 @@ msgstr "刷新"
 
 msgid "Полный экран"
 msgstr "全屏"
+
+msgid "Аннотации"
+msgstr "批注"
 
 msgid "Создать новую папку"
 msgstr "新建文件夹"
@@ -2195,3 +2343,41 @@ msgstr "快速查看和筛选 RAW 与 JPG 照片"
 
 #~ msgid "≈ {h} ч {m} мин"
 #~ msgstr "≈ {h} 小时 {m} 分"
+
+#~ msgid "Подключён"
+#~ msgstr ""
+
+#~ msgid "Не подключён"
+#~ msgstr ""
+
+#~ msgid "Открыть Яндекс.Диск"
+#~ msgstr ""
+
+#~ msgid "Подключить Яндекс.Диск"
+#~ msgstr "获取标记"
+
+#~ msgid "На уровень выше"
+#~ msgstr "上一级"
+
+#~ msgid "Серверные превью: оригиналы не скачиваются для просмотра."
+#~ msgstr ""
+
+#~ msgid "Новая папка"
+#~ msgstr "新建文件夹 {n}"
+
+#~ msgid "Имя копии:"
+#~ msgstr "文件夹"
+
+#~ msgid "Куда скопировать файл"
+#~ msgstr "复制"
+
+#~ msgid "Файл с таким именем уже существует."
+#~ msgstr "同名文件夹已存在。"
+
+#~ msgid "Скачиваю оригинал…"
+#~ msgstr "接收原图"
+#~ msgid "{title}: {done} из {total}"
+#~ msgstr "{title}：{done} / {total}"
+
+#~ msgid "{title}: {done}/{total}"
+#~ msgstr "{title}：{done}/{total}"

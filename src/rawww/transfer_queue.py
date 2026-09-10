@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
 from time import monotonic, sleep
+from typing import Callable
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, QSettings, QSize, Signal
@@ -101,12 +102,19 @@ class TransferTask:
     copy_buffer: bytearray | None = field(default=None, repr=False)
     run_event: Event = field(default_factory=Event, repr=False)
     cancel_event: Event = field(default_factory=Event, repr=False)
+    title_override: str = ""
+    affected_directories: set[Path] = field(default_factory=set, repr=False)
+    external_runner: Callable[["TransferTask", "TransferManager"], None] | None = field(
+        default=None, repr=False
+    )
 
     def __post_init__(self) -> None:
         self.run_event.set()
 
     @property
     def title(self) -> str:
+        if self.title_override:
+            return self.title_override
         action = _("Перемещение") if self.move else _("Копирование")
         return f"{action} → {self.destination}"
 
@@ -161,6 +169,51 @@ class TransferManager(QObject):
         self.changed.emit()
         self._pump()
         return task.identifier
+
+    def enqueue_external(
+        self,
+        title: str,
+        runner: Callable[[TransferTask, "TransferManager"], None],
+        *,
+        parallel: bool = False,
+        affected_directories: set[Path] | None = None,
+    ) -> str | None:
+        """Добавляет сетевую передачу в ту же очередь и панель, что локальные файлы."""
+        if self._closing:
+            return None
+        task = TransferTask(
+            [],
+            Path(),
+            False,
+            parallel=parallel,
+            title_override=title,
+            affected_directories=set(affected_directories or ()),
+            external_runner=runner,
+        )
+        self._tasks[task.identifier] = task
+        self.pending.append(task)
+        self.changed.emit()
+        self._pump()
+        return task.identifier
+
+    def checkpoint(self, task: TransferTask) -> None:
+        """Даёт внешней передаче общие паузу и безопасную отмену."""
+        self._checkpoint(task)
+
+    def set_external_total(self, task: TransferTask, files: int, size: int) -> None:
+        task.total_files = max(0, files)
+        task.total_bytes = max(0, size)
+        task.transfer_started_at = monotonic()
+        self._report(task, _("Подготовка завершена"))
+
+    def advance_external(
+        self, task: TransferTask, *, byte_count: int = 0, file_completed: bool = False, name: str = ""
+    ) -> None:
+        """Публикует порцию сетевого прогресса в существующую панель операций."""
+        task.transferred_bytes += max(0, byte_count)
+        if file_completed:
+            task.completed_files += 1
+        self._report(task, name)
 
     def set_serial(self, serial: bool) -> None:
         """Меняет режим новых запусков; уже работающие задачи не прерываются."""
@@ -268,6 +321,10 @@ class TransferManager(QObject):
     def _run_task(self, task: TransferTask) -> None:
         errors: list[str] = []
         try:
+            if task.external_runner is not None:
+                task.external_runner(task, self)
+                self._finishedArrived.emit(task.identifier, errors)
+                return
             task.total_files, task.total_bytes = self._measure(task)
             task.transfer_started_at = monotonic()
             self._report(task, _("Подготовка завершена"))
@@ -282,6 +339,10 @@ class TransferManager(QObject):
         except _TransferCancelled:
             task.status = "cancelled"
         except OSError as exc:
+            errors.append(str(exc))
+        except Exception as exc:
+            # Сетевые адаптеры сводят свои ошибки к пользовательскому тексту,
+            # но не обязаны наследоваться от OSError.
             errors.append(str(exc))
         self._finishedArrived.emit(task.identifier, errors)
 
