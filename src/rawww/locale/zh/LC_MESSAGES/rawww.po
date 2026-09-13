@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-10 19:42+0300\n"
+"POT-Creation-Date: 2026-09-10 22:55+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -201,9 +201,6 @@ msgstr "从收藏中移除所选文件夹，或将其拖到此处"
 
 msgid "Добавить текущую папку в избранное"
 msgstr "将当前文件夹加入收藏"
-
-msgid "Удалить выбранную папку из избранного"
-msgstr "从收藏中移除所选文件夹"
 
 msgid "Все рейтинги"
 msgstr "全部评分"
@@ -407,6 +404,9 @@ msgstr "QFileSystemModel 无法创建文件夹。"
 msgid "Не удалось создать папку: {error}"
 msgstr "无法创建文件夹：{error}"
 
+msgid "Яндекс.Диск"
+msgstr "Yandex Disk"
+
 msgid "Открыть в новой вкладке"
 msgstr "在新标签页中打开"
 
@@ -521,9 +521,6 @@ msgstr "无法删除：\n"
 #, python-brace-format
 msgid "Яндекс.Диск: {account}"
 msgstr "Yandex Disk：{account}"
-
-msgid "Яндекс.Диск"
-msgstr "Yandex Disk"
 
 msgid "Загрузка…"
 msgstr "加载中…"
@@ -1302,12 +1299,6 @@ msgstr "为受支持的文件和文件夹添加「在 Controlka 中打开」。�
 
 msgid "Выбрать по умолчанию для JPG и RAW…"
 msgstr "设为 JPG 和 RAW 的默认程序…"
-
-msgid ""
-"Просматривайте серверные превью и выполняйте файловые операции, не "
-"скачивая оригиналы для просмотра. EXIF, XMP и AI для облака не "
-"используются."
-msgstr "浏览服务器预览并执行文件操作，无需为查看而下载原始文件。云端文件不使用 EXIF、XMP 和 AI。"
 
 msgid "Добавить Яндекс.Диск"
 msgstr "添加 Yandex Disk"
@@ -2376,8 +2367,19 @@ msgstr "快速查看和筛选 RAW 与 JPG 照片"
 
 #~ msgid "Скачиваю оригинал…"
 #~ msgstr "接收原图"
+
 #~ msgid "{title}: {done} из {total}"
 #~ msgstr "{title}：{done} / {total}"
 
 #~ msgid "{title}: {done}/{total}"
 #~ msgstr "{title}：{done}/{total}"
+
+#~ msgid "Удалить выбранную папку из избранного"
+#~ msgstr "从收藏中移除所选文件夹"
+
+#~ msgid ""
+#~ "Просматривайте серверные превью и выполняйте"
+#~ " файловые операции, не скачивая оригиналы"
+#~ " для просмотра. EXIF, XMP и AI "
+#~ "для облака не используются."
+#~ msgstr "浏览服务器预览并执行文件操作，无需为查看而下载原始文件。云端文件不使用 EXIF、XMP 和 AI。"

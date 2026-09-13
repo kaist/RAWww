@@ -162,6 +162,7 @@ from .i18n import gettext as _
 
 
 THUMB_SIZE = 256
+CLOUD_THUMBNAIL_WORKERS = 4
 ORIGINAL_SIZE = 0
 VIDEO_THUMBNAIL_TIMEOUT_MS = 10_000
 # Ниже этого eye aspect ratio глаз считается закрытым (порог подобран на кадрах:
@@ -5075,7 +5076,14 @@ class Workspace(QMainWindow):
         self._rename_control: BatchJobControl | None = None
         self._rename_entry: UtilityJob | None = None
         self.file_mutation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="file-mutation")
-        self.cloud_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="yandex-thumbnail")
+        # Чтение дерева не должно занимать слоты миниатюр: при разворачивании
+        # нескольких узлов грид всё равно обязан быстро заполняться картинками.
+        self.cloud_directory_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="yandex-directory"
+        )
+        self.cloud_thumbnail_executor = ThreadPoolExecutor(
+            max_workers=CLOUD_THUMBNAIL_WORKERS, thread_name_prefix="yandex-thumbnail"
+        )
         self.cloud_full_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yandex-full-preview")
         self.cloud_operation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yandex-operation")
         self.burst_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-materialize")
@@ -5206,6 +5214,8 @@ class Workspace(QMainWindow):
         self.cloud_keys_by_remote_path: dict[str, Path] = {}
         self._cloud_clients: dict[str, YandexDiskClient] = {}
         self._cloud_preview_pending: set[tuple[int, Path, int]] = set()
+        self._cloud_thumbnail_queue: deque[Path] = deque()
+        self._cloud_thumbnail_queued: dict[Path, tuple[YandexDiskItem, str | None]] = {}
         self._cloud_tree_requests: set[tuple[int, str]] = set()
         self._cloud_preview_totals: dict[int, int] = {THUMB_SIZE: 0, 1920: 0}
         self._cloud_preview_completed: dict[int, set[Path]] = {THUMB_SIZE: set(), 1920: set()}
@@ -5400,6 +5410,9 @@ class Workspace(QMainWindow):
         self.visible_thumb_timer = QTimer(self)
         self.visible_thumb_timer.setSingleShot(True)
         self.visible_thumb_timer.timeout.connect(self._prioritize_visible_thumbs)
+        self.cloud_visible_thumb_timer = QTimer(self)
+        self.cloud_visible_thumb_timer.setSingleShot(True)
+        self.cloud_visible_thumb_timer.timeout.connect(self._prioritize_cloud_visible_thumbnails)
         self.ai_progress_timer = QTimer(self)
         self.ai_progress_timer.setInterval(250)
         self.ai_progress_timer.timeout.connect(self._update_ai_progress)
@@ -5454,6 +5467,7 @@ class Workspace(QMainWindow):
         self.grid_full_request_timer.stop()
         self.populate_timer.stop()
         self.thumb_timer.stop()
+        self.cloud_visible_thumb_timer.stop()
         self.ai_progress_timer.stop()
         self._ai_progress_started_at = None
         self.status_refresh_timer.stop()
@@ -5478,7 +5492,8 @@ class Workspace(QMainWindow):
         retire_executor(self.cache_flush_executor, cancel_futures=False)
         retire_executor(self.rename_executor, cancel_futures=False)
         retire_executor(self.file_mutation_executor, cancel_futures=False)
-        retire_executor(self.cloud_executor)
+        retire_executor(self.cloud_directory_executor)
+        retire_executor(self.cloud_thumbnail_executor)
         retire_executor(self.cloud_full_executor)
         retire_executor(self.cloud_operation_executor, cancel_futures=False)
         retire_executor(self.burst_executor, cancel_futures=False)
@@ -6088,7 +6103,7 @@ class Workspace(QMainWindow):
         self.cloud_favorites_splitter.setStretchFactor(1, 0)
         if self.cloud_favorites_splitter.count() == 3:
             self.cloud_favorites_splitter.setStretchFactor(2, 0)
-        self.cloud_favorites_splitter.setSizes([500, 140])
+        self.cloud_favorites_splitter.setSizes([420, 140, 108])
         cloud_layout.addWidget(self.cloud_favorites_splitter, 1)
 
         self.sidebar_stack.addWidget(local_page)
@@ -8042,6 +8057,8 @@ class Workspace(QMainWindow):
         self.cloud_items_by_key.clear()
         self.cloud_keys_by_remote_path.clear()
         self._cloud_preview_pending.clear()
+        self._cloud_thumbnail_queue.clear()
+        self._cloud_thumbnail_queued.clear()
         self._cloud_preview_totals = {THUMB_SIZE: 0, 1920: 0}
         self._cloud_preview_completed = {THUMB_SIZE: set(), 1920: set()}
         self._cloud_full_previews.clear()
@@ -8081,13 +8098,21 @@ class Workspace(QMainWindow):
         """Очищает локальное состояние и асинхронно открывает каталог Диска."""
         if self.cloud_account_id is None:
             return
+        # Поздняя проверка локальной папки не должна возвращать пользователя
+        # из облака, поэтому здесь полностью снимаем прежнее наблюдение.
+        self.folder_change_timer.stop()
+        watched = self.folder_watcher.directories()
+        if watched:
+            self.folder_watcher.removePaths(watched)
+        self._folder_check_pending = False
+        self._media_stamps.clear()
         self.cloud_generation += 1
         self.cloud_path = remote_path
         account = next(
             (item for item in self.cloud_accounts.list() if item.id == self.cloud_account_id),
             None,
         )
-        folder_name = remote_path.rstrip("/").rpartition("/")[2]
+        folder_name = "" if remote_path == "disk:/" else remote_path.rstrip("/").rpartition("/")[2]
         self.setWindowTitle(folder_name or (account.title if account else _("Яндекс.Диск")))
         self._select_cloud_tree_path(remote_path)
         self.scheduler.cancel_pending()
@@ -8098,6 +8123,9 @@ class Workspace(QMainWindow):
         self.folder_change_timer.stop()
         self.cloud_items_by_key.clear()
         self.cloud_keys_by_remote_path.clear()
+        self._cloud_preview_pending.clear()
+        self._cloud_thumbnail_queue.clear()
+        self._cloud_thumbnail_queued.clear()
         self._cloud_full_previews.clear()
         self._cloud_full_preview_targets.clear()
         self._cloud_preview_totals = {THUMB_SIZE: 0, 1920: 0}
@@ -8198,7 +8226,7 @@ class Workspace(QMainWindow):
                  "tree_only": tree_only, "items": None, "error": str(exc)}
             )
             return
-        future = self.cloud_executor.submit(client.list_directory, remote_path)
+        future = self.cloud_directory_executor.submit(client.list_directory, remote_path)
 
         def finished(done: Future) -> None:
             try:
@@ -8277,7 +8305,10 @@ class Workspace(QMainWindow):
         for key in self.paths:
             remote = self.cloud_items_by_key[key]
             if not remote.is_dir and self.items_by_path[key].data(PREVIEW_ROLE) is None:
-                self._submit_cloud_preview(key, remote, THUMB_SIZE, remote.preview_url)
+                self._queue_cloud_thumbnail(key, remote, remote.preview_url)
+        # После первой раскладки известна видимая область; поднимаем её над
+        # хвостом каталога до запуска сетевых запросов.
+        QTimer.singleShot(0, self._prioritize_cloud_visible_thumbnails)
 
     def _populate_cloud_tree(self, parent_path: str, items: list[YandexDiskItem]) -> None:
         parent = self._cloud_tree_item(parent_path)
@@ -8661,11 +8692,74 @@ class Workspace(QMainWindow):
             return
         self._load_cloud_directory(self.cloud_path)
 
+    def _queue_cloud_thumbnail(
+        self, key: Path, remote: YandexDiskItem, url: str | None = None
+    ) -> None:
+        """Добавляет миниатюру в очередь, которую можно перестроить при прокрутке."""
+        pending_key = (self.cloud_generation, key, THUMB_SIZE)
+        if pending_key in self._cloud_preview_pending or key in self._cloud_thumbnail_queued:
+            return
+        self._cloud_thumbnail_queued[key] = (remote, url)
+        self._cloud_thumbnail_queue.append(key)
+
+    def _drain_cloud_thumbnail_queue(self) -> None:
+        """Запускает ограниченное число самых приоритетных сетевых миниатюр."""
+        active = sum(size == THUMB_SIZE for _generation, _key, size in self._cloud_preview_pending)
+        while active < CLOUD_THUMBNAIL_WORKERS and self._cloud_thumbnail_queue:
+            key = self._cloud_thumbnail_queue.popleft()
+            queued = self._cloud_thumbnail_queued.pop(key, None)
+            if queued is None:
+                continue
+            remote, url = queued
+            self._submit_cloud_preview(key, remote, THUMB_SIZE, url, _from_queue=True)
+            active += 1
+
+    def _prioritize_cloud_visible_thumbnails(self) -> None:
+        """Ставит видимые карточки облака перед фоновым хвостом загрузки."""
+        if self.closing or not self.workspace_active or self.cloud_account_id is None:
+            return
+        cell = self.grid.card_size_hint(0)
+        if cell.width() <= 0 or cell.height() <= 0:
+            return
+        viewport = self.grid.viewport()
+        rows: set[int] = set()
+        for y in range(cell.height() // 2, viewport.height(), cell.height()):
+            for x in range(cell.width() // 2, viewport.width(), cell.width()):
+                item = self.grid.itemAt(QPoint(x, y))
+                if item is not None:
+                    rows.add(self.grid.row(item))
+        if rows:
+            first, last = min(rows), max(rows)
+            centre = (first + last) / 2
+            ordered_rows = sorted(rows, key=lambda row: abs(row - centre))
+            span = max(1, last - first + 1)
+            ordered_rows.extend(range(first - 1, max(-1, first - span - 1), -1))
+            ordered_rows.extend(range(last + 1, min(self.grid.count(), last + span + 1)))
+            preferred = [
+                self.grid.item(row).data(Qt.ItemDataRole.UserRole)
+                for row in ordered_rows
+                if 0 <= row < self.grid.count() and self.grid.item(row) is not None
+            ]
+            preferred_keys = [key for key in preferred if key in self._cloud_thumbnail_queued]
+            queued = [key for key in self._cloud_thumbnail_queue if key not in set(preferred_keys)]
+            self._cloud_thumbnail_queue = deque(dict.fromkeys([*preferred_keys, *queued]))
+        self._drain_cloud_thumbnail_queue()
+
     def _submit_cloud_preview(
-        self, key: Path, remote: YandexDiskItem, size: int, url: str | None = None
+        self,
+        key: Path,
+        remote: YandexDiskItem,
+        size: int,
+        url: str | None = None,
+        *,
+        _from_queue: bool = False,
     ) -> None:
         account_id = self.cloud_account_id
         if account_id is None:
+            return
+        if size == THUMB_SIZE and not _from_queue:
+            self._queue_cloud_thumbnail(key, remote, url)
+            self._drain_cloud_thumbnail_queue()
             return
         generation = self.cloud_generation
         pending_key = (generation, key, size)
@@ -8684,7 +8778,7 @@ class Workspace(QMainWindow):
             return
         self._cloud_preview_pending.add(pending_key)
         client = self._yandex_client(account_id)
-        executor = self.cloud_executor if size == THUMB_SIZE else self.cloud_full_executor
+        executor = self.cloud_thumbnail_executor if size == THUMB_SIZE else self.cloud_full_executor
         if size == THUMB_SIZE:
             future = executor.submit(
                 self.cloud_preview_cache.obtain, client, account_id, remote, size, url
@@ -8719,6 +8813,8 @@ class Workspace(QMainWindow):
         if size == 1920 and key not in self._cloud_full_preview_targets:
             return
         self._cloud_preview_completed.setdefault(size, set()).add(key)
+        if size == THUMB_SIZE:
+            self._drain_cloud_thumbnail_queue()
         self._refresh_status_panel()
         if result["error"]:
             return
@@ -8802,7 +8898,11 @@ class Workspace(QMainWindow):
             else:
                 button.setChecked(key == _drive_key(current_root) if current_root else False)
 
-        if not self.closing and not self.current_dir.is_dir():
+        if (
+            not self.closing
+            and self.cloud_account_id is None
+            and not self.current_dir.is_dir()
+        ):
             fallback = Path.home()
             self._set_tree_root_for_path(fallback)
             self.load_directory(fallback)
@@ -10656,6 +10756,10 @@ class Workspace(QMainWindow):
     def _schedule_visible_thumb_priority(self) -> None:
         if not self.workspace_active:
             return
+        if self.cloud_account_id is not None:
+            if not self.cloud_visible_thumb_timer.isActive():
+                self.cloud_visible_thumb_timer.start(0)
+            return
         if not self.visible_thumb_timer.isActive():
             self.visible_thumb_timer.start(0)
 
@@ -11733,6 +11837,8 @@ class Workspace(QMainWindow):
         self._refresh_status_panel()
 
     def _folder_changed(self, path: str) -> None:
+        if self.cloud_account_id is not None:
+            return
         if self._selection_progress is not None or self._upload_progress is not None:
             return
         if (
@@ -11763,6 +11869,7 @@ class Workspace(QMainWindow):
         """
         if (
             self.closing
+            or self.cloud_account_id is not None
             or not self.workspace_active
             or not self._media_stamps
             or self._folder_check_pending
@@ -11778,6 +11885,8 @@ class Workspace(QMainWindow):
         self._reload_changed_folder(rescan_xmp=False)
 
     def _reload_changed_folder(self, *, rescan_xmp: bool = True) -> None:
+        if self.cloud_account_id is not None:
+            return
         if self._selection_progress is not None or self._upload_progress is not None:
             return
         if not self.closing and self.current_dir.is_dir():
@@ -11795,7 +11904,12 @@ class Workspace(QMainWindow):
         """Перезагружает папку лишь при изменении фото, а не после записи XMP."""
         generation, directory, future = payload
         self._folder_check_pending = False
-        if self.closing or generation != self.cache_load_generation or directory != self.current_dir:
+        if (
+            self.closing
+            or self.cloud_account_id is not None
+            or generation != self.cache_load_generation
+            or directory != self.current_dir
+        ):
             return
         if (
             self._file_mutation_waiting
@@ -14218,6 +14332,7 @@ class Workspace(QMainWindow):
         """Возобновляет пропущенный хвост превью после отмены или ошибки задания."""
         if (
             self.closing
+            or self.cloud_account_id is not None
             or not self.workspace_active
             or self.folder_cache is None
             or not self.cache_ready

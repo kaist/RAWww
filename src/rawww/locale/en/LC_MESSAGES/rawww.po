@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-10 19:42+0300\n"
+"POT-Creation-Date: 2026-09-10 22:55+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -201,9 +201,6 @@ msgstr "Remove the selected folder from favorites or drag it here"
 
 msgid "Добавить текущую папку в избранное"
 msgstr "Add current folder to favorites"
-
-msgid "Удалить выбранную папку из избранного"
-msgstr "Remove selected folder from favorites"
 
 msgid "Все рейтинги"
 msgstr "All ratings"
@@ -409,6 +406,9 @@ msgstr "QFileSystemModel could not create the folder."
 msgid "Не удалось создать папку: {error}"
 msgstr "Could not create folder: {error}"
 
+msgid "Яндекс.Диск"
+msgstr "Yandex Disk"
+
 msgid "Открыть в новой вкладке"
 msgstr "Open in new tab"
 
@@ -525,9 +525,6 @@ msgstr "Could not delete:\n"
 #, python-brace-format
 msgid "Яндекс.Диск: {account}"
 msgstr "Yandex Disk: {account}"
-
-msgid "Яндекс.Диск"
-msgstr "Yandex Disk"
 
 msgid "Загрузка…"
 msgstr "Loading…"
@@ -1331,14 +1328,6 @@ msgstr ""
 
 msgid "Выбрать по умолчанию для JPG и RAW…"
 msgstr "Set as default for JPG and RAW…"
-
-msgid ""
-"Просматривайте серверные превью и выполняйте файловые операции, не "
-"скачивая оригиналы для просмотра. EXIF, XMP и AI для облака не "
-"используются."
-msgstr ""
-"Browse server previews and perform file operations without downloading "
-"originals for viewing. EXIF, XMP, and AI are not used for cloud files."
 
 msgid "Добавить Яндекс.Диск"
 msgstr "Add Yandex Disk"
@@ -2432,8 +2421,23 @@ msgstr "Fast RAW and JPG viewing and culling"
 
 #~ msgid "Скачиваю оригинал…"
 #~ msgstr "Receive originals"
+
 #~ msgid "{title}: {done} из {total}"
 #~ msgstr "{title}: {done} of {total}"
 
 #~ msgid "{title}: {done}/{total}"
 #~ msgstr "{title}: {done}/{total}"
+
+#~ msgid "Удалить выбранную папку из избранного"
+#~ msgstr "Remove selected folder from favorites"
+
+#~ msgid ""
+#~ "Просматривайте серверные превью и выполняйте"
+#~ " файловые операции, не скачивая оригиналы"
+#~ " для просмотра. EXIF, XMP и AI "
+#~ "для облака не используются."
+#~ msgstr ""
+#~ "Browse server previews and perform file"
+#~ " operations without downloading originals "
+#~ "for viewing. EXIF, XMP, and AI are"
+#~ " not used for cloud files."

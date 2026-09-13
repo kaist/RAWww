@@ -180,6 +180,16 @@ class TransferQueueTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["path"], remote.path)
         self.assertFalse(payload["cut"])
 
+    def test_cloud_location_keeps_account_and_root_path(self) -> None:
+        root = Workspace._cloud_location_value("account-id", "disk:/")
+        nested = Workspace._cloud_location_value("account-id", "disk:/shoot/day-1")
+
+        self.assertEqual(Workspace._parse_cloud_location(root), ("account-id", "disk:/"))
+        self.assertEqual(
+            Workspace._parse_cloud_location(nested),
+            ("account-id", "disk:/shoot/day-1"),
+        )
+
     def test_sizes_and_short_eta_are_human_readable(self) -> None:
         self.assertEqual(format_transfer_size(5 * 1024**2), "5.0 МБ")
         self.assertEqual(format_transfer_size(3 * 1024**3), "3.0 ГБ")

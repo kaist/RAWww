@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-10 19:42+0300\n"
+"POT-Creation-Date: 2026-09-10 22:55+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -199,9 +199,6 @@ msgid "Удалить выбранную папку из избранного и
 msgstr ""
 
 msgid "Добавить текущую папку в избранное"
-msgstr ""
-
-msgid "Удалить выбранную папку из избранного"
 msgstr ""
 
 msgid "Все рейтинги"
@@ -402,6 +399,9 @@ msgstr ""
 msgid "Не удалось создать папку: {error}"
 msgstr ""
 
+msgid "Яндекс.Диск"
+msgstr ""
+
 msgid "Открыть в новой вкладке"
 msgstr ""
 
@@ -513,9 +513,6 @@ msgstr ""
 
 #, python-brace-format
 msgid "Яндекс.Диск: {account}"
-msgstr ""
-
-msgid "Яндекс.Диск"
 msgstr ""
 
 msgid "Загрузка…"
@@ -1269,12 +1266,6 @@ msgid ""
 msgstr ""
 
 msgid "Выбрать по умолчанию для JPG и RAW…"
-msgstr ""
-
-msgid ""
-"Просматривайте серверные превью и выполняйте файловые операции, не "
-"скачивая оригиналы для просмотра. EXIF, XMP и AI для облака не "
-"используются."
 msgstr ""
 
 msgid "Добавить Яндекс.Диск"
