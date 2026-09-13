@@ -25,6 +25,22 @@ def work_path() -> Path:
     return application_directory() / "work"
 
 
+def application_cache_path() -> Path:
+    """Возвращает доступный для записи общий кэш приложения.
+
+    У установленной сборки каталог с ресурсами может быть защищён системой,
+    поэтому загружаемые модели живут рядом с кэшем, а не рядом с EXE.
+    """
+    if PORTABLE:
+        return work_path() / "cache"
+    from PySide6.QtCore import QStandardPaths
+
+    location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation)
+    if location:
+        return Path(location) / "ctrlka" / "cache"
+    return Path.home() / ".cache" / "ctrlka"
+
+
 def data_path(name: str) -> Path:
     if getattr(sys, "frozen", False):
         # На macOS готовое приложение — это .app: исполняемый файл лежит в

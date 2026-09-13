@@ -15,6 +15,7 @@ HOTKEY_DEFAULTS: dict[str, tuple[str, str]] = {
     "full_view": (_("Полный просмотр"), "F"),
     "open_in_editor": (_("Открыть в редакторе"), "E"),
     "open_in_second_editor": (_("Открыть в другом редакторе"), "Shift+E"),
+    "remove_objects": (_("Удаление объектов"), "I"),
     "grid": (_("Сетка"), "G"),
     "strip_collapse": (_("Свернуть нижнюю панель (полный просмотр)"), "Shift+Down"),
     "strip_expand": (_("Развернуть нижнюю панель (полный просмотр)"), "Shift+Up"),

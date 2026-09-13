@@ -154,6 +154,9 @@ class AppStateTests(unittest.TestCase):
     def test_second_editor_hotkey_defaults_to_shift_e(self) -> None:
         self.assertEqual(HOTKEY_DEFAULTS["open_in_second_editor"][1], "Shift+E")
 
+    def test_remove_objects_hotkey_defaults_to_i(self) -> None:
+        self.assertEqual(HOTKEY_DEFAULTS["remove_objects"][1], "I")
+
 
     def test_new_thumbnail_replaces_previous_full_view_image(self) -> None:
         old_path = Path("/photos/old.jpg")

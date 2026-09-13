@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-10 22:55+0300\n"
+"POT-Creation-Date: 2026-09-13 23:25+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -810,8 +810,14 @@ msgstr "Shrink JPG"
 msgid "Пакетная ретушь"
 msgstr "Batch retouch"
 
+msgid "Удаление объектов"
+msgstr "Object removal"
+
 msgid "Пока не реализовано"
 msgstr "Not implemented yet"
+
+msgid "В текущем списке нет подходящих растровых фотографий."
+msgstr "There are no suitable raster photos in the current list."
 
 msgid "В текущем списке нет фотографий."
 msgstr "There are no photos in the current list."
@@ -1893,6 +1899,88 @@ msgstr "Clear selection"
 msgid "Удалить выбранный файл или папку"
 msgstr "Delete the selected file or folder"
 
+msgid "Предыдущее фото"
+msgstr "Previous photo"
+
+msgid "Следующее фото"
+msgstr "Next photo"
+
+msgid "Автосохранение"
+msgstr "Autosave"
+
+msgid "Сохранить"
+msgstr "Save"
+
+msgid "Удалить объекты (Enter)"
+msgstr "Remove objects (Enter)"
+
+msgid "Очистить маску"
+msgstr "Clear mask"
+
+msgid "Завершение сохранения…"
+msgstr "Finishing saves…"
+
+msgid "Закрытие…"
+msgstr "Closing…"
+
+#, python-brace-format
+msgid "Скачивание модели: {done} из {total}"
+msgstr "Downloading model: {done} of {total}"
+
+msgid "Скачивание модели…"
+msgstr "Downloading model…"
+
+msgid "Загрузка модели…"
+msgstr "Loading model…"
+
+msgid "Удаление объектов…"
+msgstr "Removing objects…"
+
+msgid "Загрузка изображения…"
+msgstr "Loading image…"
+
+msgid "Сохранение в фоне…"
+msgstr "Saving in background…"
+
+msgid "Есть несохранённые изменения"
+msgstr "Unsaved changes"
+
+msgid "Несохранённые изменения"
+msgstr "Unsaved changes"
+
+msgid ""
+"Есть несохранённый результат или нарисованная маска. Сохранить результат,"
+" отбросить изменения или остаться?"
+msgstr ""
+"There is an unsaved result or a drawn mask. Save the result, discard "
+"changes, or stay?"
+
+msgid "Не удалось сохранить изображение"
+msgstr "Could not save the image"
+
+msgid "Не удалось обработать изображение"
+msgstr "Could not process the image"
+
+msgid "Не удалось загрузить модель"
+msgstr "Could not load the model"
+
+msgid ""
+"Поддерживаются одиночные 8-битные JPEG, PNG, WebP и TIFF. RAW, "
+"многокадровые и другие цветовые режимы недоступны."
+msgstr ""
+"Single-frame 8-bit JPEG, PNG, WebP and TIFF are supported. RAW, multi-"
+"frame images and other colour modes are unavailable."
+
+msgid ""
+"Файл изменён другой программой. Сохранение отменено, чтобы не "
+"перезаписать новую версию."
+msgstr ""
+"Another program changed the file. Saving was cancelled to avoid "
+"overwriting the new version."
+
+msgid "Процесс обработки завершился. Закройте и откройте утилиту снова."
+msgstr "The processing worker exited. Close and reopen the utility."
+
 msgid "Модели работают в отдельном процессе и выгружаются вместе с окном."
 msgstr ""
 "Models run in a separate process and are unloaded together with the "
@@ -2441,3 +2529,12 @@ msgstr "Fast RAW and JPG viewing and culling"
 #~ " operations without downloading originals "
 #~ "for viewing. EXIF, XMP, and AI are"
 #~ " not used for cloud files."
+
+#~ msgid ""
+#~ "Кисть: [ и ]. Enter — удалить. "
+#~ "Пробел + мышь — перемещение. Колесо "
+#~ "— масштаб. Ctrl+Z — отменить штрих."
+#~ msgstr ""
+#~ "Brush: [ and ]. Enter — remove."
+#~ " Space + mouse — pan. Wheel —"
+#~ " zoom. Ctrl+Z — undo stroke."

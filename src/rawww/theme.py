@@ -31,7 +31,7 @@ FOMANTIC_ICON_CODES = {
     "plus": "\uf067", "trash": "\uf1f8",
     "expand": "\uf065", "zoom": "\uf00e", "zoom-out": "\uf010", "play": "\uf04b", "pause": "\uf04c", "film": "\uf008",
     "cloud": "\uf0c2", "sign-out": "\uf2f5", "lock": "\uf023", "sync": "\uf021",
-    "download": "\uf56d", "upload": "\uf574", "eye": "\uf06e", "stop": "\uf04d",
+    "download": "\uf56d", "upload": "\uf574", "save": "\uf0c7", "eye": "\uf06e", "stop": "\uf04d",
     "link": "\uf0c1",
     "cog": "\uf013", "help": "\uf128", "magic": "\uf0d0", "wrench": "\uf0ad",
     "edit": "\uf044", "calendar": "\uf133", "clock": "\uf017", "camera": "\uf030",
@@ -1541,8 +1541,11 @@ def apply_theme(app: QApplication) -> None:
         }
         QPushButton#batchRenamePrimaryButton:hover { background: #3d6f9d; }
         QPushButton#batchRenamePrimaryButton:disabled { background: #303030; border-color: #464646; color: #777d84; }
-        QDialog#batchRetouchDialog { background: #242424; color: #e8e8e8; }
-        QDialog#batchRetouchDialog QLabel { background: transparent; }
+        QDialog#batchRetouchDialog, QDialog#inpaintDialog { background: #242424; color: #e8e8e8; }
+        QDialog#batchRetouchDialog QLabel, QDialog#inpaintDialog QLabel { background: transparent; }
+        QDialog#inpaintDialog QPushButton#batchResizeSecondaryButton:disabled {
+            background: #303030; border-color: #464646; color: #777d84;
+        }
         QFrame#batchRetouchPanel {
             background: #2b2b2b;
             border: 1px solid #3a3a3a;

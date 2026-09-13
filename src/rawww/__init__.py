@@ -22,6 +22,10 @@ def main(*args, **kwargs):
 
     multiprocessing.freeze_support()
 
+    if "--inpaint-worker" in sys.argv:
+        from .inpaint_worker import main as worker_main
+        return worker_main()
+
     if "--retouch-worker" in sys.argv:
         index = sys.argv.index("--retouch-worker")
         from .retouch_worker import main as worker_main

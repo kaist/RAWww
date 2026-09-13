@@ -6579,6 +6579,7 @@ class Workspace(QMainWindow):
         add_hotkey("full_view", self._open_selected)
         add_hotkey("open_in_editor", self._open_in_editor)
         add_hotkey("open_in_second_editor", self._open_in_second_editor)
+        add_hotkey("remove_objects", self._show_inpaint_dialog)
         add_hotkey("grid", self._show_grid_or_open_single_photo_folder)
         add_hotkey("strip_collapse", lambda: self.full_view.cycle_strip(1), target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         add_hotkey("strip_expand", lambda: self.full_view.cycle_strip(-1), target=self.full_view, context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -11334,6 +11335,7 @@ class Workspace(QMainWindow):
             (_("Групповой резайс"), "expand", self._show_batch_resize_dialog),
             (_("Уменьшить JPG"), "download", self._show_shrink_jpeg_dialog),
             (_("Пакетная ретушь"), "magic", self._show_batch_retouch_dialog),
+            (_("Удаление объектов"), "eraser", self._show_inpaint_dialog),
         ):
             button = QPushButton(label)
             button.setObjectName("toolbarPopupUtilityButton")
@@ -11350,6 +11352,24 @@ class Workspace(QMainWindow):
         action.setDefaultWidget(content)
         menu.addAction(action)
         menu.exec(self.utilities_button.mapToGlobal(QPoint(0, self.utilities_button.height())))
+
+    def _show_inpaint_dialog(self) -> None:
+        """Передаёт растровые кадры отдельному окну удаления объектов."""
+        from .inpaint_dialog import InpaintDialog
+        # Список расширений не требует импорта NumPy/Pillow/модели в UI.
+        extensions = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
+        if self.cloud_account_id is not None:
+            return
+        paths = [path for path in self.view_paths if path.suffix.lower() in extensions]
+        if not paths:
+            QMessageBox.information(self, _("Удаление объектов"), _("В текущем списке нет подходящих растровых фотографий."))
+            return
+        selected = self._selected_paths()
+        current = self.current_path if self.current_path in paths else next((p for p in selected if p in paths), paths[0])
+        dialog = InpaintDialog(paths, current, self.settings, self)
+        dialog.showMaximized()
+        dialog.exec()
+        dialog.deleteLater()
 
     def _show_batch_retouch_dialog(self) -> None:
         """Открывает отдельное окно ретуши, не загружая ONNX-модели в Workspace."""
