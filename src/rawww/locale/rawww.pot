@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-14 10:15+0300\n"
+"POT-Creation-Date: 2026-09-14 16:06+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1815,19 +1815,58 @@ msgstr ""
 msgid "Следующее фото"
 msgstr ""
 
-msgid "Автосохранение"
+msgid "Кадрирование (C)"
 msgstr ""
 
-msgid "Сохранить"
+msgid "Изменить размер рамки"
+msgstr ""
+
+msgid "Переместить рамку"
 msgstr ""
 
 msgid "Автогоризонт"
 msgstr ""
 
+msgid "Повернуть на 0,5°"
+msgstr ""
+
+msgid "Повернуть на 90°"
+msgstr ""
+
+msgid "Сбросить (R)"
+msgstr ""
+
+msgid "Назад (Ctrl+Z)"
+msgstr ""
+
+msgid "Вперёд (Ctrl+Y)"
+msgstr ""
+
+msgid "Сохранить"
+msgstr ""
+
 msgid "Удалить объекты (Enter)"
 msgstr ""
 
+msgid "Enter в режиме кадрирования"
+msgstr ""
+
+msgid "Применить кадрирование"
+msgstr ""
+
 msgid "Очистить маску"
+msgstr ""
+
+msgid "Автосохранение"
+msgstr ""
+
+msgid "Исходный"
+msgstr ""
+
+msgid "Соотношение:"
+msgstr ""
+
+msgid "Сохранять пропорции"
 msgstr ""
 
 msgid "Завершение сохранения…"
@@ -1839,20 +1878,29 @@ msgstr ""
 msgid "Загрузка модели…"
 msgstr ""
 
+msgid "Запускаем ИИ-модели…"
+msgstr ""
+
 msgid "Загрузка изображения…"
 msgstr ""
 
 msgid "Выравнивание горизонта…"
 msgstr ""
 
+msgid "Поворот изображения…"
+msgstr ""
+
+msgid "Кадрирование…"
+msgstr ""
+
 msgid "Удаление объектов…"
+msgstr ""
+
+msgid "Удаление объектов в фоне…"
 msgstr ""
 
 #, python-brace-format
 msgid "Загрузка моделей в фоне: {done} из {total}"
-msgstr ""
-
-msgid "Модели загружаются в фоне…"
 msgstr ""
 
 msgid "Не удалось загрузить часть моделей"
@@ -2353,3 +2401,4 @@ msgstr ""
 
 msgid "Быстрый просмотр и отбор RAW и JPG"
 msgstr ""
+

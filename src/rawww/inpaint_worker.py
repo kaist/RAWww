@@ -13,19 +13,46 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import json
+import os
 from pathlib import Path
 import queue
 import sys
 import threading
 
 from .inpaint_pipeline import (
-    DeepOad, EditableImage, ImageConflictError, LamaInpainter, ensure_horizon_model,
+    DeepOad, EditableImage, ImageConflictError, LamaInpainter, crop_image, crop_with_inpaint, ensure_horizon_model,
     ensure_inpaint_model, fingerprint, load_image, make_mask, save_image, scale_strokes,
     straighten_image, to_srgb,
 )
 
 
 _DRAFT_SIDE = 1920
+_MODEL_IDLE_BEFORE_LOAD = 1.5
+
+
+def _lower_model_loader_thread_priority() -> None:
+    """Отдаёт CPU и диск кадрам, не понижая приоритет всего воркера."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            # THREAD_MODE_BACKGROUND_BEGIN понижает не только планирование CPU,
+            # но и приоритет I/O: именно чтение ONNX-файлов не должно тормозить JPEG.
+            ctypes.windll.kernel32.SetThreadPriority(ctypes.windll.kernel32.GetCurrentThread(), 0x00010000)
+        elif sys.platform.startswith("linux"):
+            # Linux хранит nice для каждого task (native thread), а не только
+            # для процесса, поэтому decode остаётся на обычном приоритете.
+            os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 10)
+        elif sys.platform == "darwin":
+            import ctypes
+
+            # macOS QoS определяет планирование и I/O; BACKGROUND равен 0x09.
+            pthread = ctypes.CDLL("/usr/lib/libSystem.B.dylib").pthread_set_qos_class_self_np
+            pthread.argtypes = (ctypes.c_uint, ctypes.c_int)
+            pthread.restype = ctypes.c_int
+            pthread(0x09, 0)
+    except (AttributeError, OSError):
+        pass
 
 
 class ImageStore:
@@ -40,6 +67,12 @@ class ImageStore:
         # Номера правок переживают вытеснение пикселей: иначе поздний «saved 1»
         # мог бы ошибочно пометить следующую, снова названную «1», сохранённой.
         self.versions: dict[str, int] = {}
+        self.originals: dict[str, EditableImage] = {}
+        self.history: dict[str, list[Image.Image]] = {}
+        self.redo_history: dict[str, list[Image.Image]] = {}
+        self.rotation_bases = {}
+        self.rotation_angles: dict[str, float] = {}
+        self.inferences: set[str] = set()
         self.lock = threading.RLock()
         self.budget = budget
         self.current = ""
@@ -100,6 +133,11 @@ class ImageStore:
             # намеренно не создаёт Future. Не обращаться к нему как к draft:
             # иначе Enter на обычном небольшом JPEG завершается KeyError.
             if frame is not None and not frame.draft:
+                if path not in self.originals:
+                    self.originals[path] = EditableImage(
+                        frame.path, frame.image.copy(), frame.signature, frame.format, frame.exif,
+                        frame.icc, frame.xmp, frame.dpi, frame.draft,
+                    )
                 return frame, frame.image.width / draft_size[0], frame.image.height / draft_size[1]
         self.prepare_full(path)
         with self.lock:
@@ -107,15 +145,121 @@ class ImageStore:
         full = request.result()
         # Пока пользователь рисовал, фон мог успеть заменить draft полным
         # кадром в кэше. Маска всё равно имеет размеры показанного draft.
+        with self.lock:
+            # Оригинал нужен и после автосохранения: файл на диске уже может
+            # содержать правку, но команда сброса должна вернуть первый кадр.
+            if path not in self.originals:
+                self.originals[path] = EditableImage(
+                    full.path, full.image.copy(), full.signature, full.format, full.exif,
+                    full.icc, full.xmp, full.dpi, full.draft,
+                )
         return full, full.image.width / draft_size[0], full.image.height / draft_size[1]
+
+    def reset(self, path: str) -> EditableImage:
+        """Возвращает исходные пиксели, сохранённые до первой правки кадра."""
+        with self.lock:
+            frame = self.frames[path]
+            original = self.originals.get(path)
+        if original is None:
+            original = load_image(Path(path))
+            with self.lock:
+                self.originals[path] = EditableImage(
+                    original.path, original.image.copy(), original.signature, original.format,
+                    original.exif, original.icc, original.xmp, original.dpi, original.draft,
+                )
+        with self.lock:
+            revision = max(frame.revision, self.versions.get(path, 0)) + 1
+            self._remember_history(path, frame.image)
+            frame.image = original.image.copy()
+            frame.format = original.format
+            frame.exif = original.exif
+            frame.icc = original.icc
+            frame.xmp = original.xmp
+            frame.dpi = original.dpi
+            frame.draft = original.draft
+            frame.revision = self.versions[path] = revision
+            self.rotation_bases[path] = original.image.copy()
+            self.rotation_angles[path] = 0.0
+            return frame
 
     def replace_pixels(self, frame: EditableImage, image) -> None:
         """Публикует неизменяемый снимок под новым, не повторяющимся номером."""
         with self.lock:
             path = str(frame.path)
+            self._remember_history(path, frame.image)
             revision = max(frame.revision, self.versions.get(path, 0)) + 1
             frame.image = image
             frame.revision = self.versions[path] = revision
+            # Следующий ручной поворот начинается от результата другой геометрической правки.
+            self.rotation_bases[path] = image.copy()
+            self.rotation_angles[path] = 0.0
+
+    def begin_inpaint(self, path: str, revision: int) -> None:
+        """Закрепляет кадр на время AI-задачи, чтобы кэш не вытеснил её результат."""
+        with self.lock:
+            frame = self.frames[path]
+            if revision != frame.revision:
+                raise RuntimeError("stale_revision")
+            self.inferences.add(path)
+
+    def finish_inpaint(self, path: str) -> None:
+        """Снимает защиту кэша после публикации результата или ошибки инференса."""
+        with self.lock:
+            self.inferences.discard(path)
+            self._trim()
+
+    def _remember_history(self, path: str, image: Image.Image) -> None:
+        """Сохраняет точное предыдущее состояние и ограничивает историю десятью шагами."""
+        history = self.history.setdefault(path, [])
+        history.append(image.copy())
+        del history[:-10]
+        self.redo_history[path] = []
+
+    def _restore_history(self, path: str, *, redo: bool) -> EditableImage:
+        """Меняет текущее изображение с соседним состоянием истории без повторного инференса."""
+        with self.lock:
+            frame = self.frames[path]
+            source = self.redo_history if redo else self.history
+            destination = self.history if redo else self.redo_history
+            if not source.get(path):
+                raise RuntimeError("history_empty")
+            destination.setdefault(path, []).append(frame.image.copy())
+            del destination[path][:-10]
+            frame.image = source[path].pop()
+            revision = max(frame.revision, self.versions.get(path, 0)) + 1
+            frame.revision = self.versions[path] = revision
+            self.rotation_bases[path] = frame.image.copy()
+            self.rotation_angles[path] = 0.0
+            return frame
+
+    def undo(self, path: str) -> EditableImage:
+        """Возвращает предыдущее состояние текущего кадра."""
+        return self._restore_history(path, redo=False)
+
+    def redo(self, path: str) -> EditableImage:
+        """Повторяет отменённое состояние текущего кадра."""
+        return self._restore_history(path, redo=True)
+
+    def history_state(self, path: str) -> tuple[bool, bool]:
+        """Сообщает доступность отмены и повтора для интерфейса."""
+        with self.lock:
+            return bool(self.history.get(path)), bool(self.redo_history.get(path))
+
+    def rotate_from_base(self, frame: EditableImage, degrees: float) -> None:
+        """Строит результат от одной базы, чтобы поворот туда-обратно не мыл пиксели."""
+        with self.lock:
+            path = str(frame.path)
+            base = self.rotation_bases.setdefault(path, frame.image.copy())
+        result = straighten_image(EditableImage(
+            frame.path, base, frame.signature, frame.format, frame.exif, frame.icc,
+            frame.xmp, frame.dpi,
+        ), -degrees)
+        with self.lock:
+            revision = max(frame.revision, self.versions.get(path, 0)) + 1
+            self._remember_history(path, frame.image)
+            frame.image = result
+            frame.revision = self.versions[path] = revision
+            self.rotation_angles[path] = degrees
 
     def _trim(self) -> None:
         """Ограничивает чистый кэш числом кадров и реальными байтами пикселей."""
@@ -123,7 +267,7 @@ class ImageStore:
         for key, frame in list(self.frames.items()):
             if total <= self.budget and len(self.frames) <= 5:
                 break
-            if key != self.current and not frame.pending and frame.revision == frame.saved_revision:
+            if key != self.current and key not in self.inferences and not frame.pending and frame.revision == frame.saved_revision:
                 total -= frame.image.width*frame.image.height*len(frame.image.getbands())
                 del self.frames[key]
 
@@ -149,7 +293,7 @@ class ImageStore:
         """Забывает правку только когда она не принадлежит активной записи."""
         with self.lock:
             frame = self.frames.get(path)
-            if frame and frame.pending:
+            if frame and (frame.pending or path in self.inferences):
                 raise RuntimeError("save_pending")
             self.generation += 1
             self.frames.pop(path, None)
@@ -200,6 +344,8 @@ def main() -> int:
     latest = {"open": 0}
     models: dict[str, LamaInpainter | DeepOad | None] = {"inpaint": None, "horizon": None}
     models_lock = threading.Lock()
+    model_load_timer: threading.Timer | None = None
+    models_loading_started = False
 
     def emit(kind: str, payload: bytes = b"", **values) -> None:
         header = json.dumps({"event": kind, "bytes": len(payload), **values}, ensure_ascii=False).encode("utf-8")
@@ -221,10 +367,66 @@ def main() -> int:
 
     threading.Thread(target=read_commands, daemon=True).start()
     store = ImageStore()
-    loaders = ThreadPoolExecutor(max_workers=2, thread_name_prefix="inpaint-model")
+    # Две ONNX-сессии одновременно забивают диск и ядра при холодном старте.
+    # Один загрузчик оставляет основному циклу возможность сразу декодировать
+    # следующий кадр по команде навигации.
+    loaders = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inpaint-model")
+    inpaint_jobs = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inpaint-apply")
+    # Несколько слотов не дают последнему кадру ждать старые decode, уже упёршиеся
+    # в диск рядом с последовательной инициализацией модели. Устаревшие задания
+    # выходят до чтения, поэтому одновременно реально работают лишь текущие кадры.
+    open_jobs = ThreadPoolExecutor(max_workers=4, thread_name_prefix="inpaint-open")
+
+    def emit_frame(kind: str, path: str, request: int, frame: EditableImage, *, angle=None) -> None:
+        """Собирает ответ одинаково для главного цикла и завершившейся AI-задачи."""
+        display = to_srgb(frame.image, frame.icc)
+        can_undo, can_redo = store.history_state(path)
+        emit(kind, payload=display.tobytes(), path=path, request=request,
+             width=display.width, height=display.height, revision=frame.revision,
+             saved_revision=frame.saved_revision, angle=angle,
+             rotation_angle=store.rotation_angles.get(path, 0.0), can_undo=can_undo, can_redo=can_redo)
+
+    def run_inpaint(task: dict) -> None:
+        """Выполняет LaMa вне цикла команд, сохраняя возможность открыть другой кадр."""
+        path = task["path"]
+        try:
+            frame, scale_x, scale_y = store.full_for_apply(path, tuple(task["draft_size"]))
+            mask = make_mask(frame.image.size, scale_strokes(task["strokes"], scale_x, scale_y))
+            with models_lock:
+                model = models["inpaint"]
+            if model is None:
+                raise RuntimeError("inpaint_model_not_ready")
+            result = model.apply(frame, mask)
+            store.replace_pixels(frame, result)
+            emit_frame("result", path, task["request"], frame)
+            store.preload(task.get("neighbors", []))
+        except Exception as exc:
+            code = "external_change" if isinstance(exc, ImageConflictError) else str(exc)
+            emit("error", path=path, request=task["request"], revision=task.get("revision", 0), error=code)
+        finally:
+            store.finish_inpaint(path)
+
+    def open_frame(task: dict) -> None:
+        """Читает кадр вне цикла команд: загрузка ONNX не должна съедать навигацию."""
+        path = task["path"]
+        request = task["request"]
+        try:
+            if request != latest["open"]:
+                return
+            store.current = path
+            frame = store.get(path)
+            if request != latest["open"]:
+                return
+            emit_frame("frame", path, request, frame)
+            store.preload(task.get("neighbors", []))
+            defer_model_loading()
+        except Exception as exc:
+            code = "external_change" if isinstance(exc, ImageConflictError) else str(exc)
+            emit("error", path=path, request=request, revision=task.get("revision", 0), error=code)
 
     def load_inpaint() -> None:
         """Скачивает и создаёт LaMa вне очереди кадров и команд пользователя."""
+        _lower_model_loader_thread_priority()
         try:
             def progress(downloaded: int, total: int | None) -> None:
                 emit("model_downloading", model="inpaint", downloaded=downloaded, total=total or 0)
@@ -239,7 +441,8 @@ def main() -> int:
             emit("model_error", model="inpaint", error=str(exc))
 
     def load_horizon() -> None:
-        """Скачивает Deep-OAD параллельно с LaMa, не задерживая первый кадр."""
+        """Скачивает Deep-OAD после LaMa в том же загрузчике, не конкурируя с ней за диск."""
+        _lower_model_loader_thread_priority()
         try:
             def progress(downloaded: int, total: int | None) -> None:
                 emit("model_downloading", model="horizon", downloaded=downloaded, total=total or 0)
@@ -253,10 +456,28 @@ def main() -> int:
         except Exception as exc:
             emit("model_error", model="horizon", error=str(exc))
 
-    try:
-        emit("ready")
+    def start_model_loading() -> None:
+        """Запускает модели после паузы, когда навигация уже не нуждается в декодере."""
+        nonlocal models_loading_started
+        if models_loading_started:
+            return
+        models_loading_started = True
         loaders.submit(load_inpaint)
         loaders.submit(load_horizon)
+
+    def defer_model_loading() -> None:
+        """Переносит тяжёлую инициализацию ONNX после каждого нового кадра."""
+        nonlocal model_load_timer
+        if models_loading_started:
+            return
+        if model_load_timer is not None:
+            model_load_timer.cancel()
+        model_load_timer = threading.Timer(_MODEL_IDLE_BEFORE_LOAD, start_model_loading)
+        model_load_timer.daemon = True
+        model_load_timer.start()
+
+    try:
+        emit("ready")
         while True:
             task = commands.get()
             command = task["command"]
@@ -276,19 +497,15 @@ def main() -> int:
                     continue
                 if command == "open" and request != latest["open"]:
                     continue
+                if command == "open":
+                    open_jobs.submit(open_frame, task)
+                    continue
                 store.current = path
                 frame = store.get(path)
                 if command == "apply":
-                    if task["revision"] != frame.revision:
-                        raise RuntimeError("stale_revision")
-                    frame, scale_x, scale_y = store.full_for_apply(path, tuple(task["draft_size"]))
-                    mask = make_mask(frame.image.size, scale_strokes(task["strokes"], scale_x, scale_y))
-                    with models_lock:
-                        model = models["inpaint"]
-                    if model is None:
-                        raise RuntimeError("inpaint_model_not_ready")
-                    result = model.apply(frame, mask)
-                    store.replace_pixels(frame, result)
+                    store.begin_inpaint(path, task["revision"])
+                    inpaint_jobs.submit(run_inpaint, task)
+                    continue
                 elif command == "straighten":
                     frame, _, _ = store.full_for_apply(path, tuple(task["draft_size"]))
                     with models_lock:
@@ -301,18 +518,45 @@ def main() -> int:
                     if abs(angle) > 15:
                         raise RuntimeError(f"horizon_angle_out_of_range:{angle:.1f}")
                     store.replace_pixels(frame, straighten_image(frame, angle))
-                display = to_srgb(frame.image, frame.icc)
-                emit("result" if command in {"apply", "straighten"} else "frame", payload=display.tobytes(),
-                     path=path, request=request, width=display.width, height=display.height,
-                     revision=frame.revision, saved_revision=frame.saved_revision,
-                     angle=angle if command == "straighten" else None)
+                elif command == "rotate":
+                    frame, _, _ = store.full_for_apply(path, tuple(task["draft_size"]))
+                    store.rotate_from_base(frame, float(task["degrees"]))
+                elif command == "reset":
+                    frame = store.reset(path)
+                elif command == "undo":
+                    frame = store.undo(path)
+                elif command == "redo":
+                    frame = store.redo(path)
+                elif command == "crop":
+                    frame, scale_x, scale_y = store.full_for_apply(path, tuple(task["draft_size"]))
+                    left, top, right, bottom = task["box"]
+                    box = (
+                        left * scale_x, top * scale_y, right * scale_x, bottom * scale_y,
+                    )
+                    if task.get("inpaint_edges"):
+                        with models_lock:
+                            model = models["inpaint"]
+                        if model is None:
+                            raise RuntimeError("inpaint_model_not_ready")
+                        result = crop_with_inpaint(frame, box, model)
+                    else:
+                        result = crop_image(frame, box)
+                    store.replace_pixels(frame, result)
+                emit_frame("result" if command in {"straighten", "rotate", "crop", "reset", "undo", "redo"} else "frame",
+                           path, request, frame, angle=angle if command == "straighten" else None)
                 store.preload(task.get("neighbors", []))
             except Exception as exc:
                 code = "external_change" if isinstance(exc, ImageConflictError) else str(exc)
                 emit("save_error" if command == "save" else "error", path=path,
                      request=request, revision=task.get("revision", 0), error=code)
     finally:
+        # Сначала останавливаем открытия: каждое из них способно перезапустить
+        # таймер моделей, а после остановки загрузчика это уже поздно.
+        open_jobs.shutdown(wait=True, cancel_futures=True)
+        if model_load_timer is not None:
+            model_load_timer.cancel()
         loaders.shutdown(wait=False, cancel_futures=True)
+        inpaint_jobs.shutdown(wait=True, cancel_futures=True)
         store.shutdown()
     return 0
 

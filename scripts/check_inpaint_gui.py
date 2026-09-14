@@ -71,6 +71,18 @@ def main() -> None:
     started = time.monotonic()
     try:
         with patch.object(QMessageBox, "warning", side_effect=warning):
+            wait_until(lambda: not dialog.view.image.isNull())
+            wait_until(lambda: any(state in {"loading", "downloading"} for state in dialog._models.values()))
+            # Один загрузчик инициализирует модели последовательно. Проверяем,
+            # что чтение следующего кадра не ждёт эту тяжёлую работу.
+            for target in (1, 2, 3, 4, 3, 2, 1):
+                dialog.index = target
+                dialog._open()
+            wait_until(lambda: dialog.path == str(paths[1]) and dialog._displayed_path == str(paths[1]))
+            assert not dialog.view.image.isNull()
+            dialog.navigate(-1)
+            wait_until(lambda: dialog.path == str(paths[0]) and dialog._displayed_path == str(paths[0]))
+            print("Navigation during sequential model loading: OK", flush=True)
             wait_until(lambda: dialog.view.editable)
             assert max(dialog.view.image.width(), dialog.view.image.height()) <= 1920
             pid = dialog.process.processId()

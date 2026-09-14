@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-14 10:15+0300\n"
+"POT-Creation-Date: 2026-09-14 16:06+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1905,20 +1905,61 @@ msgstr "Previous photo"
 msgid "Следующее фото"
 msgstr "Next photo"
 
-msgid "Автосохранение"
-msgstr "Autosave"
+msgid "Кадрирование (C)"
+msgstr "Crop (C)"
 
-msgid "Сохранить"
-msgstr "Save"
+msgid "Изменить размер рамки"
+msgstr "Resize crop frame"
+
+msgid "Переместить рамку"
+msgstr "Move crop frame"
 
 msgid "Автогоризонт"
 msgstr "Auto horizon"
 
+msgid "Повернуть на 0,5°"
+msgstr "Rotate by 0.5°"
+
+msgid "Повернуть на 90°"
+msgstr "Rotate by 90°"
+
+#, fuzzy
+msgid "Сбросить (R)"
+msgstr "Reset"
+
+msgid "Назад (Ctrl+Z)"
+msgstr ""
+
+msgid "Вперёд (Ctrl+Y)"
+msgstr ""
+
+msgid "Сохранить"
+msgstr "Save"
+
 msgid "Удалить объекты (Enter)"
 msgstr "Remove objects (Enter)"
 
+#, fuzzy
+msgid "Enter в режиме кадрирования"
+msgstr "Enter while cropping"
+
+msgid "Применить кадрирование"
+msgstr "Apply crop"
+
 msgid "Очистить маску"
 msgstr "Clear mask"
+
+msgid "Автосохранение"
+msgstr "Autosave"
+
+msgid "Исходный"
+msgstr "Original"
+
+msgid "Соотношение:"
+msgstr "Aspect ratio:"
+
+msgid "Сохранять пропорции"
+msgstr "Lock aspect ratio"
 
 msgid "Завершение сохранения…"
 msgstr "Finishing saves…"
@@ -1927,6 +1968,10 @@ msgid "Закрытие…"
 msgstr "Closing…"
 
 msgid "Загрузка модели…"
+msgstr "Starting AI models…"
+
+#, fuzzy
+msgid "Запускаем ИИ-модели…"
 msgstr "Loading model…"
 
 msgid "Загрузка изображения…"
@@ -1935,15 +1980,22 @@ msgstr "Loading image…"
 msgid "Выравнивание горизонта…"
 msgstr "Leveling horizon…"
 
+msgid "Поворот изображения…"
+msgstr "Rotating image…"
+
+#, fuzzy
+msgid "Кадрирование…"
+msgstr "Crop (C)"
+
 msgid "Удаление объектов…"
 msgstr "Removing objects…"
+
+msgid "Удаление объектов в фоне…"
+msgstr "Removing objects in background…"
 
 #, python-brace-format
 msgid "Загрузка моделей в фоне: {done} из {total}"
 msgstr "Loading models in background: {done} of {total}"
-
-msgid "Модели загружаются в фоне…"
-msgstr "Models are loading in background…"
 
 msgid "Не удалось загрузить часть моделей"
 msgstr "Some models could not be loaded"
@@ -2567,3 +2619,15 @@ msgstr "Fast RAW and JPG viewing and culling"
 
 #~ msgid "Скачивание модели…"
 #~ msgstr "Downloading model…"
+
+#~ msgid "Дорисовать за краями"
+#~ msgstr "Extend beyond edges"
+
+#~ msgid "Кадрирование и дорисовка краёв…"
+#~ msgstr "Cropping and extending edges…"
+
+#~ msgid "Вертикально"
+#~ msgstr "Portrait"
+
+#~ msgid "Модели загружаются в фоне…"
+#~ msgstr "Models are loading in background…"

@@ -30,10 +30,11 @@ FOMANTIC_ICON_CODES = {
     "filter": "\uf0b0", "lightbulb": "\uf0eb", "volume": "\uf028", "microphone": "\uf130", "close": "\uf00d",
     "plus": "\uf067", "trash": "\uf1f8",
     "expand": "\uf065", "zoom": "\uf00e", "zoom-out": "\uf010", "play": "\uf04b", "pause": "\uf04c", "film": "\uf008",
-    "cloud": "\uf0c2", "sign-out": "\uf2f5", "lock": "\uf023", "sync": "\uf021",
-    "download": "\uf56d", "upload": "\uf574", "save": "\uf0c7", "eye": "\uf06e", "stop": "\uf04d",
+    "cloud": "\uf0c2", "sign-out": "\uf2f5", "lock": "\uf023", "unlock": "\uf09c", "sync": "\uf021",
+    "download": "\uf56d", "upload": "\uf574", "save": "\uf0c7", "eye": "\uf06e", "stop": "\uf04d", "check": "\uf00c",
     "link": "\uf0c1",
     "cog": "\uf013", "help": "\uf128", "magic": "\uf0d0", "wrench": "\uf0ad",
+    "undo": "\uf0e2", "redo": "\uf01e", "crop": "\uf125", "ruler-horizontal": "\uf547",
     "edit": "\uf044", "calendar": "\uf133", "clock": "\uf017", "camera": "\uf030",
     "file": "\uf15b", "arrow-right": "\uf061", "arrow-up": "\uf062", "level-up": "\uf3bf",
     "folder-plus": "\uf65e",
@@ -1604,6 +1605,64 @@ def apply_theme(app: QApplication) -> None:
         }
         QToolButton#batchRetouchOverlayButton:hover { background: #46515d; }
         QToolButton#batchRetouchOverlayButton:disabled { background: transparent; }
+        QFrame#inpaintToolbarGroup {
+            background: #202326;
+            border: 1px solid #3b4651;
+            border-radius: 5px;
+        }
+        QToolButton#inpaintToolbarButton {
+            min-width: 28px;
+            max-width: 28px;
+            min-height: 28px;
+            max-height: 28px;
+            padding: 0;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: #dfe6ef;
+        }
+        QToolButton#inpaintToolbarButton:hover { background: #46515d; }
+        QToolButton#inpaintToolbarButton:checked { background: #315b80; color: #ffffff; }
+        QToolButton#inpaintToolbarButton:disabled { color: #68717a; background: transparent; }
+        QToolButton#inpaintToolbarPrimaryButton {
+            min-width: 28px;
+            max-width: 28px;
+            min-height: 28px;
+            max-height: 28px;
+            padding: 0;
+            border: 1px solid #79aaff;
+            border-radius: 4px;
+            background: #315b80;
+            color: #ffffff;
+        }
+        QToolButton#inpaintToolbarPrimaryButton:hover { background: #3d6f9d; }
+        QToolButton#inpaintToolbarPrimaryButton:disabled { background: #303030; border-color: #464646; color: #777d84; }
+        QComboBox#inpaintCropRatio {
+            min-height: 28px;
+            padding: 0 22px 0 7px;
+            border: 1px solid #4a5662;
+            border-radius: 4px;
+            background: #2e353c;
+            color: #e7edf4;
+            font-size: 11px;
+        }
+        QComboBox#inpaintCropRatio:hover, QComboBox#inpaintCropRatio:focus { border-color: #79aaff; }
+        QComboBox#inpaintCropRatio::drop-down { width: 18px; border: 0; }
+        QComboBox#inpaintCropRatio QAbstractItemView {
+            background: #2b3035;
+            border: 1px solid #4a5662;
+            color: #e7edf4;
+            selection-background-color: #315b80;
+        }
+        QDialog#inpaintDialog QCheckBox#batchResizeOption {
+            min-height: 28px;
+            font-size: 11px;
+            font-weight: 400;
+        }
+        QWidget#inpaintInformation, QWidget#inpaintInformation QLabel {
+            background: transparent;
+            border: 0;
+        }
         QDialog#batchResizeDialog { background: #242424; color: #e8e8e8; }
         QDialog#batchResizeDialog QLabel { background: transparent; }
         QLabel#batchResizeFieldLabel {

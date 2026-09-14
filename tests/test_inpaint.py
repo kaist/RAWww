@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image, ImageCms
 
 from rawww.inpaint_pipeline import (
-    DeepOad, ImageConflictError, LamaInpainter, ensure_horizon_model, ensure_inpaint_model,
+    DeepOad, EditableImage, ImageConflictError, LamaInpainter, crop_image, crop_with_inpaint, ensure_horizon_model, ensure_inpaint_model,
     fingerprint, horizon_model_path, inpaint_model_path, load_image, make_mask, save_image,
     scale_strokes, straighten_image,
 )
@@ -40,8 +40,35 @@ class InpaintFileTests(unittest.TestCase):
         result = straighten_image(frame, 8)
         self.assertLess(result.width, frame.image.width)
         self.assertLess(result.height, frame.image.height)
+        self.assertAlmostEqual(result.width / result.height, frame.image.width / frame.image.height, places=2)
         self.assertEqual(result.mode, "RGBA")
         self.assertEqual(result.getpixel((result.width//2, result.height//2))[3], 120)
+
+    def test_crop_clamps_to_photo_and_keeps_requested_inner_area(self):
+        path = self.root / "crop.png"
+        Image.new("RGB", (100, 80), "red").save(path)
+        frame = load_image(path)
+        result = crop_image(frame, (-20, 10, 70, 90))
+        self.assertEqual(result.size, (70, 70))
+
+    def test_crop_beyond_edge_masks_only_added_canvas_for_inpaint(self):
+        path = self.root / "extend.png"
+        Image.new("RGB", (100, 80), "red").save(path)
+        frame = load_image(path)
+
+        class Inpainter:
+            def apply(self, expanded, mask):
+                self.size = expanded.image.size
+                self.mask = mask
+                return Image.new("RGB", expanded.image.size, "blue")
+
+        model = Inpainter()
+        result = crop_with_inpaint(frame, (-10, 0, 100, 80), model)
+        self.assertEqual(model.size, (110, 80))
+        self.assertEqual(model.mask.getpixel((5, 40)), 255)
+        self.assertEqual(model.mask.getpixel((15, 40)), 0)
+        self.assertEqual(result.size, (110, 80))
+        self.assertEqual(result.getpixel((5, 40)), (0, 0, 255))
 
     def test_formats_keep_exif_icc_and_orientation(self):
         profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
@@ -320,6 +347,35 @@ class InpaintCacheTests(unittest.TestCase):
         full, sx, sy = self.store.full_for_apply(str(self.path), frame.image.size)
         self.assertIs(full, frame)
         self.assertEqual((sx, sy), (1, 1))
+
+    def test_manual_rotation_reuses_one_base_for_opposite_directions(self):
+        frame = self.store.get(str(self.path))
+        bases = []
+        def rotate(source, degrees):
+            bases.append(source.image)
+            return Image.new("RGB", source.image.size, "blue" if degrees < 0 else "green")
+        with patch("rawww.inpaint_worker.straighten_image", side_effect=rotate):
+            self.store.rotate_from_base(frame, .5)
+            self.store.rotate_from_base(frame, 0)
+        self.assertIs(bases[0], bases[1])
+        self.assertEqual(self.store.rotation_angles[str(self.path)], 0)
+
+    def test_reset_restores_pixels_before_an_autosave(self):
+        frame = self.store.get(str(self.path))
+        full, _, _ = self.store.full_for_apply(str(self.path), frame.image.size)
+        self.store.replace_pixels(full, Image.new("RGB", full.image.size, "blue"))
+        restored = self.store.reset(str(self.path))
+        self.assertEqual(restored.image.getpixel((0, 0)), (255, 0, 0))
+
+    def test_history_keeps_ten_steps_and_supports_redo(self):
+        frame = self.store.get(str(self.path))
+        for value in range(11):
+            self.store.replace_pixels(frame, Image.new("RGB", frame.image.size, (value, 0, 0)))
+        self.assertEqual(len(self.store.history[str(self.path)]), 10)
+        previous = self.store.undo(str(self.path))
+        self.assertEqual(previous.image.getpixel((0, 0)), (9, 0, 0))
+        repeated = self.store.redo(str(self.path))
+        self.assertEqual(repeated.image.getpixel((0, 0)), (10, 0, 0))
 
 
 if __name__ == "__main__":

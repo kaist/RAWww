@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -13,12 +14,18 @@ from PySide6.QtCore import QPointF, QProcess, QRectF, QSettings, QSize, Qt, QTim
 from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView,
-    QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QToolButton, QVBoxLayout, QWidget,
+    QComboBox, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from .i18n import gettext as _
-from .theme import _fomantic_icon
+from .theme import _fomantic_icon, _orientation_icon
 from .widgets import SettingsCheckBox
+
+
+_AUTOSAVE_DEBOUNCE_MS = 750
+_ROTATE_STEP_DEGREES = .5
+_ROTATE_QUARTER_TURN_DEGREES = 90
 
 
 class _BusyIndicator(QWidget):
@@ -53,6 +60,57 @@ class _BusyIndicator(QWidget):
         painter.drawArc(QRectF(3,3,18,18), self.angle*16, 250*16)
 
 
+class InpaintHelpDialog(QDialog):
+    """Показывает только сочетания пакетного редактора, не смешивая их с главным окном."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("helpDialog")
+        self.setWindowTitle(_("Справка по горячим клавишам"))
+        self.setModal(True)
+        self.resize(500, 500)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setSpacing(10)
+        title = QLabel(_("Горячие клавиши"))
+        title.setObjectName("helpDialogTitle")
+        layout.addWidget(title)
+        rows = (
+            (_("Предыдущее фото"), "Left"),
+            (_("Следующее фото"), "Right"),
+            (_("Кадрирование (C)"), "C"),
+            (_("Изменить размер рамки"), "Ctrl+↑ / ↓"),
+            (_("Переместить рамку"), "Shift+← / → / ↑ / ↓"),
+            (_("Автогоризонт"), "H"),
+            (_("Повернуть на 0,5°"), "< и >"),
+            (_("Повернуть на 90°"), "Ctrl+< и >"),
+            (_("Сбросить (R)"), "R"),
+            (_("Назад (Ctrl+Z)"), "Ctrl+Z"),
+            (_("Вперёд (Ctrl+Y)"), "Ctrl+Y"),
+            (_("Сохранить"), "Ctrl+S"),
+            (_("Удалить объекты (Enter)"), "Enter"),
+            (_("Применить кадрирование"), _("Enter в режиме кадрирования")),
+            (_("Очистить маску"), "Esc"),
+        )
+        table = QTableWidget(len(rows), 2, self)
+        table.setObjectName("helpHotkeysTable")
+        table.setHorizontalHeaderLabels((_("Действие"), _("Сочетание")))
+        table.verticalHeader().hide()
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setColumnWidth(0, 310)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        for row, (label, shortcut) in enumerate(rows):
+            table.setItem(row, 0, QTableWidgetItem(label))
+            table.setItem(row, 1, QTableWidgetItem(shortcut))
+        layout.addWidget(table, 1)
+        close = QPushButton(_("Закрыть"))
+        close.setObjectName("helpDialogCloseButton")
+        close.clicked.connect(self.accept)
+        layout.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+
+
 class InpaintView(QGraphicsView):
     """Владеет экранным изображением и векторными штрихами в координатах фото.
 
@@ -61,6 +119,9 @@ class InpaintView(QGraphicsView):
     """
 
     maskChanged = Signal()
+    cropChanged = Signal()
+    editorShortcut = Signal(str)
+    resized = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -71,8 +132,22 @@ class InpaintView(QGraphicsView):
         self.image = QImage()
         self.strokes: list[dict] = []
         self._paths: list[tuple[QPainterPath, QColor, float]] = []
+        self._mask_pending = False
+        self._mask_pulse_phase = 0.0
+        self._mask_pulse_timer = QTimer(self)
+        self._mask_pulse_timer.setInterval(40)
+        self._mask_pulse_timer.timeout.connect(self._pulse_mask)
         self.diameter = 40.0
         self.editable = False
+        self.crop_active = False
+        self.crop_box = QRectF()
+        self.crop_ratio: float | None = None
+        self.crop_locked = True
+        self.crop_vertical = False
+        self._crop_drag = False
+        self._crop_resize_handle: str | None = None
+        self._crop_drag_start = QPointF()
+        self._crop_drag_box = QRectF()
         self._space = False
         self._panning = False
         self._drawing = False
@@ -89,6 +164,101 @@ class InpaintView(QGraphicsView):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.viewport().setCursor(Qt.CursorShape.BlankCursor)
 
+    def _update_crop_canvas(self) -> None:
+        """Расширяет холст рамкой и вписывает фото вместе с пустым полем."""
+        bounds = QRectF(self.image.rect()).united(self.crop_box)
+        self.scene().setSceneRect(bounds)
+
+    def _update_cursor(self, point: QPointF | None = None) -> None:
+        """Не смешивает курсоры кисти, панорамирования и перемещения рамки."""
+        if self._space:
+            shape = Qt.CursorShape.ClosedHandCursor if self._panning else Qt.CursorShape.OpenHandCursor
+        elif self._crop_drag:
+            shape = Qt.CursorShape.ClosedHandCursor
+        elif self.crop_active:
+            scene_point = point if point is not None else self.mapToScene(self._cursor.toPoint())
+            handle = self._crop_handle_at(scene_point)
+            cursors = {
+                "top_left": Qt.CursorShape.SizeFDiagCursor, "bottom_right": Qt.CursorShape.SizeFDiagCursor,
+                "top_right": Qt.CursorShape.SizeBDiagCursor, "bottom_left": Qt.CursorShape.SizeBDiagCursor,
+                "left": Qt.CursorShape.SizeHorCursor, "right": Qt.CursorShape.SizeHorCursor,
+                "top": Qt.CursorShape.SizeVerCursor, "bottom": Qt.CursorShape.SizeVerCursor,
+            }
+            shape = cursors.get(handle, Qt.CursorShape.OpenHandCursor if self.crop_box.contains(scene_point) else Qt.CursorShape.ArrowCursor)
+        else:
+            shape = Qt.CursorShape.BlankCursor if self.editable else Qt.CursorShape.ArrowCursor
+        self.viewport().setCursor(shape)
+
+    def _crop_handle_at(self, point: QPointF) -> str | None:
+        """Находит ближайший маркер в экранно-постоянной зоне захвата."""
+        if self.image.isNull():
+            return None
+        radius = 10 / max(.001, self.transform().m11())
+        handles = {
+            "top_left": self.crop_box.topLeft(), "top_right": self.crop_box.topRight(),
+            "bottom_left": self.crop_box.bottomLeft(), "bottom_right": self.crop_box.bottomRight(),
+            "top": QPointF(self.crop_box.center().x(), self.crop_box.top()),
+            "bottom": QPointF(self.crop_box.center().x(), self.crop_box.bottom()),
+            "left": QPointF(self.crop_box.left(), self.crop_box.center().y()),
+            "right": QPointF(self.crop_box.right(), self.crop_box.center().y()),
+        }
+        return next((name for name, handle in handles.items()
+                     if abs(handle.x() - point.x()) <= radius and abs(handle.y() - point.y()) <= radius), None)
+
+    def _resize_crop(self, point: QPointF) -> None:
+        """Меняет рамку за выбранный маркер, сохраняя активное соотношение сторон."""
+        handle = self._crop_resize_handle
+        if not handle:
+            return
+        original = self._crop_drag_box
+        ratio = self.crop_ratio or self.image.width() / self.image.height()
+        if self.crop_ratio is not None and self.crop_vertical:
+            ratio = 1 / ratio
+        minimum = 2.0
+        if handle in {"left", "top_left", "bottom_left"}:
+            width = max(minimum, original.right() - point.x())
+            left = original.right() - width
+        elif handle in {"right", "top_right", "bottom_right"}:
+            width = max(minimum, point.x() - original.left())
+            left = original.left()
+        else:
+            width = original.width()
+            left = original.left()
+        if handle in {"top", "top_left", "top_right"}:
+            height = max(minimum, original.bottom() - point.y())
+            top = original.bottom() - height
+        elif handle in {"bottom", "bottom_left", "bottom_right"}:
+            height = max(minimum, point.y() - original.top())
+            top = original.top()
+        else:
+            height = original.height()
+            top = original.top()
+        if not self.crop_locked:
+            box = QRectF(left, top, width, height)
+        elif handle in {"left", "right"}:
+            height = width / ratio
+            top = original.center().y() - height / 2
+        elif handle in {"top", "bottom"}:
+            width = height * ratio
+            left = original.center().x() - width / 2
+        else:
+            # Угловой маркер выбирает ведущую ось, чтобы рамка не дёргалась по диагонали.
+            if abs(width / original.width() - 1) >= abs(height / original.height() - 1):
+                height = width / ratio
+                if "top" in handle:
+                    top = original.bottom() - height
+            else:
+                width = height * ratio
+                if "left" in handle:
+                    left = original.right() - width
+        if self.crop_locked:
+            box = QRectF(left, top, width, height)
+        bounds = QRectF(self.image.rect())
+        box = box.intersected(bounds)
+        self.crop_box = box
+        self._update_crop_canvas()
+        self.cropChanged.emit()
+
     def show_image(self, image: QImage, *, reset: bool) -> None:
         """Смена фото вписывает его в окно, результат сохраняет экранный масштаб.
 
@@ -101,6 +271,7 @@ class InpaintView(QGraphicsView):
         self.image = image
         self.item.setPixmap(QPixmap.fromImage(image))
         self.scene().setSceneRect(QRectF(image.rect()))
+        self.reset_crop()
         self.clear_mask()
         if reset:
             self.fit()
@@ -112,13 +283,112 @@ class InpaintView(QGraphicsView):
                 previous_center.y() * image.height() / previous.height(),
             )
 
+    def reset_crop(self) -> None:
+        """Возвращает рамку к полному кадру после загрузки либо применения кропа."""
+        self.crop_box = QRectF(self.image.rect())
+        self.crop_ratio = None
+        self.scene().setSceneRect(QRectF(self.image.rect()))
+        self.viewport().update()
+        self.cropChanged.emit()
+
+    def set_crop_ratio(self, ratio: float | None, vertical: bool = False) -> None:
+        """Вписывает выбранное соотношение в снимок, сохраняя центр прежней рамки."""
+        self.crop_ratio = ratio
+        self.crop_vertical = vertical
+        if ratio is None or self.image.isNull():
+            self.crop_box = QRectF(self.image.rect())
+        else:
+            target = 1 / ratio if vertical else ratio
+            bounds = QRectF(self.image.rect())
+            width = bounds.width()
+            height = width / target
+            if height > bounds.height():
+                height = bounds.height()
+                width = height * target
+            center = self.crop_box.center() if self.crop_box.isValid() else bounds.center()
+            left = min(max(bounds.left(), center.x() - width / 2), bounds.right() - width)
+            top = min(max(bounds.top(), center.y() - height / 2), bounds.bottom() - height)
+            self.crop_box = QRectF(left, top, width, height)
+        self.viewport().update()
+
+    def crop_by_edge(self, key: Qt.Key, fraction: float = .01) -> bool:
+        """Масштабирует рамку от центра: Ctrl+↑ расширяет, Ctrl+↓ уменьшает."""
+        if self.image.isNull():
+            return False
+        if key not in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            return False
+        box = QRectF(self.crop_box)
+        minimum = 2.0
+        dx, dy = self.image.width() * fraction, self.image.height() * fraction
+        ratio = self.crop_ratio or self.image.width() / self.image.height()
+        if self.crop_ratio is not None and self.crop_vertical:
+            ratio = 1 / ratio
+        direction = 1 if key == Qt.Key.Key_Up else -1
+        center = box.center()
+        bounds = QRectF(self.image.rect())
+        max_width = 2 * min(center.x() - bounds.left(), bounds.right() - center.x())
+        max_height = 2 * min(center.y() - bounds.top(), bounds.bottom() - center.y())
+        if self.crop_locked:
+            height = min(max_height, max(minimum, box.height() + direction * dy))
+            width = min(max_width, height * ratio)
+            height = width / ratio
+        else:
+            width = min(max_width, max(minimum, box.width() + direction * dx))
+            height = min(max_height, max(minimum, box.height() + direction * dy))
+        box = QRectF(center.x() - width / 2, center.y() - height / 2, width, height)
+        self.crop_box = box
+        self.viewport().update()
+        self.cropChanged.emit()
+        return True
+
+    def move_crop(self, key: Qt.Key, fraction: float = .005) -> bool:
+        """Переносит рамку, удерживая её целиком внутри исходной фотографии."""
+        if self.image.isNull():
+            return False
+        dx = self.image.width() * fraction if key in (Qt.Key.Key_Left, Qt.Key.Key_Right) else 0
+        dy = self.image.height() * fraction if key in (Qt.Key.Key_Up, Qt.Key.Key_Down) else 0
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Up):
+            dx, dy = -dx, -dy
+        if not dx and not dy:
+            return False
+        box = QRectF(self.crop_box)
+        box.translate(dx, dy)
+        bounds = QRectF(self.image.rect())
+        box.translate(max(0, bounds.left() - box.left()) + min(0, bounds.right() - box.right()),
+                      max(0, bounds.top() - box.top()) + min(0, bounds.bottom() - box.bottom()))
+        self.crop_box = box
+        self._update_crop_canvas()
+        self.viewport().update()
+        self.cropChanged.emit()
+        return True
+
+    def has_crop(self) -> bool:
+        """Отличает фактическую обрезку от исходной рамки с учётом дробных координат."""
+        return not self.crop_box.toAlignedRect().contains(self.image.rect()) or not self.image.rect().contains(self.crop_box.toAlignedRect())
+
     def clear_mask(self) -> None:
         """Удаляет только выделение, не обработанные пиксели."""
         self.strokes.clear()
         self._paths.clear()
+        self.set_mask_pending(False)
         self._drawing = False
         self.viewport().update()
         self.maskChanged.emit()
+
+    def set_mask_pending(self, pending: bool) -> None:
+        """Мерцает принятой маской, пока фоновая задача ещё не вернула результат."""
+        self._mask_pending = pending
+        self._mask_pulse_phase = 0.0
+        if pending:
+            self._mask_pulse_timer.start()
+        else:
+            self._mask_pulse_timer.stop()
+        self.viewport().update()
+
+    def _pulse_mask(self) -> None:
+        """Перерисовывает только оверлей маски: таймер не меняет данные выделения."""
+        self._mask_pulse_phase = (self._mask_pulse_phase + .11) % (math.tau)
+        self.viewport().update()
 
     def undo_stroke(self) -> None:
         """Убирает последний штрих до запуска обработки."""
@@ -130,15 +400,16 @@ class InpaintView(QGraphicsView):
             self.maskChanged.emit()
 
     def _fit_scale(self) -> float:
-        return min(max(1, self.viewport().width()-2)/max(1,self.image.width()),
-                   max(1, self.viewport().height()-2)/max(1,self.image.height()))
+        bounds = self.sceneRect()
+        return min(max(1, self.viewport().width()-2)/max(1, bounds.width()),
+                   max(1, self.viewport().height()-2)/max(1, bounds.height()))
 
     def fit(self) -> None:
         """Вписанный масштаб — нижняя граница приближения."""
         self._zoom = 1
         self.resetTransform()
         self.scale(self._fit_scale(), self._fit_scale())
-        self.centerOn(self.item)
+        self.centerOn(self.sceneRect().center())
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         if self.image.isNull():
@@ -165,6 +436,7 @@ class InpaintView(QGraphicsView):
             scale = self._fit_scale()*self._zoom
             current = self.transform().m11()
             self.scale(scale/current, scale/current)
+        self.resized.emit()
 
     def brush_colour(self, point: QPointF) -> QColor:
         """Выбирает наиболее далёкий цвет из жёлтого, синего, красного и зелёного."""
@@ -184,6 +456,13 @@ class InpaintView(QGraphicsView):
                 self._panning = True
                 self._last_mouse = event.position()
                 self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            elif self.crop_active:
+                point = self.mapToScene(event.position().toPoint())
+                self._crop_resize_handle = self._crop_handle_at(point)
+                self._crop_drag = self._crop_resize_handle is None and self.crop_box.contains(point)
+                self._crop_drag_start = point
+                self._crop_drag_box = QRectF(self.crop_box)
+                self._update_cursor(point)
             elif self.editable:
                 point = self.mapToScene(event.position().toPoint())
                 if self.sceneRect().contains(point):
@@ -206,20 +485,50 @@ class InpaintView(QGraphicsView):
             self._last_mouse = event.position()
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value()-round(delta.x()))
             self.verticalScrollBar().setValue(self.verticalScrollBar().value()-round(delta.y()))
+        elif self._crop_resize_handle:
+            self._resize_crop(self.mapToScene(event.position().toPoint()))
+        elif self._crop_drag:
+            point = self.mapToScene(event.position().toPoint())
+            self.crop_box = QRectF(self._crop_drag_box)
+            delta = point - self._crop_drag_start
+            bounds = QRectF(self.image.rect())
+            self.crop_box.translate(delta)
+            self.crop_box.translate(max(0, bounds.left() - self.crop_box.left()) + min(0, bounds.right() - self.crop_box.right()),
+                                    max(0, bounds.top() - self.crop_box.top()) + min(0, bounds.bottom() - self.crop_box.bottom()))
+            self._update_crop_canvas()
+            self.cropChanged.emit()
         elif self._drawing and self.editable:
             point = self.mapToScene(event.position().toPoint())
             self.strokes[-1]["points"].append([point.x(), point.y()])
             self._paths[-1][0].lineTo(point)
+        self._update_cursor(self.mapToScene(event.position().toPoint()))
         self.viewport().update()
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        self._drawing = self._panning = False
-        self.viewport().setCursor(Qt.CursorShape.OpenHandCursor if self._space else Qt.CursorShape.BlankCursor)
+        self._drawing = self._panning = self._crop_drag = False
+        self._crop_resize_handle = None
+        self._update_cursor(self.mapToScene(event.position().toPoint()))
         event.accept()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() == Qt.Key.Key_Space:
+        key, modifiers = event.key(), event.modifiers()
+        plain = not modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)
+        less = key in (Qt.Key.Key_Comma, Qt.Key.Key_Less) or event.text() in (",", "б")
+        greater = key in (Qt.Key.Key_Period, Qt.Key.Key_Greater) or event.text() in (".", "ю")
+        if modifiers == Qt.KeyboardModifier.ControlModifier and less:
+            self.editorShortcut.emit("rotate_left_90")
+        elif modifiers == Qt.KeyboardModifier.ControlModifier and greater:
+            self.editorShortcut.emit("rotate_right_90")
+        elif plain and key == Qt.Key.Key_C:
+            self.editorShortcut.emit("crop")
+        elif plain and less and not modifiers & Qt.KeyboardModifier.ShiftModifier:
+            self.editorShortcut.emit("rotate_left")
+        elif plain and greater and not modifiers & Qt.KeyboardModifier.ShiftModifier:
+            self.editorShortcut.emit("rotate_right")
+        elif plain and key == Qt.Key.Key_R:
+            self.editorShortcut.emit("reset")
+        elif key == Qt.Key.Key_Space:
             self._space = True
             self._drawing = False
             self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
@@ -227,9 +536,6 @@ class InpaintView(QGraphicsView):
             smaller = event.key() == Qt.Key.Key_BracketLeft or event.text() in ("[", "х")
             self.diameter = min(500, max(3, self.diameter*(1/1.2 if smaller else 1.2)))
             self.viewport().update()
-        elif event.key() == Qt.Key.Key_Z and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            if self.editable:
-                self.undo_stroke()
         else:
             # Стрелки принадлежат окну, а не прокрутке QGraphicsView.
             event.ignore()
@@ -253,16 +559,48 @@ class InpaintView(QGraphicsView):
         super().leaveEvent(event)
 
     def drawForeground(self, painter: QPainter, rect) -> None:  # noqa: N802
+        if self.crop_active and not self.image.isNull():
+            painter.save()
+            painter.setBrush(QColor(0, 0, 0, 115))
+            painter.setPen(Qt.PenStyle.NoPen)
+            outer = QPainterPath()
+            outer.addRect(self.sceneRect())
+            inner = QPainterPath()
+            inner.addRect(self.crop_box)
+            painter.drawPath(outer.subtracted(inner))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            scale = max(.001, self.transform().m11())
+            pen = QPen(QColor("#ffffff"), max(1.0, 1.25 / scale), Qt.PenStyle.DashLine)
+            pen.setDashPattern([5 / scale, 4 / scale])
+            painter.setPen(pen)
+            painter.drawRect(self.crop_box)
+            handle = 8 / scale
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#ffffff"))
+            for marker in (self.crop_box.topLeft(), self.crop_box.topRight(),
+                           self.crop_box.bottomLeft(), self.crop_box.bottomRight(),
+                           QPointF(self.crop_box.center().x(), self.crop_box.top()),
+                           QPointF(self.crop_box.center().x(), self.crop_box.bottom()),
+                           QPointF(self.crop_box.left(), self.crop_box.center().y()),
+                           QPointF(self.crop_box.right(), self.crop_box.center().y())):
+                painter.drawRect(QRectF(marker.x() - handle / 2, marker.y() - handle / 2, handle, handle))
+            painter.restore()
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setClipRect(self.sceneRect())
         for path, colour, width in self._paths:
             tint = QColor(colour)
-            tint.setAlpha(115)
+            if self._mask_pending:
+                wave = (math.sin(self._mask_pulse_phase) + 1) / 2
+                hue = tint.hsvHue() if tint.hsvHue() >= 0 else 200
+                tint.setHsv((hue + round(28 * wave)) % 360, max(150, tint.hsvSaturation()),
+                            min(255, tint.value() + round(24 * wave)), round(72 + 98 * wave))
+            else:
+                tint.setAlpha(115)
             painter.setPen(QPen(tint, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
             painter.drawPath(path)
         painter.restore()
-        if self._space or not self.editable:
+        if self._space or not self.editable or self.crop_active:
             return
         painter.save()
         painter.resetTransform()
@@ -295,41 +633,56 @@ class InpaintDialog(QDialog):
         self._model_phase = "loading"
         self._downloaded = 0
         self._download_total: int | None = None
+        # LaMa загружается заранее, хотя отдельный режим удаления в этом окне скрыт.
         self._models = {"inpaint": "pending", "horizon": "pending"}
         self._model_errors: dict[str, str] = {}
         self._loading = False
         self._processing = False
         self._processing_tool: str | None = None
+        self._background_inpaint: dict[str, int] = {}
         self._displayed_path = None
         self._closing = False
         self._closed = False
         self._after_save = None
+        self._autosave_path: str | None = None
+        self._rotation_angles: dict[str, float] = {}
+        self._crop_vertical = False
+        self._history_available: dict[str, tuple[bool, bool]] = {}
         self._buffer = bytearray()
         self._header = None
         self._stderr = b""
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setSingleShot(True)
+        self._autosave_timer.setInterval(_AUTOSAVE_DEBOUNCE_MS)
+        self._autosave_timer.timeout.connect(self._flush_autosave)
         self.setObjectName("inpaintDialog")
         self.setWindowTitle(_("Пакетный редактор"))
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
         self.resize(1400, 900)
         root = QVBoxLayout(self)
-        root.setContentsMargins(12,12,12,12)
-        root.setSpacing(10)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
         panel = QFrame(self)
         panel.setObjectName("batchRetouchPanel")
         bar = QHBoxLayout(panel)
-        bar.setContentsMargins(12,10,12,10)
-        bar.setSpacing(10)
+        bar.setContentsMargins(6, 5, 6, 5)
+        bar.setSpacing(6)
         root.addWidget(panel)
         navigation = QFrame(panel)
-        navigation.setObjectName("batchRetouchOverlay")
+        navigation.setObjectName("inpaintToolbarGroup")
         navigation_row = QHBoxLayout(navigation)
-        navigation_row.setContentsMargins(5,5,5,5)
-        navigation_row.setSpacing(4)
+        navigation_row.setContentsMargins(2, 2, 2, 2)
+        navigation_row.setSpacing(1)
         self.previous = self._icon_button("chevron-left", _("Предыдущее фото"), lambda: self.navigate(-1))
         self.next = self._icon_button("chevron-right", _("Следующее фото"), lambda: self.navigate(1))
         navigation_row.addWidget(self.previous)
         navigation_row.addWidget(self.next)
         bar.addWidget(navigation)
+        information_panel = QWidget(panel)
+        information_panel.setObjectName("inpaintInformation")
+        information_row = QHBoxLayout(information_panel)
+        information_row.setContentsMargins(0, 0, 0, 0)
+        information_row.setSpacing(6)
         information = QVBoxLayout()
         information.setSpacing(2)
         self.counter = QLabel()
@@ -339,44 +692,93 @@ class InpaintDialog(QDialog):
         self.status = QLabel()
         self.status.setObjectName("batchResizeStatus")
         information.addWidget(self.status)
-        bar.addLayout(information, 1)
+        information_row.addLayout(information)
+        self.spinner = _BusyIndicator()
+        information_row.addWidget(self.spinner)
+        information_row.addStretch()
+        bar.addWidget(information_panel, 1)
         self.download_progress = QProgressBar()
         self.download_progress.setObjectName("batchProgress")
         self.download_progress.setFixedWidth(150)
         self.download_progress.setTextVisible(False)
         self.download_progress.hide()
         bar.addWidget(self.download_progress)
-        self.spinner = _BusyIndicator()
-        bar.addWidget(self.spinner)
         self.autosave = SettingsCheckBox(_("Автосохранение"))
         self.autosave.setObjectName("batchResizeOption")
         self.autosave.setChecked(self.settings.value("inpaint/autosave", True, bool))
         self.autosave.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         bar.addWidget(self.autosave)
-        self.save_button = QPushButton(_("Сохранить"))
-        self.horizon_button = QPushButton(_("Автогоризонт"))
-        self.apply_button = QPushButton(_("Удалить объекты (Enter)"))
-        self.clear_button = QPushButton(_("Очистить маску"))
-        for button in (self.clear_button, self.apply_button, self.horizon_button, self.save_button):
-            button.setObjectName("batchResizePrimaryButton" if button is self.apply_button else "batchResizeSecondaryButton")
-            button.setFixedHeight(40)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            button.setAutoDefault(False)
-            button.setIconSize(QSize(18, 18))
-            bar.addWidget(button)
-        self.apply_button.setIcon(_fomantic_icon("magic", 18, "#ffffff"))
-        self.horizon_button.setIcon(_fomantic_icon("balance-scale", 18))
-        self.clear_button.setIcon(_fomantic_icon("close", 16))
-        self.save_button.setIcon(_fomantic_icon("save", 18))
+        history = self._toolbar_group(panel)
+        self.undo_button = self._toolbar_button("undo", _("Назад (Ctrl+Z)"))
+        self.redo_button = self._toolbar_button("redo", _("Вперёд (Ctrl+Y)"))
+        self.reset_button = self._toolbar_button("sync", _("Сбросить (R)"))
+        for button in (self.undo_button, self.redo_button, self.reset_button):
+            history.layout().addWidget(button)
+        bar.addWidget(history)
+        editing = self._toolbar_group(panel)
+        self.clear_button = self._toolbar_button("close", _("Очистить маску"))
+        self.apply_button = self._toolbar_button("magic", _("Удалить объекты (Enter)"), primary=True)
+        self.crop_toggle = self._toolbar_button("crop", _("Кадрирование (C)"))
+        self.crop_toggle.setCheckable(True)
+        self.horizon_button = self._toolbar_button("ruler-horizontal", _("Автогоризонт"))
+        for button in (self.clear_button, self.apply_button, self.crop_toggle, self.horizon_button):
+            editing.layout().addWidget(button)
+        bar.addWidget(editing)
+        self.save_group = self._toolbar_group(panel)
+        self.save_button = self._toolbar_button("save", _("Сохранить"), primary=True)
+        self.save_group.layout().addWidget(self.save_button)
+        bar.addWidget(self.save_group)
+        self.help_button = self._toolbar_button("help", _("Справка по горячим клавишам"))
+        self.help_button.clicked.connect(lambda: InpaintHelpDialog(self).exec())
+        bar.addWidget(self.help_button)
         self.view = InpaintView(self)
         root.addWidget(self.view, 1)
+        self.crop_controls = QFrame(self.view.viewport())
+        self.crop_controls.setObjectName("batchRetouchOverlay")
+        crop_row = QHBoxLayout(self.crop_controls)
+        crop_row.setContentsMargins(4, 4, 4, 4)
+        crop_row.setSpacing(3)
+        self.crop_ratio = QComboBox(self.crop_controls)
+        for text, ratio in ((_('Исходный'), None), ("16:9", 16 / 9), ("3:2", 3 / 2), ("4:3", 4 / 3), ("1:1", 1.0)):
+            self.crop_ratio.addItem(text, ratio)
+        self.crop_ratio.setObjectName("inpaintCropRatio")
+        self.crop_ratio.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.crop_ratio.setToolTip(_("Соотношение:"))
+        self.crop_ratio.currentIndexChanged.connect(
+            lambda index: self._set_crop_ratio(self.crop_ratio.itemData(index))
+        )
+        crop_row.addWidget(self.crop_ratio)
+        self.crop_lock_button = self._toolbar_button("lock", _("Сохранять пропорции"), parent=self.crop_controls)
+        self.crop_lock_button.setCheckable(True)
+        self.crop_lock_button.setChecked(True)
+        self.crop_lock_button.toggled.connect(self._set_crop_lock)
+        crop_row.addWidget(self.crop_lock_button)
+        self.crop_vertical_button = QToolButton(self.crop_controls)
+        self.crop_vertical_button.setObjectName("inpaintToolbarButton")
+        self.crop_vertical_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.crop_vertical_button.clicked.connect(self._toggle_crop_vertical)
+        crop_row.addWidget(self.crop_vertical_button)
+        self._refresh_crop_orientation_button()
+        self.crop_reset_button = self._toolbar_button("sync", _("Сбросить (R)"), parent=self.crop_controls)
+        self.crop_reset_button.clicked.connect(self._reset_crop)
+        crop_row.addWidget(self.crop_reset_button)
+        self.crop_apply_button = self._toolbar_button("check", _("Применить кадрирование"), primary=True, parent=self.crop_controls)
+        self.crop_apply_button.clicked.connect(self.apply_crop)
+        crop_row.addWidget(self.crop_apply_button)
+        self.crop_controls.hide()
+        self.view.resized.connect(self._position_crop_controls)
         self.view.maskChanged.connect(self._mask_changed)
+        self.view.cropChanged.connect(self._update)
         self.clear_button.clicked.connect(self.view.clear_mask)
         self.apply_button.clicked.connect(self.apply)
         self.horizon_button.clicked.connect(self.straighten)
+        self.undo_button.clicked.connect(self.undo)
+        self.redo_button.clicked.connect(self.redo)
+        self.reset_button.clicked.connect(self.reset_current)
         self.save_button.clicked.connect(self.save)
         self.autosave.toggled.connect(self._autosave_changed)
+        self.crop_toggle.toggled.connect(self._toggle_crop)
+        self.view.editorShortcut.connect(self._editor_shortcut)
         self.process = QProcess(self)
         self.process.readyReadStandardOutput.connect(self._read)
         self.process.readyReadStandardError.connect(self._read_stderr)
@@ -389,6 +791,26 @@ class InpaintDialog(QDialog):
         save_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         save_action.triggered.connect(self.save)
         self.addAction(save_action)
+        for shortcut, callback in ((QKeySequence("Ctrl+Z"), self.undo), (QKeySequence("Ctrl+Y"), self.redo)):
+            action = QAction(self)
+            action.setShortcut(shortcut)
+            action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            action.triggered.connect(callback)
+            self.addAction(action)
+        for shortcut, callback in (
+            (QKeySequence(Qt.Key.Key_C), lambda: self.crop_toggle.setChecked(not self.crop_toggle.isChecked())),
+            (QKeySequence(Qt.Key.Key_H), self.straighten),
+            (QKeySequence(Qt.Key.Key_Comma), lambda: self.rotate(-_ROTATE_STEP_DEGREES)),
+            (QKeySequence(Qt.Key.Key_Period), lambda: self.rotate(_ROTATE_STEP_DEGREES)),
+            (QKeySequence("Ctrl+,"), lambda: self.rotate(-_ROTATE_QUARTER_TURN_DEGREES)),
+            (QKeySequence("Ctrl+."), lambda: self.rotate(_ROTATE_QUARTER_TURN_DEGREES)),
+            (QKeySequence(Qt.Key.Key_R), self.reset_current),
+        ):
+            action = QAction(self)
+            action.setShortcut(shortcut)
+            action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            action.triggered.connect(callback)
+            self.addAction(action)
         self._update()
         QTimer.singleShot(0, self._start)
 
@@ -396,14 +818,36 @@ class InpaintDialog(QDialog):
     def path(self) -> str:
         return self.paths[self.index]
 
-    def _icon_button(self, icon, text, callback) -> QToolButton:
-        button = QToolButton(self)
-        button.setObjectName("batchRetouchOverlayButton")
-        button.setIcon(_fomantic_icon(icon, 24))
-        button.setIconSize(QSize(24,24))
+    def _toolbar_group(self, parent: QWidget) -> QFrame:
+        """Создаёт компактную рамку для близких по смыслу команд верхней панели."""
+        group = QFrame(parent)
+        group.setObjectName("inpaintToolbarGroup")
+        layout = QHBoxLayout(group)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(1)
+        return group
+
+    def _toolbar_button(
+        self, icon: str, text: str, *, primary: bool = False, parent: QWidget | None = None,
+    ) -> QToolButton:
+        """Возвращает доступную кнопку-иконку, не раздувающую панель подписью."""
+        button = QToolButton(parent or self)
+        button.setObjectName("inpaintToolbarPrimaryButton" if primary else "inpaintToolbarButton")
+        button.setIcon(_fomantic_icon(icon, 20, "#ffffff" if primary else "#dfe6ef"))
+        button.setIconSize(QSize(20, 20))
         button.setToolTip(text)
         button.setAccessibleName(text)
-        button.setFixedSize(36,36)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        return button
+
+    def _icon_button(self, icon, text, callback) -> QToolButton:
+        button = QToolButton(self)
+        button.setObjectName("inpaintToolbarButton")
+        button.setIcon(_fomantic_icon(icon, 20))
+        button.setIconSize(QSize(20, 20))
+        button.setToolTip(text)
+        button.setAccessibleName(text)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         button.clicked.connect(callback)
@@ -436,23 +880,134 @@ class InpaintDialog(QDialog):
         if self._ready and not self._loading and self.view.strokes:
             self._send("prepare", path=self.path)
 
+    def _toggle_crop(self, checked: bool) -> None:
+        """Показывает рамку только в явном режиме, не отменяя уже набранную обрезку."""
+        self.view.crop_active = checked
+        self.crop_controls.setVisible(checked)
+        if checked:
+            self._position_crop_controls()
+        self.view._update_cursor()
+        self.view.viewport().update()
+
+    def _editor_shortcut(self, command: str) -> None:
+        """Принимает клавиши холста напрямую, чтобы раскладка не съедала C, < и >."""
+        if command == "crop":
+            self.crop_toggle.setChecked(not self.crop_toggle.isChecked())
+        elif command == "rotate_left":
+            self.rotate(-_ROTATE_STEP_DEGREES)
+        elif command == "rotate_right":
+            self.rotate(_ROTATE_STEP_DEGREES)
+        elif command == "rotate_left_90":
+            self.rotate(-_ROTATE_QUARTER_TURN_DEGREES)
+        elif command == "rotate_right_90":
+            self.rotate(_ROTATE_QUARTER_TURN_DEGREES)
+        elif command == "reset":
+            self.reset_current()
+
+    def _set_crop_ratio(self, ratio: float | None) -> None:
+        """Применяет пропорцию, считая «Исходный» пропорцией самого снимка."""
+        vertical = self._crop_vertical
+        if ratio is None and not self.view.image.isNull():
+            vertical = self.view.image.height() > self.view.image.width()
+        elif ratio is not None and not self.view.image.isNull() and not self._crop_vertical:
+            vertical = self.view.image.height() > self.view.image.width()
+        self._crop_vertical = vertical
+        self.view.set_crop_ratio(self._crop_ratio_value(ratio), vertical)
+        self._refresh_crop_orientation_button()
+
+    def _crop_ratio_value(self, ratio: float | None) -> float | None:
+        """Возвращает длинную сторону исходного кадра для пункта «Исходный»."""
+        if ratio is not None or self.view.image.isNull():
+            return ratio
+        width, height = self.view.image.width(), self.view.image.height()
+        return max(width / height, height / width)
+
+    def _toggle_crop_vertical(self) -> None:
+        """Меняет направление установленного соотношения сторон одной кнопкой."""
+        self._crop_vertical = not self._crop_vertical
+        ratio = self._crop_ratio_value(self.crop_ratio.currentData())
+        self.view.set_crop_ratio(ratio, self._crop_vertical)
+        self._refresh_crop_orientation_button()
+
+    def _set_crop_lock(self, checked: bool) -> None:
+        """Разрешает свободный размер рамки только после явного снятия замка."""
+        self.view.crop_locked = checked
+        self.crop_lock_button.setIcon(_fomantic_icon("lock" if checked else "unlock", 20, "#dfe6ef"))
+
+    def _refresh_crop_orientation_button(self) -> None:
+        """Показывает текущую ориентацию той же пиктограммой, что и сетка снимков."""
+        self.crop_vertical_button.setIcon(_orientation_icon(self._crop_vertical, 20, "#dfe6ef"))
+        self.crop_vertical_button.setIconSize(QSize(20, 20))
+        self.crop_vertical_button.setToolTip(
+            _("Вертикальная ориентация — нажмите для горизонтальной")
+            if self._crop_vertical else _("Горизонтальная ориентация — нажмите для вертикальной")
+        )
+        self.crop_vertical_button.setAccessibleName(self.crop_vertical_button.toolTip())
+
+    def _reset_crop(self) -> None:
+        """Возвращает рамку, пропорцию и ориентацию кадрирования к исходному кадру."""
+        self.crop_ratio.setCurrentIndex(0)
+        self._set_crop_ratio(None)
+
+    def _position_crop_controls(self) -> None:
+        """Держит плашку кадрирования в левом верхнем углу области фотографии."""
+        self.crop_controls.adjustSize()
+        self.crop_controls.move(8, 8)
+        self.crop_controls.raise_()
+
+    def apply_crop(self) -> None:
+        """Передаёт полную рамку воркеру; LaMa вызывается лишь для выступающих краёв."""
+        if not self.view.editable or not self.view.has_crop():
+            return
+        self._processing = True
+        self._processing_tool = "crop"
+        box = self.view.crop_box
+        self._send("crop", path=self.path, request=self.request, revision=self.revisions[self.path],
+                   box=[box.left(), box.top(), box.right(), box.bottom()],
+                   draft_size=[self.view.image.width(), self.view.image.height()],
+                   neighbors=self._neighbors())
+        self._update()
+
+    def rotate(self, degrees: float) -> None:
+        """Меняет абсолютный угол от базового кадра, не пересчитывая прошлый поворот."""
+        if not self.view.editable:
+            return
+        target_angle = self._rotation_angles.get(self.path, 0.0) + degrees
+        self._processing = True
+        self._processing_tool = "rotate"
+        self._send("rotate", path=self.path, request=self.request, revision=self.revisions[self.path],
+                   degrees=target_angle, draft_size=[self.view.image.width(), self.view.image.height()],
+                   neighbors=self._neighbors())
+        self._update()
+
     def _dirty(self, path: str) -> bool:
         return self.revisions.get(path, 0) > self.saved.get(path, 0)
 
     def _update(self) -> None:
-        active = self._ready and not self._closing and not self._closed
-        idle = (active and not self._loading and not self._processing and not self._after_save
+        active = not self._closing and not self._closed
+        inpaint_running_here = self.path in self._background_inpaint
+        idle = (active and not self._loading and not self._processing and not inpaint_running_here and not self._after_save
                 and self._displayed_path == self.path and self.path in self.revisions)
         inpaint_ready = self._models["inpaint"] == "ready"
         horizon_ready = self._models["horizon"] == "ready"
         self.view.editable = idle and inpaint_ready
         self.previous.setEnabled(active and not self._processing and not self._after_save and self.index > 0)
         self.next.setEnabled(active and not self._processing and not self._after_save and self.index+1 < len(self.paths))
-        self.apply_button.setEnabled(idle and inpaint_ready and bool(self.view.strokes))
         self.horizon_button.setEnabled(idle and horizon_ready)
+        can_undo, can_redo = self._history_available.get(self.path, (False, False))
+        self.undo_button.setEnabled(idle and can_undo)
+        self.redo_button.setEnabled(idle and can_redo)
+        self.reset_button.setEnabled(idle)
+        self.apply_button.setEnabled(idle and inpaint_ready and bool(self.view.strokes))
+        self.crop_toggle.setEnabled(idle)
+        self.crop_apply_button.setEnabled(idle and self.view.has_crop())
+        self.crop_vertical_button.setEnabled(idle)
+        self.crop_lock_button.setEnabled(idle)
+        self.crop_reset_button.setEnabled(idle and self.view.has_crop())
+        self.crop_ratio.setEnabled(idle)
         self.clear_button.setEnabled(idle and inpaint_ready and bool(self.view.strokes))
         saving = any(self.pending.values())
-        self.save_button.setVisible(not self.autosave.isChecked() or self._dirty(self.path))
+        self.save_group.setVisible(not self.autosave.isChecked())
         self.save_button.setEnabled(idle and self._dirty(self.path) and self.revisions[self.path] not in self.pending.get(self.path, set()))
         self.autosave.setEnabled(not self._closing)
         downloading = any(state == "downloading" for state in self._models.values())
@@ -464,22 +1019,29 @@ class InpaintDialog(QDialog):
                 self.download_progress.setValue(self._downloaded)
             else:
                 self.download_progress.setRange(0, 0)
-        self.spinner.setVisible(not self._ready or self._loading or self._processing or saving or self._closing or models_pending)
-        self.view.viewport().setCursor(Qt.CursorShape.BlankCursor if idle else Qt.CursorShape.ArrowCursor)
+        self.spinner.setVisible(not self._ready or self._loading or self._processing or bool(self._background_inpaint)
+                                or saving or self._closing or models_pending)
+        self.view._update_cursor()
         if self._closing:
             text = _("Завершение сохранения…") if saving else _("Закрытие…")
         elif not self._ready:
             text = _("Загрузка модели…")
+            text = _("Запускаем ИИ-модели…")
         elif self._loading:
             text = _("Загрузка изображения…")
         elif self._processing:
-            text = _("Выравнивание горизонта…") if self._processing_tool == "horizon" else _("Удаление объектов…")
+            text = (_("Выравнивание горизонта…") if self._processing_tool == "horizon" else
+                    _("Поворот изображения…") if self._processing_tool == "rotate" else
+                    _("Кадрирование…") if self._processing_tool == "crop" else
+                    _("Удаление объектов…"))
+        elif self._background_inpaint:
+            text = _("Удаление объектов в фоне…")
         elif downloading and self._download_total:
             done = f"{self._downloaded / 1024 / 1024:.0f} MiB"
             total = f"{self._download_total / 1024 / 1024:.0f} MiB"
             text = _("Загрузка моделей в фоне: {done} из {total}").format(done=done, total=total)
         elif models_pending:
-            text = _("Модели загружаются в фоне…")
+            text = _("Запускаем ИИ-модели…")
         elif self._model_errors:
             text = _("Не удалось загрузить часть моделей")
         elif saving:
@@ -497,9 +1059,10 @@ class InpaintDialog(QDialog):
         """Фиксирует маску для конкретной ревизии; повторный Enter не дублирует задачу."""
         if not self.view.editable or not self.view.strokes:
             return
-        self._processing = True
-        self._processing_tool = "inpaint"
-        self._send("apply", path=self.path, request=self.request, revision=self.revisions[self.path],
+        path = self.path
+        self._background_inpaint[path] = self.request
+        self.view.set_mask_pending(True)
+        self._send("apply", path=path, request=self.request, revision=self.revisions[path],
                    strokes=self.view.strokes, draft_size=[self.view.image.width(), self.view.image.height()],
                    neighbors=self._neighbors())
         self._update()
@@ -515,11 +1078,44 @@ class InpaintDialog(QDialog):
                    neighbors=self._neighbors())
         self._update()
 
+    def reset_current(self) -> None:
+        """Сбрасывает все правки текущего кадра к его состоянию при открытии."""
+        if not self.view.editable:
+            return
+        self._processing = True
+        self._processing_tool = "reset"
+        self._send("reset", path=self.path, request=self.request,
+                   draft_size=[self.view.image.width(), self.view.image.height()],
+                   neighbors=self._neighbors())
+        self._update()
+
+    def _history_command(self, command: str) -> None:
+        """Передаёт отмену или повтор воркеру, где хранятся точные состояния кадров."""
+        if not self.view.editable:
+            return
+        self._processing = True
+        self._processing_tool = command
+        self._send(command, path=self.path, request=self.request,
+                   draft_size=[self.view.image.width(), self.view.image.height()],
+                   neighbors=self._neighbors())
+        self._update()
+
+    def undo(self) -> None:
+        """Отменяет последнее изменение текущего кадра."""
+        self._history_command("undo")
+
+    def redo(self) -> None:
+        """Повторяет последнее отменённое изменение текущего кадра."""
+        self._history_command("redo")
+
     def save(self, path: str | None = None) -> None:
         """Сразу отмечает запись, чтобы навигация не ждала ответа процесса."""
         if not self._ready or self._processing or self._closing:
             return
         path = path if isinstance(path, str) else self.path
+        if self._autosave_path == path:
+            self._autosave_timer.stop()
+            self._autosave_path = None
         if not self._dirty(path):
             return
         revision = self.revisions[path]
@@ -529,17 +1125,44 @@ class InpaintDialog(QDialog):
             self._send("save", path=path, revision=revision)
         self._update()
 
+    def _queue_autosave(self, path: str) -> None:
+        """Откладывает фоновую запись, пока пользователь продолжает править кадр."""
+        if not self.autosave.isChecked() or not self._dirty(path) or self._closing:
+            return
+        self._autosave_path = path
+        self._autosave_timer.start()
+        self._update()
+
+    def _flush_autosave(self) -> None:
+        """Сохраняет последнюю ревизию, а не каждое промежуточное нажатие клавиши."""
+        path, self._autosave_path = self._autosave_path, None
+        if path and self.autosave.isChecked() and self._dirty(path):
+            self.save(path)
+
     def _autosave_changed(self, checked: bool) -> None:
         """Запоминает выбор сразу, чтобы новое окно не меняло стратегию записи."""
         self.settings.setValue("inpaint/autosave", checked)
         if checked and not self._processing:
-            self.save()
+            self._queue_autosave(self.path)
+        elif not checked:
+            self._autosave_timer.stop()
+            self._autosave_path = None
         self._update()
 
     def _confirm_leave(self, continuation) -> bool:
         """Маска и незаписанный результат требуют явного решения перед уходом."""
+        if self.path in self._background_inpaint:
+            # Маска уже принадлежит фоновой задаче и будет очищена при открытии
+            # следующего кадра; повторный вопрос здесь означал бы ложный «отказ».
+            return True
         dirty = self._dirty(self.path)
         pending_current = self.revisions.get(self.path, 0) in self.pending.get(self.path, set())
+        if dirty and not pending_current and self.autosave.isChecked() and self._ready and not self._processing:
+            self._autosave_timer.stop()
+            self._autosave_path = None
+            self._after_save = continuation
+            self.save()
+            return False
         if not self.view.strokes and (not dirty or pending_current):
             return True
         buttons = QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel
@@ -571,7 +1194,7 @@ class InpaintDialog(QDialog):
         self.view.clear_mask()
 
     def navigate(self, delta: int) -> None:
-        if self._processing or self._closing or self._after_save or not self._ready:
+        if self._processing or self._closing or self._after_save:
             return
         index = self.index + delta
         if not 0 <= index < len(self.paths):
@@ -626,17 +1249,25 @@ class InpaintDialog(QDialog):
             self._ready = True
             self._open()
         elif kind in {"frame", "result"}:
-            if event["request"] != self.request or path != self.path or self._closing:
+            background_result = (kind == "result" and self._background_inpaint.get(path) == event["request"])
+            if not background_result and (event["request"] != self.request or path != self.path or self._closing):
                 return
             self.revisions[path] = event["revision"]
             self.saved[path] = max(self.saved.get(path, 0), event["saved_revision"])
-            image = QImage(payload, event["width"], event["height"], event["width"]*3, QImage.Format.Format_RGB888).copy()
-            self._loading = self._processing = False
-            self._processing_tool = None
-            self._displayed_path = path
-            self.view.show_image(image, reset=kind == "frame")
-            if kind == "result" and self.autosave.isChecked():
-                self.save(path)
+            self._history_available[path] = (bool(event.get("can_undo", False)), bool(event.get("can_redo", False)))
+            if "rotation_angle" in event:
+                self._rotation_angles[path] = float(event["rotation_angle"])
+            if background_result:
+                self._background_inpaint.pop(path, None)
+            if path == self.path and not self._closing:
+                image = QImage(payload, event["width"], event["height"], event["width"]*3, QImage.Format.Format_RGB888).copy()
+                self._loading = self._processing = False
+                self._processing_tool = None
+                self._displayed_path = path
+                self.view.show_image(image, reset=kind == "frame")
+                self._set_crop_ratio(self.crop_ratio.currentData())
+            if kind == "result":
+                self._queue_autosave(path)
         elif kind in {"saved", "save_error"}:
             self.pending.setdefault(path, set()).discard(event["revision"])
             if kind == "saved":
@@ -655,11 +1286,17 @@ class InpaintDialog(QDialog):
             self._models[event.get("model", "inpaint")] = "error"
             self._model_errors[event.get("model", "inpaint")] = event.get("error", "")
         elif kind == "error":
-            if kind == "error" and (event["request"] != self.request or path != self.path):
+            background_error = self._background_inpaint.get(path) == event["request"]
+            if background_error:
+                self._background_inpaint.pop(path, None)
+            if not background_error and (event["request"] != self.request or path != self.path):
                 return
-            self._loading = self._processing = False
-            self._processing_tool = None
-            self._show_error(event, _("Не удалось обработать изображение"))
+            if path == self.path:
+                if background_error:
+                    self.view.set_mask_pending(False)
+                self._loading = self._processing = False
+                self._processing_tool = None
+                self._show_error(event, _("Не удалось обработать изображение"))
         self._update()
 
     def _show_error(self, event: dict, title: str) -> None:
@@ -734,12 +1371,38 @@ class InpaintDialog(QDialog):
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()
-        if key == Qt.Key.Key_Left:
+        modifiers = event.modifiers()
+        plain = not modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.MetaModifier)
+        less_key = key in (Qt.Key.Key_Comma, Qt.Key.Key_Less) or event.text() in (",", "б")
+        greater_key = key in (Qt.Key.Key_Period, Qt.Key.Key_Greater) or event.text() in (".", "ю")
+        less = less_key and modifiers == Qt.KeyboardModifier.NoModifier
+        greater = greater_key and modifiers == Qt.KeyboardModifier.NoModifier
+        if plain and (less or greater):
+            self.rotate(-_ROTATE_STEP_DEGREES if less else _ROTATE_STEP_DEGREES)
+        elif modifiers == Qt.KeyboardModifier.ControlModifier and (less_key or greater_key):
+            self.rotate(-_ROTATE_QUARTER_TURN_DEGREES if less_key else _ROTATE_QUARTER_TURN_DEGREES)
+        elif key == Qt.Key.Key_C and modifiers == Qt.KeyboardModifier.NoModifier:
+            self.crop_toggle.setChecked(not self.crop_toggle.isChecked())
+        elif key == Qt.Key.Key_H and modifiers == Qt.KeyboardModifier.NoModifier:
+            self.straighten()
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down) and modifiers & Qt.KeyboardModifier.ControlModifier:
+            # Qt повторяет keyPress при удержании, поэтому каждый шаг остаётся 1 %
+            # оригинала, а удержание даёт ожидаемое плавное кадрирование.
+            if self.view.crop_by_edge(key):
+                if not self.crop_toggle.isChecked():
+                    self.crop_toggle.setChecked(True)
+                self._update()
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down) and modifiers & Qt.KeyboardModifier.ShiftModifier:
+            if self.view.move_crop(key):
+                if not self.crop_toggle.isChecked():
+                    self.crop_toggle.setChecked(True)
+                self._update()
+        elif key == Qt.Key.Key_Left:
             self.navigate(-1)
         elif key == Qt.Key.Key_Right:
             self.navigate(1)
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.apply()
+            (self.apply_crop if self.crop_toggle.isChecked() else self.apply)()
         elif key == Qt.Key.Key_S and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.save()
         elif key == Qt.Key.Key_Escape and self.view.strokes and not self._processing:

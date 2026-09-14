@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-14 10:15+0300\n"
+"POT-Creation-Date: 2026-09-14 16:06+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -1857,20 +1857,61 @@ msgstr "上一张照片"
 msgid "Следующее фото"
 msgstr "下一张照片"
 
-msgid "Автосохранение"
-msgstr "自动保存"
+msgid "Кадрирование (C)"
+msgstr "裁剪 (C)"
 
-msgid "Сохранить"
-msgstr "保存"
+msgid "Изменить размер рамки"
+msgstr "调整裁剪框大小"
+
+msgid "Переместить рамку"
+msgstr "移动裁剪框"
 
 msgid "Автогоризонт"
 msgstr "自动校正水平线"
 
+msgid "Повернуть на 0,5°"
+msgstr "旋转 0.5°"
+
+msgid "Повернуть на 90°"
+msgstr "旋转 90°"
+
+#, fuzzy
+msgid "Сбросить (R)"
+msgstr "重置"
+
+msgid "Назад (Ctrl+Z)"
+msgstr ""
+
+msgid "Вперёд (Ctrl+Y)"
+msgstr ""
+
+msgid "Сохранить"
+msgstr "保存"
+
 msgid "Удалить объекты (Enter)"
 msgstr "移除对象（Enter）"
 
+#, fuzzy
+msgid "Enter в режиме кадрирования"
+msgstr "裁剪模式下按 Enter"
+
+msgid "Применить кадрирование"
+msgstr "应用裁剪"
+
 msgid "Очистить маску"
 msgstr "清除蒙版"
+
+msgid "Автосохранение"
+msgstr "自动保存"
+
+msgid "Исходный"
+msgstr "原始"
+
+msgid "Соотношение:"
+msgstr "宽高比："
+
+msgid "Сохранять пропорции"
+msgstr "锁定宽高比"
 
 msgid "Завершение сохранения…"
 msgstr "正在完成保存…"
@@ -1879,6 +1920,10 @@ msgid "Закрытие…"
 msgstr "正在关闭…"
 
 msgid "Загрузка модели…"
+msgstr "正在启动 AI 模型…"
+
+#, fuzzy
+msgid "Запускаем ИИ-модели…"
 msgstr "正在加载模型…"
 
 msgid "Загрузка изображения…"
@@ -1887,15 +1932,22 @@ msgstr "正在加载图像…"
 msgid "Выравнивание горизонта…"
 msgstr "正在校正水平线…"
 
+msgid "Поворот изображения…"
+msgstr "正在旋转图像…"
+
+#, fuzzy
+msgid "Кадрирование…"
+msgstr "裁剪 (C)"
+
 msgid "Удаление объектов…"
 msgstr "正在移除对象…"
+
+msgid "Удаление объектов в фоне…"
+msgstr "正在后台移除对象…"
 
 #, python-brace-format
 msgid "Загрузка моделей в фоне: {done} из {total}"
 msgstr "正在后台加载模型：{done}/{total}"
-
-msgid "Модели загружаются в фоне…"
-msgstr "模型正在后台加载…"
 
 msgid "Не удалось загрузить часть моделей"
 msgstr "部分模型无法加载"
@@ -2498,3 +2550,15 @@ msgstr "快速查看和筛选 RAW 与 JPG 照片"
 
 #~ msgid "Скачивание модели…"
 #~ msgstr "正在下载模型…"
+
+#~ msgid "Дорисовать за краями"
+#~ msgstr "扩展画面边缘"
+
+#~ msgid "Кадрирование и дорисовка краёв…"
+#~ msgstr "正在裁剪并扩展边缘…"
+
+#~ msgid "Вертикально"
+#~ msgstr "竖向"
+
+#~ msgid "Модели загружаются в фоне…"
+#~ msgstr "模型正在后台加载…"

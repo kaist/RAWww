@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-14 10:15+0300\n"
+"POT-Creation-Date: 2026-09-14 16:06+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -1933,20 +1933,61 @@ msgstr "Vorheriges Foto"
 msgid "Следующее фото"
 msgstr "Nächstes Foto"
 
-msgid "Автосохранение"
-msgstr "Automatisch speichern"
+msgid "Кадрирование (C)"
+msgstr "Zuschneiden (C)"
 
-msgid "Сохранить"
-msgstr "Speichern"
+msgid "Изменить размер рамки"
+msgstr "Zuschneiderahmen skalieren"
+
+msgid "Переместить рамку"
+msgstr "Zuschneiderahmen verschieben"
 
 msgid "Автогоризонт"
 msgstr "Auto-Horizont"
 
+msgid "Повернуть на 0,5°"
+msgstr "Um 0,5° drehen"
+
+msgid "Повернуть на 90°"
+msgstr "Um 90° drehen"
+
+#, fuzzy
+msgid "Сбросить (R)"
+msgstr "Zurücksetzen"
+
+msgid "Назад (Ctrl+Z)"
+msgstr ""
+
+msgid "Вперёд (Ctrl+Y)"
+msgstr ""
+
+msgid "Сохранить"
+msgstr "Speichern"
+
 msgid "Удалить объекты (Enter)"
 msgstr "Objekte entfernen (Enter)"
 
+#, fuzzy
+msgid "Enter в режиме кадрирования"
+msgstr "Enter beim Zuschneiden"
+
+msgid "Применить кадрирование"
+msgstr "Zuschnitt anwenden"
+
 msgid "Очистить маску"
 msgstr "Maske löschen"
+
+msgid "Автосохранение"
+msgstr "Automatisch speichern"
+
+msgid "Исходный"
+msgstr "Original"
+
+msgid "Соотношение:"
+msgstr "Seitenverhältnis:"
+
+msgid "Сохранять пропорции"
+msgstr "Seitenverhältnis sperren"
 
 msgid "Завершение сохранения…"
 msgstr "Speichern wird abgeschlossen…"
@@ -1955,6 +1996,10 @@ msgid "Закрытие…"
 msgstr "Wird geschlossen…"
 
 msgid "Загрузка модели…"
+msgstr "KI-Modelle werden gestartet…"
+
+#, fuzzy
+msgid "Запускаем ИИ-модели…"
 msgstr "Modell wird geladen…"
 
 msgid "Загрузка изображения…"
@@ -1963,15 +2008,22 @@ msgstr "Bild wird geladen…"
 msgid "Выравнивание горизонта…"
 msgstr "Horizont wird ausgerichtet…"
 
+msgid "Поворот изображения…"
+msgstr "Bild wird gedreht…"
+
+#, fuzzy
+msgid "Кадрирование…"
+msgstr "Zuschneiden (C)"
+
 msgid "Удаление объектов…"
 msgstr "Objekte werden entfernt…"
+
+msgid "Удаление объектов в фоне…"
+msgstr "Objekte werden im Hintergrund entfernt…"
 
 #, python-brace-format
 msgid "Загрузка моделей в фоне: {done} из {total}"
 msgstr "Modelle werden im Hintergrund geladen: {done} von {total}"
-
-msgid "Модели загружаются в фоне…"
-msgstr "Modelle werden im Hintergrund geladen…"
 
 msgid "Не удалось загрузить часть моделей"
 msgstr "Einige Modelle konnten nicht geladen werden"
@@ -2603,3 +2655,15 @@ msgstr "Schnelle Sichtung und Auswahl von RAW- und JPG-Fotos"
 
 #~ msgid "Скачивание модели…"
 #~ msgstr "Modell wird heruntergeladen…"
+
+#~ msgid "Дорисовать за краями"
+#~ msgstr "Über die Ränder erweitern"
+
+#~ msgid "Кадрирование и дорисовка краёв…"
+#~ msgstr "Zuschneiden und Ränder erweitern…"
+
+#~ msgid "Вертикально"
+#~ msgstr "Hochformat"
+
+#~ msgid "Модели загружаются в фоне…"
+#~ msgstr "Modelle werden im Hintergrund geladen…"

@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 from io import BytesIO
 import math
@@ -392,7 +392,42 @@ def straighten_image(frame: EditableImage, angle: float) -> Image.Image:
     correction = -angle
     source = frame.image
     rotated = source.rotate(correction, resample=Image.Resampling.BICUBIC, expand=True)
-    target_w, target_h = _largest_rotated_rectangle(source.width, source.height, correction)
+    safe_w, safe_h = _largest_rotated_rectangle(source.width, source.height, correction)
+    # Максимальный прямоугольник после поворота может иметь другие пропорции.
+    # Вписываем в него кадр с форматом оригинала, чтобы горизонт не менял его.
+    scale = min(safe_w / source.width, safe_h / source.height)
+    target_w = max(1, round(source.width * scale))
+    target_h = max(1, round(source.height * scale))
     left = max(0, (rotated.width - target_w) // 2)
     top = max(0, (rotated.height - target_h) // 2)
     return rotated.crop((left, top, left + target_w, top + target_h))
+
+
+def crop_image(frame: EditableImage, box: tuple[float, float, float, float]) -> Image.Image:
+    """Обрезает полный кадр по проверенной рамке интерфейса без изменения профиля."""
+    left, top, right, bottom = box
+    left = max(0, min(frame.image.width - 1, round(left)))
+    top = max(0, min(frame.image.height - 1, round(top)))
+    right = max(left + 1, min(frame.image.width, round(right)))
+    bottom = max(top + 1, min(frame.image.height, round(bottom)))
+    return frame.image.crop((left, top, right, bottom))
+
+
+def crop_with_inpaint(frame: EditableImage, box: tuple[float, float, float, float], inpainter: LamaInpainter) -> Image.Image:
+    """Расширяет кадр LaMa только за его границами и возвращает выбранный прямоугольник."""
+    left, top, right, bottom = (round(value) for value in box)
+    left, top = min(left, right - 1), min(top, bottom - 1)
+    right, bottom = max(right, left + 1), max(bottom, top + 1)
+    if left >= 0 and top >= 0 and right <= frame.image.width and bottom <= frame.image.height:
+        return crop_image(frame, (left, top, right, bottom))
+    canvas_left, canvas_top = min(0, left), min(0, top)
+    canvas_right, canvas_bottom = max(frame.image.width, right), max(frame.image.height, bottom)
+    size = (canvas_right - canvas_left, canvas_bottom - canvas_top)
+    fill = (0, 0, 0, 255) if "A" in frame.image.mode else (0, 0, 0)
+    canvas = Image.new(frame.image.mode, size, fill)
+    source_at = (-canvas_left, -canvas_top)
+    canvas.paste(frame.image, source_at)
+    mask = Image.new("L", size, 255)
+    mask.paste(0, (*source_at, source_at[0] + frame.image.width, source_at[1] + frame.image.height))
+    generated = inpainter.apply(replace(frame, image=canvas), mask)
+    return generated.crop((left - canvas_left, top - canvas_top, right - canvas_left, bottom - canvas_top))
