@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-13 23:25+0300\n"
+"POT-Creation-Date: 2026-09-14 10:15+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -810,8 +810,8 @@ msgstr "Shrink JPG"
 msgid "Пакетная ретушь"
 msgstr "Batch retouch"
 
-msgid "Удаление объектов"
-msgstr "Object removal"
+msgid "Пакетный редактор"
+msgstr "Batch editor"
 
 msgid "Пока не реализовано"
 msgstr "Not implemented yet"
@@ -1911,6 +1911,9 @@ msgstr "Autosave"
 msgid "Сохранить"
 msgstr "Save"
 
+msgid "Автогоризонт"
+msgstr "Auto horizon"
+
 msgid "Удалить объекты (Enter)"
 msgstr "Remove objects (Enter)"
 
@@ -1923,21 +1926,27 @@ msgstr "Finishing saves…"
 msgid "Закрытие…"
 msgstr "Closing…"
 
-#, python-brace-format
-msgid "Скачивание модели: {done} из {total}"
-msgstr "Downloading model: {done} of {total}"
-
-msgid "Скачивание модели…"
-msgstr "Downloading model…"
-
 msgid "Загрузка модели…"
 msgstr "Loading model…"
+
+msgid "Загрузка изображения…"
+msgstr "Loading image…"
+
+msgid "Выравнивание горизонта…"
+msgstr "Leveling horizon…"
 
 msgid "Удаление объектов…"
 msgstr "Removing objects…"
 
-msgid "Загрузка изображения…"
-msgstr "Loading image…"
+#, python-brace-format
+msgid "Загрузка моделей в фоне: {done} из {total}"
+msgstr "Loading models in background: {done} of {total}"
+
+msgid "Модели загружаются в фоне…"
+msgstr "Models are loading in background…"
+
+msgid "Не удалось загрузить часть моделей"
+msgstr "Some models could not be loaded"
 
 msgid "Сохранение в фоне…"
 msgstr "Saving in background…"
@@ -1961,9 +1970,6 @@ msgstr "Could not save the image"
 msgid "Не удалось обработать изображение"
 msgstr "Could not process the image"
 
-msgid "Не удалось загрузить модель"
-msgstr "Could not load the model"
-
 msgid ""
 "Поддерживаются одиночные 8-битные JPEG, PNG, WebP и TIFF. RAW, "
 "многокадровые и другие цветовые режимы недоступны."
@@ -1977,6 +1983,17 @@ msgid ""
 msgstr ""
 "Another program changed the file. Saving was cancelled to avoid "
 "overwriting the new version."
+
+#, python-brace-format
+msgid ""
+"Модель предлагает поворот на {angle}°. Автогоризонт применяет только "
+"небольшие коррекции до 15°."
+msgstr ""
+"The model suggests a {angle}° rotation. Auto horizon applies only small "
+"corrections up to 15°."
+
+msgid "Не удалось загрузить модель"
+msgstr "Could not load the model"
 
 msgid "Процесс обработки завершился. Закройте и откройте утилиту снова."
 msgstr "The processing worker exited. Close and reopen the utility."
@@ -2538,3 +2555,15 @@ msgstr "Fast RAW and JPG viewing and culling"
 #~ "Brush: [ and ]. Enter — remove."
 #~ " Space + mouse — pan. Wheel —"
 #~ " zoom. Ctrl+Z — undo stroke."
+
+#~ msgid "Удаление объектов"
+#~ msgstr "Object removal"
+
+#~ msgid "Скачивание модели горизонта: {done} из {total}"
+#~ msgstr "Downloading horizon model: {done} of {total}"
+
+#~ msgid "Скачивание модели горизонта…"
+#~ msgstr "Downloading horizon model…"
+
+#~ msgid "Скачивание модели…"
+#~ msgstr "Downloading model…"

@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-13 23:25+0300\n"
+"POT-Creation-Date: 2026-09-14 10:15+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -777,7 +777,7 @@ msgstr ""
 msgid "Пакетная ретушь"
 msgstr ""
 
-msgid "Удаление объектов"
+msgid "Пакетный редактор"
 msgstr ""
 
 msgid "Пока не реализовано"
@@ -1821,6 +1821,9 @@ msgstr ""
 msgid "Сохранить"
 msgstr ""
 
+msgid "Автогоризонт"
+msgstr ""
+
 msgid "Удалить объекты (Enter)"
 msgstr ""
 
@@ -1833,20 +1836,26 @@ msgstr ""
 msgid "Закрытие…"
 msgstr ""
 
-#, python-brace-format
-msgid "Скачивание модели: {done} из {total}"
-msgstr ""
-
-msgid "Скачивание модели…"
-msgstr ""
-
 msgid "Загрузка модели…"
+msgstr ""
+
+msgid "Загрузка изображения…"
+msgstr ""
+
+msgid "Выравнивание горизонта…"
 msgstr ""
 
 msgid "Удаление объектов…"
 msgstr ""
 
-msgid "Загрузка изображения…"
+#, python-brace-format
+msgid "Загрузка моделей в фоне: {done} из {total}"
+msgstr ""
+
+msgid "Модели загружаются в фоне…"
+msgstr ""
+
+msgid "Не удалось загрузить часть моделей"
 msgstr ""
 
 msgid "Сохранение в фоне…"
@@ -1869,9 +1878,6 @@ msgstr ""
 msgid "Не удалось обработать изображение"
 msgstr ""
 
-msgid "Не удалось загрузить модель"
-msgstr ""
-
 msgid ""
 "Поддерживаются одиночные 8-битные JPEG, PNG, WebP и TIFF. RAW, "
 "многокадровые и другие цветовые режимы недоступны."
@@ -1880,6 +1886,15 @@ msgstr ""
 msgid ""
 "Файл изменён другой программой. Сохранение отменено, чтобы не "
 "перезаписать новую версию."
+msgstr ""
+
+#, python-brace-format
+msgid ""
+"Модель предлагает поворот на {angle}°. Автогоризонт применяет только "
+"небольшие коррекции до 15°."
+msgstr ""
+
+msgid "Не удалось загрузить модель"
 msgstr ""
 
 msgid "Процесс обработки завершился. Закройте и откройте утилиту снова."

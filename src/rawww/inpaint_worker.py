@@ -19,8 +19,9 @@ import sys
 import threading
 
 from .inpaint_pipeline import (
-    EditableImage, ImageConflictError, LamaInpainter, ensure_inpaint_model, fingerprint,
-    load_image, make_mask, save_image, scale_strokes, to_srgb,
+    DeepOad, EditableImage, ImageConflictError, LamaInpainter, ensure_horizon_model,
+    ensure_inpaint_model, fingerprint, load_image, make_mask, save_image, scale_strokes,
+    straighten_image, to_srgb,
 )
 
 
@@ -93,6 +94,13 @@ class ImageStore:
 
     def full_for_apply(self, path: str, draft_size: tuple[int, int]) -> tuple[EditableImage, float, float]:
         """Возвращает оригинал и масштаб для маски, нарисованной на draft."""
+        with self.lock:
+            frame = self.frames.get(path)
+            # Кадр до 1920 px уже показывается целиком, поэтому prepare_full()
+            # намеренно не создаёт Future. Не обращаться к нему как к draft:
+            # иначе Enter на обычном небольшом JPEG завершается KeyError.
+            if frame is not None and not frame.draft:
+                return frame, frame.image.width / draft_size[0], frame.image.height / draft_size[1]
         self.prepare_full(path)
         with self.lock:
             request = self.full_requests[path]
@@ -186,10 +194,12 @@ class ImageStore:
 
 
 def main() -> int:
-    """Сессия LaMa живёт только до выхода дочернего процесса."""
+    """Открывает кадры сразу, пока модели готовятся в фоновых потоках."""
     output_lock = threading.Lock()
     commands = queue.Queue()
     latest = {"open": 0}
+    models: dict[str, LamaInpainter | DeepOad | None] = {"inpaint": None, "horizon": None}
+    models_lock = threading.Lock()
 
     def emit(kind: str, payload: bytes = b"", **values) -> None:
         header = json.dumps({"event": kind, "bytes": len(payload), **values}, ensure_ascii=False).encode("utf-8")
@@ -211,18 +221,42 @@ def main() -> int:
 
     threading.Thread(target=read_commands, daemon=True).start()
     store = ImageStore()
-    try:
-        try:
-            def download_progress(downloaded: int, total: int | None) -> None:
-                emit("downloading", downloaded=downloaded, total=total or 0)
+    loaders = ThreadPoolExecutor(max_workers=2, thread_name_prefix="inpaint-model")
 
-            model_path = ensure_inpaint_model(download_progress)
-            emit("loading_model")
-            model = LamaInpainter(model_path)
+    def load_inpaint() -> None:
+        """Скачивает и создаёт LaMa вне очереди кадров и команд пользователя."""
+        try:
+            def progress(downloaded: int, total: int | None) -> None:
+                emit("model_downloading", model="inpaint", downloaded=downloaded, total=total or 0)
+
+            path = ensure_inpaint_model(progress)
+            emit("model_loading", model="inpaint")
+            loaded = LamaInpainter(path)
+            with models_lock:
+                models["inpaint"] = loaded
+            emit("model_ready", model="inpaint")
         except Exception as exc:
-            emit("model_error", error=str(exc))
-            return 1
+            emit("model_error", model="inpaint", error=str(exc))
+
+    def load_horizon() -> None:
+        """Скачивает Deep-OAD параллельно с LaMa, не задерживая первый кадр."""
+        try:
+            def progress(downloaded: int, total: int | None) -> None:
+                emit("model_downloading", model="horizon", downloaded=downloaded, total=total or 0)
+
+            path = ensure_horizon_model(progress)
+            emit("model_loading", model="horizon")
+            loaded = DeepOad(path)
+            with models_lock:
+                models["horizon"] = loaded
+            emit("model_ready", model="horizon")
+        except Exception as exc:
+            emit("model_error", model="horizon", error=str(exc))
+
+    try:
         emit("ready")
+        loaders.submit(load_inpaint)
+        loaders.submit(load_horizon)
         while True:
             task = commands.get()
             command = task["command"]
@@ -249,18 +283,36 @@ def main() -> int:
                         raise RuntimeError("stale_revision")
                     frame, scale_x, scale_y = store.full_for_apply(path, tuple(task["draft_size"]))
                     mask = make_mask(frame.image.size, scale_strokes(task["strokes"], scale_x, scale_y))
+                    with models_lock:
+                        model = models["inpaint"]
+                    if model is None:
+                        raise RuntimeError("inpaint_model_not_ready")
                     result = model.apply(frame, mask)
                     store.replace_pixels(frame, result)
+                elif command == "straighten":
+                    frame, _, _ = store.full_for_apply(path, tuple(task["draft_size"]))
+                    with models_lock:
+                        horizon_model = models["horizon"]
+                    if horizon_model is None:
+                        raise RuntimeError("horizon_model_not_ready")
+                    angle = horizon_model.predict_angle(frame)
+                    # Небольшая граница сохраняет замысел съёмки и не превращает
+                    # инструмент горизонта в автоматический поворот портретов.
+                    if abs(angle) > 15:
+                        raise RuntimeError(f"horizon_angle_out_of_range:{angle:.1f}")
+                    store.replace_pixels(frame, straighten_image(frame, angle))
                 display = to_srgb(frame.image, frame.icc)
-                emit("result" if command == "apply" else "frame", payload=display.tobytes(),
+                emit("result" if command in {"apply", "straighten"} else "frame", payload=display.tobytes(),
                      path=path, request=request, width=display.width, height=display.height,
-                     revision=frame.revision, saved_revision=frame.saved_revision)
+                     revision=frame.revision, saved_revision=frame.saved_revision,
+                     angle=angle if command == "straighten" else None)
                 store.preload(task.get("neighbors", []))
             except Exception as exc:
                 code = "external_change" if isinstance(exc, ImageConflictError) else str(exc)
                 emit("save_error" if command == "save" else "error", path=path,
                      request=request, revision=task.get("revision", 0), error=code)
     finally:
+        loaders.shutdown(wait=False, cancel_futures=True)
         store.shutdown()
     return 0
 

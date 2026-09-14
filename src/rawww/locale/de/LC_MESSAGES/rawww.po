@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-13 23:25+0300\n"
+"POT-Creation-Date: 2026-09-14 10:15+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -819,8 +819,8 @@ msgstr "JPG verkleinern"
 msgid "Пакетная ретушь"
 msgstr "Stapelretusche"
 
-msgid "Удаление объектов"
-msgstr "Objekte entfernen"
+msgid "Пакетный редактор"
+msgstr "Stapelbearbeitung"
 
 msgid "Пока не реализовано"
 msgstr "Noch nicht implementiert"
@@ -1939,6 +1939,9 @@ msgstr "Automatisch speichern"
 msgid "Сохранить"
 msgstr "Speichern"
 
+msgid "Автогоризонт"
+msgstr "Auto-Horizont"
+
 msgid "Удалить объекты (Enter)"
 msgstr "Objekte entfernen (Enter)"
 
@@ -1951,21 +1954,27 @@ msgstr "Speichern wird abgeschlossen…"
 msgid "Закрытие…"
 msgstr "Wird geschlossen…"
 
-#, python-brace-format
-msgid "Скачивание модели: {done} из {total}"
-msgstr "Modell wird heruntergeladen: {done} von {total}"
-
-msgid "Скачивание модели…"
-msgstr "Modell wird heruntergeladen…"
-
 msgid "Загрузка модели…"
 msgstr "Modell wird geladen…"
+
+msgid "Загрузка изображения…"
+msgstr "Bild wird geladen…"
+
+msgid "Выравнивание горизонта…"
+msgstr "Horizont wird ausgerichtet…"
 
 msgid "Удаление объектов…"
 msgstr "Objekte werden entfernt…"
 
-msgid "Загрузка изображения…"
-msgstr "Bild wird geladen…"
+#, python-brace-format
+msgid "Загрузка моделей в фоне: {done} из {total}"
+msgstr "Modelle werden im Hintergrund geladen: {done} von {total}"
+
+msgid "Модели загружаются в фоне…"
+msgstr "Modelle werden im Hintergrund geladen…"
+
+msgid "Не удалось загрузить часть моделей"
+msgstr "Einige Modelle konnten nicht geladen werden"
 
 msgid "Сохранение в фоне…"
 msgstr "Speichern im Hintergrund…"
@@ -1989,9 +1998,6 @@ msgstr "Bild konnte nicht gespeichert werden"
 msgid "Не удалось обработать изображение"
 msgstr "Bild konnte nicht verarbeitet werden"
 
-msgid "Не удалось загрузить модель"
-msgstr "Modell konnte nicht geladen werden"
-
 msgid ""
 "Поддерживаются одиночные 8-битные JPEG, PNG, WebP и TIFF. RAW, "
 "многокадровые и другие цветовые режимы недоступны."
@@ -2005,6 +2011,17 @@ msgid ""
 msgstr ""
 "Eine andere Anwendung hat die Datei geändert. Das Speichern wurde "
 "abgebrochen, um die neue Version nicht zu überschreiben."
+
+#, python-brace-format
+msgid ""
+"Модель предлагает поворот на {angle}°. Автогоризонт применяет только "
+"небольшие коррекции до 15°."
+msgstr ""
+"Das Modell schlägt eine Drehung um {angle}° vor. Auto-Horizont wendet nur"
+" kleine Korrekturen bis 15° an."
+
+msgid "Не удалось загрузить модель"
+msgstr "Modell konnte nicht geladen werden"
 
 msgid "Процесс обработки завершился. Закройте и откройте утилиту снова."
 msgstr ""
@@ -2574,3 +2591,15 @@ msgstr "Schnelle Sichtung und Auswahl von RAW- und JPG-Fotos"
 #~ "entfernen. Leertaste + Maus — "
 #~ "verschieben. Mausrad — zoomen. Strg+Z —"
 #~ " Pinselstrich rückgängig."
+
+#~ msgid "Удаление объектов"
+#~ msgstr "Objekte entfernen"
+
+#~ msgid "Скачивание модели горизонта: {done} из {total}"
+#~ msgstr "Horizontmodell wird heruntergeladen: {done} von {total}"
+
+#~ msgid "Скачивание модели горизонта…"
+#~ msgstr "Horizontmodell wird heruntergeladen…"
+
+#~ msgid "Скачивание модели…"
+#~ msgstr "Modell wird heruntergeladen…"

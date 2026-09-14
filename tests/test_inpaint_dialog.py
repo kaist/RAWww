@@ -112,6 +112,7 @@ class InpaintDialogTests(unittest.TestCase):
         self.settings = _Settings()
         self.dialog = InpaintDialog([Path("a.png"),Path("b.png")], Path("a.png"), self.settings)
         self.dialog._ready = True
+        self.dialog._models = {"inpaint": "ready", "horizon": "ready"}
         self.dialog.revisions["a.png"] = 1
         self.dialog.saved["a.png"] = 0
         self.send = patch.object(self.dialog, "_send")
@@ -203,13 +204,46 @@ class InpaintDialogTests(unittest.TestCase):
         QTest.keyClick(self.dialog.view, Qt.Key.Key_S, Qt.KeyboardModifier.ControlModifier)
         self.sent.assert_any_call("save", path="a.png", revision=1)
 
+    def test_auto_horizon_sends_current_draft_to_worker(self):
+        image = QImage(320, 200, QImage.Format.Format_RGB888)
+        image.fill(QColor("yellow"))
+        self.dialog.view.show_image(image, reset=True)
+        self.dialog._displayed_path = "a.png"
+        self.dialog._update()
+        self.dialog.straighten()
+        self.sent.assert_any_call("straighten", path="a.png", request=0,
+                                  draft_size=[320, 200], neighbors=["b.png"])
+        self.assertTrue(self.dialog._processing)
+
+    def test_auto_horizon_rejects_large_rotation(self):
+        with patch.object(QMessageBox, "warning") as warning:
+            self.dialog._event({"event": "error", "path": "a.png", "request": 0,
+                                "error": "horizon_angle_out_of_range:22.5"})
+        self.assertFalse(self.dialog._processing)
+        self.assertIn("22.5", warning.call_args.args[2])
+
+    def test_photo_opens_while_tools_wait_for_models(self):
+        self.dialog._models = {"inpaint": "loading", "horizon": "downloading"}
+        image = QImage(320, 200, QImage.Format.Format_RGB888)
+        image.fill(QColor("yellow"))
+        self.dialog._displayed_path = "a.png"
+        self.dialog.view.show_image(image, reset=True)
+        self.dialog._update()
+        self.assertFalse(self.dialog.view.editable)
+        self.assertFalse(self.dialog.apply_button.isEnabled())
+        self.assertFalse(self.dialog.horizon_button.isEnabled())
+        self.dialog._event({"event": "model_ready", "model": "horizon"})
+        self.assertTrue(self.dialog.horizon_button.isEnabled())
+        self.assertFalse(self.dialog.view.editable)
+        self.dialog._event({"event": "model_ready", "model": "inpaint"})
+        self.assertTrue(self.dialog.view.editable)
+
     def test_model_download_has_byte_progress(self):
-        self.dialog._ready = False
-        self.dialog._event({"event": "downloading", "downloaded": 50, "total": 100})
+        self.dialog._event({"event": "model_downloading", "model": "inpaint", "downloaded": 50, "total": 100})
         self.assertFalse(self.dialog.download_progress.isHidden())
         self.assertEqual(self.dialog.download_progress.maximum(), 100)
         self.assertEqual(self.dialog.download_progress.value(), 50)
-        self.assertIn("50", self.dialog.status.text())
+        self.assertIn("MiB", self.dialog.status.text())
 
 
 if __name__ == "__main__":

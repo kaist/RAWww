@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from io import BytesIO
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -21,8 +22,10 @@ from .runtime_paths import PORTABLE, application_cache_path, data_path
 
 
 INPAINT_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"})
-MODEL_URL = "https://shotsync.ru/static/ctrlka/models/lama_fp32.onnx"
+MODEL_URL = "https://shotsync.ru/media/ctrlka/models/lama_fp32.onnx"
 MODEL_SHA256 = "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6"
+HORIZON_MODEL_URL = "https://shotsync.ru/media/ctrlka/models/deep-oad.onnx"
+HORIZON_MODEL_SHA256 = "fed21a8aeacc49e362fb66bca1d67d333a4965087d1fc706c961221e334947b9"
 
 
 def inpaint_model_path() -> Path:
@@ -34,6 +37,13 @@ def inpaint_model_path() -> Path:
     if PORTABLE:
         return data_path("models") / "inpaint" / "lama_fp32.onnx"
     return application_cache_path() / "models" / "inpaint" / "lama_fp32.onnx"
+
+
+def horizon_model_path() -> Path:
+    """Возвращает путь Deep-OAD, не смешивая его с моделью дорисовки."""
+    if PORTABLE:
+        return data_path("models") / "orientation" / "deep_oad.onnx"
+    return application_cache_path() / "models" / "orientation" / "deep_oad.onnx"
 
 
 def _file_digest(path: Path) -> str:
@@ -71,6 +81,38 @@ def ensure_inpaint_model(progress: Callable[[int, int | None], None] | None = No
             os.fsync(output.fileno())
         if digest.hexdigest() != MODEL_SHA256:
             raise RuntimeError("model_checksum_mismatch")
+        os.replace(temporary, model)
+        return model
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def ensure_horizon_model(progress: Callable[[int, int | None], None] | None = None) -> Path:
+    """Скачивает Deep-OAD атомарно; непроверенный файл не идёт в инференс."""
+    model = horizon_model_path()
+    if model.is_file() and _file_digest(model) == HORIZON_MODEL_SHA256:
+        return model
+    model.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix=".deep-oad-", suffix=".download", dir=model.parent)
+    temporary = Path(name)
+    try:
+        digest = hashlib.sha256()
+        with os.fdopen(descriptor, "wb") as output, urlopen(HORIZON_MODEL_URL, timeout=60) as source:
+            length = source.headers.get("Content-Length")
+            total = int(length) if length and length.isdigit() else None
+            if progress:
+                progress(0, total)
+            downloaded = 0
+            while chunk := source.read(1024 * 1024):
+                output.write(chunk)
+                digest.update(chunk)
+                downloaded += len(chunk)
+                if progress:
+                    progress(downloaded, total)
+            output.flush()
+            os.fsync(output.fileno())
+        if digest.hexdigest() != HORIZON_MODEL_SHA256:
+            raise RuntimeError("horizon_model_checksum_mismatch")
         os.replace(temporary, model)
         return model
     finally:
@@ -293,3 +335,64 @@ class LamaInpainter:
         result = frame.image.copy()
         result.paste(Image.composite(restored, native, alpha), box[:2])
         return result
+
+
+class DeepOad:
+    """Владеет ONNX-сессией оценки наклона и не знает о виджетах Qt.
+
+    Deep-OAD обучен на синтетически повёрнутых снимках. Он не отличает
+    авторский наклон от ошибки камеры, поэтому вызывающий код ограничивает
+    автоматическую коррекцию малым углом.
+    """
+
+    def __init__(self, model: Path | None = None) -> None:
+        import onnxruntime as ort
+
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = max(1, min(8, (os.cpu_count() or 2) - 1))
+        self.session = ort.InferenceSession(
+            str(model or horizon_model_path()), sess_options=options, providers=["CPUExecutionProvider"]
+        )
+        self.input_name = self.session.get_inputs()[0].name
+
+    def predict_angle(self, frame: EditableImage) -> float:
+        """Возвращает угол наклона снимка в диапазоне от -180 до 180 градусов."""
+        source = to_srgb(frame.image, frame.icc).resize((224, 224), Image.Resampling.BICUBIC)
+        pixels = np.asarray(source, dtype=np.float32) / 255.0
+        # ViTImageProcessor для google/vit-base-patch16-224 нормализует RGB
+        # относительно 0.5; размерности NCHW зафиксированы опубликованным ONNX.
+        pixels = ((pixels - 0.5) / 0.5).transpose(2, 0, 1)[None]
+        predicted = float(np.asarray(self.session.run(None, {self.input_name: pixels})[0]).reshape(-1)[0])
+        return (predicted + 180.0) % 360.0 - 180.0
+
+
+def _largest_rotated_rectangle(width: int, height: int, degrees: float) -> tuple[int, int]:
+    """Находит центральный прямоугольник без пустых углов после малого поворота."""
+    angle = abs(math.radians(degrees)) % math.pi
+    if angle > math.pi / 2:
+        angle = math.pi - angle
+    if angle < 1e-7:
+        return width, height
+    sin_a, cos_a = abs(math.sin(angle)), abs(math.cos(angle))
+    if width <= 2 * sin_a * cos_a * height or height <= 2 * sin_a * cos_a * width:
+        x = 0.5 * min(width, height)
+        if width < height:
+            result_w, result_h = x / sin_a, x / cos_a
+        else:
+            result_w, result_h = x / cos_a, x / sin_a
+    else:
+        cos_2a = cos_a * cos_a - sin_a * sin_a
+        result_w = (width * cos_a - height * sin_a) / cos_2a
+        result_h = (height * cos_a - width * sin_a) / cos_2a
+    return max(1, round(result_w)), max(1, round(result_h))
+
+
+def straighten_image(frame: EditableImage, angle: float) -> Image.Image:
+    """Компенсирует оценённый наклон и кадрирует пустые углы без чёрной рамки."""
+    correction = -angle
+    source = frame.image
+    rotated = source.rotate(correction, resample=Image.Resampling.BICUBIC, expand=True)
+    target_w, target_h = _largest_rotated_rectangle(source.width, source.height, correction)
+    left = max(0, (rotated.width - target_w) // 2)
+    top = max(0, (rotated.height - target_h) // 2)
+    return rotated.crop((left, top, left + target_w, top + target_h))

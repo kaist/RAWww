@@ -15,8 +15,9 @@ import numpy as np
 from PIL import Image, ImageCms
 
 from rawww.inpaint_pipeline import (
-    ImageConflictError, LamaInpainter, ensure_inpaint_model, fingerprint, inpaint_model_path,
-    load_image, make_mask, save_image, scale_strokes,
+    DeepOad, ImageConflictError, LamaInpainter, ensure_horizon_model, ensure_inpaint_model,
+    fingerprint, horizon_model_path, inpaint_model_path, load_image, make_mask, save_image,
+    scale_strokes, straighten_image,
 )
 from rawww.inpaint_worker import ImageStore
 
@@ -30,6 +31,17 @@ class InpaintFileTests(unittest.TestCase):
 
     def tearDown(self):
         self.directory.cleanup()
+
+    def test_straighten_crops_empty_corners_and_preserves_alpha(self):
+        frame = load_image(self.root / "transparent.png") if (self.root / "transparent.png").exists() else None
+        if frame is None:
+            Image.new("RGBA", (300, 200), (20, 40, 60, 120)).save(self.root / "transparent.png")
+            frame = load_image(self.root / "transparent.png")
+        result = straighten_image(frame, 8)
+        self.assertLess(result.width, frame.image.width)
+        self.assertLess(result.height, frame.image.height)
+        self.assertEqual(result.mode, "RGBA")
+        self.assertEqual(result.getpixel((result.width//2, result.height//2))[3], 120)
 
     def test_formats_keep_exif_icc_and_orientation(self):
         profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
@@ -172,6 +184,23 @@ class InpaintModelTests(unittest.TestCase):
              patch("rawww.inpaint_pipeline.data_path", return_value=portable_root):
             self.assertEqual(inpaint_model_path(), portable_root / "inpaint" / "lama_fp32.onnx")
 
+    def test_horizon_download_reports_progress_and_publishes_verified_model(self):
+        content = b"deep-oad" * 400_000
+        import hashlib
+        progress = []
+        with patch("rawww.inpaint_pipeline.horizon_model_path", return_value=self.model), \
+             patch("rawww.inpaint_pipeline.HORIZON_MODEL_SHA256", hashlib.sha256(content).hexdigest()), \
+             patch("rawww.inpaint_pipeline.urlopen", return_value=self._Response(content)):
+            self.assertEqual(ensure_horizon_model(lambda done, total: progress.append((done, total))), self.model)
+        self.assertEqual(progress[-1], (len(content), len(content)))
+        self.assertEqual(self.model.read_bytes(), content)
+
+    def test_horizon_model_lives_in_separate_directory(self):
+        portable_root = Path(self.directory.name) / "data" / "models"
+        with patch("rawww.inpaint_pipeline.PORTABLE", True), \
+             patch("rawww.inpaint_pipeline.data_path", return_value=portable_root):
+            self.assertEqual(horizon_model_path(), portable_root / "orientation" / "deep_oad.onnx")
+
 
 class InpaintCacheTests(unittest.TestCase):
     """Сохранение и предзагрузка не могут подменить редактируемую ревизию."""
@@ -283,6 +312,14 @@ class InpaintCacheTests(unittest.TestCase):
         self.assertFalse(full.draft)
         self.assertGreater(sx, 1)
         self.assertGreater(sy, 1)
+
+    def test_apply_uses_small_photo_without_missing_full_loader_request(self):
+        Image.new("RGB", (1920, 1280), "red").save(self.path)
+        frame = self.store.get(str(self.path))
+        self.assertFalse(frame.draft)
+        full, sx, sy = self.store.full_for_apply(str(self.path), frame.image.size)
+        self.assertIs(full, frame)
+        self.assertEqual((sx, sy), (1, 1))
 
 
 if __name__ == "__main__":

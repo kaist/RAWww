@@ -1,7 +1,7 @@
 ## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
 ## SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Окно удаления объектов: кисть и навигация, без моделей и файловых операций."""
+"""Окно пакетного редактора: кисть и навигация, без моделей и файловых операций."""
 
 from __future__ import annotations
 
@@ -276,7 +276,7 @@ class InpaintView(QGraphicsView):
 
 
 class InpaintDialog(QDialog):
-    """Координирует окно и процесс; ни ONNX, ни оригиналы на диск UI не пишет.
+    """Координирует пакетный редактор и процесс без ONNX и записи в UI.
 
     Ревизии ведутся по каждому пути, включая уже покинутые кадры с автозаписью.
     Закрытие ждёт записи асинхронно и лишь затем завершает процесс с моделью.
@@ -295,8 +295,11 @@ class InpaintDialog(QDialog):
         self._model_phase = "loading"
         self._downloaded = 0
         self._download_total: int | None = None
+        self._models = {"inpaint": "pending", "horizon": "pending"}
+        self._model_errors: dict[str, str] = {}
         self._loading = False
         self._processing = False
+        self._processing_tool: str | None = None
         self._displayed_path = None
         self._closing = False
         self._closed = False
@@ -305,7 +308,7 @@ class InpaintDialog(QDialog):
         self._header = None
         self._stderr = b""
         self.setObjectName("inpaintDialog")
-        self.setWindowTitle(_("Удаление объектов"))
+        self.setWindowTitle(_("Пакетный редактор"))
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
         self.resize(1400, 900)
         root = QVBoxLayout(self)
@@ -351,9 +354,10 @@ class InpaintDialog(QDialog):
         self.autosave.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         bar.addWidget(self.autosave)
         self.save_button = QPushButton(_("Сохранить"))
+        self.horizon_button = QPushButton(_("Автогоризонт"))
         self.apply_button = QPushButton(_("Удалить объекты (Enter)"))
         self.clear_button = QPushButton(_("Очистить маску"))
-        for button in (self.clear_button, self.apply_button, self.save_button):
+        for button in (self.clear_button, self.apply_button, self.horizon_button, self.save_button):
             button.setObjectName("batchResizePrimaryButton" if button is self.apply_button else "batchResizeSecondaryButton")
             button.setFixedHeight(40)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -362,6 +366,7 @@ class InpaintDialog(QDialog):
             button.setIconSize(QSize(18, 18))
             bar.addWidget(button)
         self.apply_button.setIcon(_fomantic_icon("magic", 18, "#ffffff"))
+        self.horizon_button.setIcon(_fomantic_icon("balance-scale", 18))
         self.clear_button.setIcon(_fomantic_icon("close", 16))
         self.save_button.setIcon(_fomantic_icon("save", 18))
         self.view = InpaintView(self)
@@ -369,6 +374,7 @@ class InpaintDialog(QDialog):
         self.view.maskChanged.connect(self._mask_changed)
         self.clear_button.clicked.connect(self.view.clear_mask)
         self.apply_button.clicked.connect(self.apply)
+        self.horizon_button.clicked.connect(self.straighten)
         self.save_button.clicked.connect(self.save)
         self.autosave.toggled.connect(self._autosave_changed)
         self.process = QProcess(self)
@@ -437,16 +443,20 @@ class InpaintDialog(QDialog):
         active = self._ready and not self._closing and not self._closed
         idle = (active and not self._loading and not self._processing and not self._after_save
                 and self._displayed_path == self.path and self.path in self.revisions)
-        self.view.editable = idle
+        inpaint_ready = self._models["inpaint"] == "ready"
+        horizon_ready = self._models["horizon"] == "ready"
+        self.view.editable = idle and inpaint_ready
         self.previous.setEnabled(active and not self._processing and not self._after_save and self.index > 0)
         self.next.setEnabled(active and not self._processing and not self._after_save and self.index+1 < len(self.paths))
-        self.apply_button.setEnabled(idle and bool(self.view.strokes))
-        self.clear_button.setEnabled(idle and bool(self.view.strokes))
+        self.apply_button.setEnabled(idle and inpaint_ready and bool(self.view.strokes))
+        self.horizon_button.setEnabled(idle and horizon_ready)
+        self.clear_button.setEnabled(idle and inpaint_ready and bool(self.view.strokes))
         saving = any(self.pending.values())
         self.save_button.setVisible(not self.autosave.isChecked() or self._dirty(self.path))
         self.save_button.setEnabled(idle and self._dirty(self.path) and self.revisions[self.path] not in self.pending.get(self.path, set()))
         self.autosave.setEnabled(not self._closing)
-        downloading = not self._ready and self._model_phase == "downloading"
+        downloading = any(state == "downloading" for state in self._models.values())
+        models_pending = any(state in {"pending", "downloading", "loading"} for state in self._models.values())
         self.download_progress.setVisible(downloading)
         if downloading:
             if self._download_total:
@@ -454,22 +464,24 @@ class InpaintDialog(QDialog):
                 self.download_progress.setValue(self._downloaded)
             else:
                 self.download_progress.setRange(0, 0)
-        self.spinner.setVisible(not self._ready or self._loading or self._processing or saving or self._closing)
+        self.spinner.setVisible(not self._ready or self._loading or self._processing or saving or self._closing or models_pending)
         self.view.viewport().setCursor(Qt.CursorShape.BlankCursor if idle else Qt.CursorShape.ArrowCursor)
         if self._closing:
             text = _("Завершение сохранения…") if saving else _("Закрытие…")
+        elif not self._ready:
+            text = _("Загрузка модели…")
+        elif self._loading:
+            text = _("Загрузка изображения…")
+        elif self._processing:
+            text = _("Выравнивание горизонта…") if self._processing_tool == "horizon" else _("Удаление объектов…")
         elif downloading and self._download_total:
             done = f"{self._downloaded / 1024 / 1024:.0f} MiB"
             total = f"{self._download_total / 1024 / 1024:.0f} MiB"
-            text = _("Скачивание модели: {done} из {total}").format(done=done, total=total)
-        elif downloading:
-            text = _("Скачивание модели…")
-        elif not self._ready:
-            text = _("Загрузка модели…")
-        elif self._processing:
-            text = _("Удаление объектов…")
-        elif self._loading:
-            text = _("Загрузка изображения…")
+            text = _("Загрузка моделей в фоне: {done} из {total}").format(done=done, total=total)
+        elif models_pending:
+            text = _("Модели загружаются в фоне…")
+        elif self._model_errors:
+            text = _("Не удалось загрузить часть моделей")
         elif saving:
             text = _("Сохранение в фоне…")
         elif self._dirty(self.path):
@@ -486,8 +498,20 @@ class InpaintDialog(QDialog):
         if not self.view.editable or not self.view.strokes:
             return
         self._processing = True
+        self._processing_tool = "inpaint"
         self._send("apply", path=self.path, request=self.request, revision=self.revisions[self.path],
                    strokes=self.view.strokes, draft_size=[self.view.image.width(), self.view.image.height()],
+                   neighbors=self._neighbors())
+        self._update()
+
+    def straighten(self) -> None:
+        """Просит воркер предложить небольшой поворот, не записывая файл сразу."""
+        if not self.view.editable:
+            return
+        self._processing = True
+        self._processing_tool = "horizon"
+        self._send("straighten", path=self.path, request=self.request,
+                   draft_size=[self.view.image.width(), self.view.image.height()],
                    neighbors=self._neighbors())
         self._update()
 
@@ -583,7 +607,16 @@ class InpaintDialog(QDialog):
     def _event(self, event: dict, payload: bytes = b"") -> None:
         kind = event["event"]
         path = event.get("path", "")
-        if kind == "downloading":
+        if kind == "model_downloading":
+            model = event["model"]
+            self._models[model] = "downloading"
+            self._downloaded = event.get("downloaded", 0)
+            self._download_total = event.get("total") or None
+        elif kind == "model_loading":
+            self._models[event["model"]] = "loading"
+        elif kind == "model_ready":
+            self._models[event["model"]] = "ready"
+        elif kind == "downloading":
             self._model_phase = "downloading"
             self._downloaded = event.get("downloaded", 0)
             self._download_total = event.get("total") or None
@@ -599,6 +632,7 @@ class InpaintDialog(QDialog):
             self.saved[path] = max(self.saved.get(path, 0), event["saved_revision"])
             image = QImage(payload, event["width"], event["height"], event["width"]*3, QImage.Format.Format_RGB888).copy()
             self._loading = self._processing = False
+            self._processing_tool = None
             self._displayed_path = path
             self.view.show_image(image, reset=kind == "frame")
             if kind == "result" and self.autosave.isChecked():
@@ -617,11 +651,15 @@ class InpaintDialog(QDialog):
                 self._closing = False
                 self._after_save = None
                 self._show_error(event, _("Не удалось сохранить изображение"))
-        elif kind in {"error", "model_error"}:
+        elif kind == "model_error":
+            self._models[event.get("model", "inpaint")] = "error"
+            self._model_errors[event.get("model", "inpaint")] = event.get("error", "")
+        elif kind == "error":
             if kind == "error" and (event["request"] != self.request or path != self.path):
                 return
             self._loading = self._processing = False
-            self._show_error(event, _("Не удалось обработать изображение") if kind == "error" else _("Не удалось загрузить модель"))
+            self._processing_tool = None
+            self._show_error(event, _("Не удалось обработать изображение"))
         self._update()
 
     def _show_error(self, event: dict, title: str) -> None:
@@ -630,6 +668,9 @@ class InpaintDialog(QDialog):
             message = _("Поддерживаются одиночные 8-битные JPEG, PNG, WebP и TIFF. RAW, многокадровые и другие цветовые режимы недоступны.")
         elif code == "external_change":
             message = _("Файл изменён другой программой. Сохранение отменено, чтобы не перезаписать новую версию.")
+        elif code.startswith("horizon_angle_out_of_range:"):
+            angle = code.partition(":")[2]
+            message = _("Модель предлагает поворот на {angle}°. Автогоризонт применяет только небольшие коррекции до 15°.").format(angle=angle)
         else:
             message = str(code)
         QMessageBox.warning(self, title, f"{Path(event.get('path', '')).name}\n{message}")
