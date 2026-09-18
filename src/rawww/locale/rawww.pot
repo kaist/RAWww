@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-14 16:06+0300\n"
+"POT-Creation-Date: 2026-09-18 08:27+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1858,6 +1858,12 @@ msgid "Очистить маску"
 msgstr ""
 
 msgid "Автосохранение"
+msgstr ""
+
+msgid "Стандартное качество — LaMa 512×512"
+msgstr ""
+
+msgid "Высокое качество — LaMa 1024×1024"
 msgstr ""
 
 msgid "Исходный"

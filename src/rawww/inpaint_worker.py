@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+import gc
 import json
 import os
 from pathlib import Path
@@ -344,6 +345,8 @@ def main() -> int:
     latest = {"open": 0}
     models: dict[str, LamaInpainter | DeepOad | None] = {"inpaint": None, "horizon": None}
     models_lock = threading.Lock()
+    inpaint_quality = "sd"
+    loaded_inpaint_quality: str | None = None
     model_load_timer: threading.Timer | None = None
     models_loading_started = False
 
@@ -424,21 +427,41 @@ def main() -> int:
             code = "external_change" if isinstance(exc, ImageConflictError) else str(exc)
             emit("error", path=path, request=request, revision=task.get("revision", 0), error=code)
 
-    def load_inpaint() -> None:
+    def load_inpaint(quality: str, *, lower_priority: bool = True) -> None:
         """Скачивает и создаёт LaMa вне очереди кадров и команд пользователя."""
-        _lower_model_loader_thread_priority()
+        nonlocal loaded_inpaint_quality
+        if lower_priority:
+            _lower_model_loader_thread_priority()
         try:
             def progress(downloaded: int, total: int | None) -> None:
-                emit("model_downloading", model="inpaint", downloaded=downloaded, total=total or 0)
+                emit("model_downloading", model="inpaint", quality=quality,
+                     downloaded=downloaded, total=total or 0)
 
-            path = ensure_inpaint_model(progress)
-            emit("model_loading", model="inpaint")
+            path = ensure_inpaint_model(progress, quality)
+            emit("model_loading", model="inpaint", quality=quality)
             loaded = LamaInpainter(path)
             with models_lock:
                 models["inpaint"] = loaded
-            emit("model_ready", model="inpaint")
+                loaded_inpaint_quality = quality
+            emit("model_ready", model="inpaint", quality=quality)
         except Exception as exc:
-            emit("model_error", model="inpaint", error=str(exc))
+            emit("model_error", model="inpaint", quality=quality, error=str(exc))
+
+    def switch_inpaint(quality: str) -> None:
+        """Освобождает прежнюю ONNX-сессию до загрузки выбранного качества."""
+        nonlocal loaded_inpaint_quality
+        emit("model_unloading", model="inpaint", quality=quality)
+        with models_lock:
+            previous = models["inpaint"]
+            models["inpaint"] = None
+            loaded_inpaint_quality = None
+        del previous
+        # ONNX Runtime освобождает нативные буферы вместе с последней ссылкой;
+        # явный цикл не даёт двум тяжёлым сессиям встретиться в памяти.
+        gc.collect()
+        # Этот поток затем снова выполняет inpaint, поэтому его системный
+        # приоритет не понижаем навсегда ради одноразовой загрузки.
+        load_inpaint(quality, lower_priority=False)
 
     def load_horizon() -> None:
         """Скачивает Deep-OAD после LaMa в том же загрузчике, не конкурируя с ней за диск."""
@@ -462,7 +485,7 @@ def main() -> int:
         if models_loading_started:
             return
         models_loading_started = True
-        loaders.submit(load_inpaint)
+        loaders.submit(load_inpaint, inpaint_quality)
         loaders.submit(load_horizon)
 
     def defer_model_loading() -> None:
@@ -486,6 +509,18 @@ def main() -> int:
             path = task.get("path", "")
             request = task.get("request", 0)
             try:
+                if command == "set_inpaint_quality":
+                    quality = task.get("quality")
+                    if quality not in {"sd", "hd"}:
+                        raise ValueError("unknown_inpaint_quality")
+                    inpaint_quality = quality
+                    with models_lock:
+                        already_loaded = loaded_inpaint_quality == quality and models["inpaint"] is not None
+                    if already_loaded:
+                        emit("model_ready", model="inpaint", quality=quality)
+                    elif models_loading_started:
+                        inpaint_jobs.submit(switch_inpaint, quality)
+                    continue
                 if command == "save":
                     store.save(path, task["revision"], emit)
                     continue

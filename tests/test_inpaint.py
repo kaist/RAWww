@@ -4,6 +4,7 @@
 """Проверяет сохранение оригиналов и гонки кэша редактора удаления объектов."""
 
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 from io import BytesIO
 import tempfile
 from pathlib import Path
@@ -136,6 +137,7 @@ class InpaintFileTests(unittest.TestCase):
                 return [np.full((1,3,512,512), 200, dtype=np.float32)]
         model = LamaInpainter.__new__(LamaInpainter)
         model.session = Session()
+        model.side = 512
         result = model.apply(frame, mask)
         self.assertEqual(result.getpixel((350,200)), (200,200,200,130))
         self.assertEqual(result.getpixel((50,50)), (45,60,80,130))
@@ -143,6 +145,28 @@ class InpaintFileTests(unittest.TestCase):
         self.assertEqual(model.session.inputs["image"].shape, (1,3,512,512))
         self.assertEqual(model.session.inputs["mask"].shape, (1,1,512,512))
         self.assertLessEqual(model.session.inputs["image"].max(), 1)
+
+    def test_hd_uses_1024_native_pixels_of_context(self):
+        image = Image.new("RGB", (1400, 1200), "black")
+        image.paste("red", (300, 0, 320, 1200))
+        frame = EditableImage(
+            self.root / "context.png", image, (0, 0, 0, 0), "PNG", b"", None, None, None,
+        )
+        mask = make_mask(image.size, [{"diameter": 40, "points": [[700, 600]]}])
+
+        class Session:
+            def run(self, _, inputs):
+                self.inputs = inputs
+                return [np.zeros((1, 3, 1024, 1024), dtype=np.float32)]
+
+        model = LamaInpainter.__new__(LamaInpainter)
+        model.session = Session()
+        model.side = 1024
+        model.apply(frame, mask)
+
+        # Полоса находится за пределами прежнего 512-кропа, но входит в окно HD.
+        self.assertEqual(model.session.inputs["image"][0, 0].max(), 1)
+        self.assertEqual(model.session.inputs["image"].shape, (1, 3, 1024, 1024))
 
     def test_draft_is_smaller_but_keeps_orientation_and_scale(self):
         path = self.root / "large.jpg"
@@ -210,6 +234,27 @@ class InpaintModelTests(unittest.TestCase):
         with patch("rawww.inpaint_pipeline.PORTABLE", True), \
              patch("rawww.inpaint_pipeline.data_path", return_value=portable_root):
             self.assertEqual(inpaint_model_path(), portable_root / "inpaint" / "lama_fp32.onnx")
+            self.assertEqual(inpaint_model_path("hd"), portable_root / "inpaint" / "lama_fp32_1024.onnx")
+
+    def test_hd_model_is_downloaded_only_when_explicitly_requested(self):
+        content = b"lama-hd" * 300_000
+        hd_model = Path(self.directory.name) / "models" / "lama_fp32_1024.onnx"
+        with patch("rawww.inpaint_pipeline.inpaint_model_path", return_value=hd_model), \
+             patch("rawww.inpaint_pipeline.HD_MODEL_URL", "https://example.test/lama-hd.onnx"), \
+             patch("rawww.inpaint_pipeline.HD_MODEL_SHA256", hashlib.sha256(content).hexdigest()), \
+             patch("rawww.inpaint_pipeline.urlopen", return_value=self._Response(content)) as download:
+            self.assertEqual(ensure_inpaint_model(quality="hd"), hd_model)
+        download.assert_called_once()
+        self.assertEqual(hd_model.read_bytes(), content)
+
+    def test_missing_hd_url_does_not_touch_the_network(self):
+        hd_model = Path(self.directory.name) / "models" / "lama_fp32_1024.onnx"
+        with patch("rawww.inpaint_pipeline.inpaint_model_path", return_value=hd_model), \
+             patch("rawww.inpaint_pipeline.HD_MODEL_URL", ""), \
+             patch("rawww.inpaint_pipeline.urlopen") as download:
+            with self.assertRaisesRegex(RuntimeError, "hd_model_url_missing"):
+                ensure_inpaint_model(quality="hd")
+        download.assert_not_called()
 
     def test_horizon_download_reports_progress_and_publishes_verified_model(self):
         content = b"deep-oad" * 400_000

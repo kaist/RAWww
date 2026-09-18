@@ -13,7 +13,7 @@ import sys
 from PySide6.QtCore import QPointF, QProcess, QRectF, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView,
+    QButtonGroup, QDialog, QFrame, QGraphicsPixmapItem, QGraphicsScene, QGraphicsView,
     QComboBox, QHBoxLayout, QLabel, QMessageBox, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem,
     QToolButton, QVBoxLayout, QWidget,
 )
@@ -636,6 +636,8 @@ class InpaintDialog(QDialog):
         # LaMa загружается заранее, хотя отдельный режим удаления в этом окне скрыт.
         self._models = {"inpaint": "pending", "horizon": "pending"}
         self._model_errors: dict[str, str] = {}
+        quality = str(self.settings.value("inpaint/quality", "sd"))
+        self._inpaint_quality = quality if quality in {"sd", "hd"} else "sd"
         self._loading = False
         self._processing = False
         self._processing_tool: str | None = None
@@ -724,6 +726,21 @@ class InpaintDialog(QDialog):
         for button in (self.clear_button, self.apply_button, self.crop_toggle, self.horizon_button):
             editing.layout().addWidget(button)
         bar.addWidget(editing)
+        quality = self._toolbar_group(panel)
+        self.quality_group = QButtonGroup(self)
+        self.quality_group.setExclusive(True)
+        self.sd_quality_button = self._quality_button(
+            "SD", _("Стандартное качество — LaMa 512×512"), "sd", quality,
+        )
+        self.hd_quality_button = self._quality_button(
+            "HD", _("Высокое качество — LaMa 1024×1024"), "hd", quality,
+        )
+        for button in (self.sd_quality_button, self.hd_quality_button):
+            quality.layout().addWidget(button)
+            self.quality_group.addButton(button)
+        (self.hd_quality_button if self._inpaint_quality == "hd" else self.sd_quality_button).setChecked(True)
+        self.quality_group.buttonClicked.connect(self._quality_changed)
+        bar.addWidget(quality)
         self.save_group = self._toolbar_group(panel)
         self.save_button = self._toolbar_button("save", _("Сохранить"), primary=True)
         self.save_group.layout().addWidget(self.save_button)
@@ -840,6 +857,33 @@ class InpaintDialog(QDialog):
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         return button
+
+    def _quality_button(self, text: str, tooltip: str, quality: str, parent: QWidget) -> QToolButton:
+        """Создаёт текстовый сегмент выбора качества без отдельной настройки."""
+        button = QToolButton(parent)
+        button.setObjectName("inpaintToolbarButton")
+        button.setText(text)
+        button.setToolTip(tooltip)
+        button.setAccessibleName(tooltip)
+        button.setProperty("quality", quality)
+        button.setCheckable(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        return button
+
+    def _quality_changed(self, button: QToolButton) -> None:
+        """Запрашивает другую LaMa; воркер выгружает старую сессию до загрузки новой."""
+        quality = str(button.property("quality"))
+        if quality == self._inpaint_quality:
+            return
+        self._inpaint_quality = quality
+        self.settings.setValue("inpaint/quality", quality)
+        self._models["inpaint"] = "pending"
+        self._model_errors.pop("inpaint", None)
+        self._downloaded = 0
+        self._download_total = None
+        self._send("set_inpaint_quality", quality=quality)
+        self._update()
 
     def _icon_button(self, icon, text, callback) -> QToolButton:
         button = QToolButton(self)
@@ -1006,6 +1050,10 @@ class InpaintDialog(QDialog):
         self.crop_reset_button.setEnabled(idle and self.view.has_crop())
         self.crop_ratio.setEnabled(idle)
         self.clear_button.setEnabled(idle and inpaint_ready and bool(self.view.strokes))
+        quality_enabled = (active and self._ready and not self._processing and not self._background_inpaint
+                           and self._models["inpaint"] in {"ready", "error"})
+        self.sd_quality_button.setEnabled(quality_enabled)
+        self.hd_quality_button.setEnabled(quality_enabled)
         saving = any(self.pending.values())
         self.save_group.setVisible(not self.autosave.isChecked())
         self.save_button.setEnabled(idle and self._dirty(self.path) and self.revisions[self.path] not in self.pending.get(self.path, set()))
@@ -1232,12 +1280,20 @@ class InpaintDialog(QDialog):
         path = event.get("path", "")
         if kind == "model_downloading":
             model = event["model"]
+            if model == "inpaint" and event.get("quality", self._inpaint_quality) != self._inpaint_quality:
+                return
             self._models[model] = "downloading"
             self._downloaded = event.get("downloaded", 0)
             self._download_total = event.get("total") or None
         elif kind == "model_loading":
+            if event["model"] == "inpaint" and event.get("quality", self._inpaint_quality) != self._inpaint_quality:
+                return
+            self._models[event["model"]] = "loading"
+        elif kind == "model_unloading":
             self._models[event["model"]] = "loading"
         elif kind == "model_ready":
+            if event["model"] == "inpaint" and event.get("quality", self._inpaint_quality) != self._inpaint_quality:
+                return
             self._models[event["model"]] = "ready"
         elif kind == "downloading":
             self._model_phase = "downloading"
@@ -1247,6 +1303,7 @@ class InpaintDialog(QDialog):
             self._model_phase = "loading"
         elif kind == "ready":
             self._ready = True
+            self._send("set_inpaint_quality", quality=self._inpaint_quality)
             self._open()
         elif kind in {"frame", "result"}:
             background_result = (kind == "result" and self._background_inpaint.get(path) == event["request"])
@@ -1283,6 +1340,9 @@ class InpaintDialog(QDialog):
                 self._after_save = None
                 self._show_error(event, _("Не удалось сохранить изображение"))
         elif kind == "model_error":
+            if (event.get("model", "inpaint") == "inpaint"
+                    and event.get("quality", self._inpaint_quality) != self._inpaint_quality):
+                return
             self._models[event.get("model", "inpaint")] = "error"
             self._model_errors[event.get("model", "inpaint")] = event.get("error", "")
         elif kind == "error":

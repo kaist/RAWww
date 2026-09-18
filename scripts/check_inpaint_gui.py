@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from rawww.i18n import activate
 from rawww.inpaint_dialog import InpaintDialog
+from rawww.inpaint_pipeline import inpaint_model_path
 from rawww.theme import apply_theme
 
 
@@ -84,6 +85,12 @@ def main() -> None:
             wait_until(lambda: dialog.path == str(paths[0]) and dialog._displayed_path == str(paths[0]))
             print("Navigation during sequential model loading: OK", flush=True)
             wait_until(lambda: dialog.view.editable)
+            assert dialog.sd_quality_button.isChecked()
+            if inpaint_model_path("hd").is_file():
+                dialog.hd_quality_button.click()
+                wait_until(lambda: dialog._models["inpaint"] == "ready")
+                assert dialog.hd_quality_button.isChecked()
+                print("SD -> HD model switch: OK", flush=True)
             assert max(dialog.view.image.width(), dialog.view.image.height()) <= 1920
             pid = dialog.process.processId()
             print(f"Model ready: {time.monotonic()-started:.2f}s; worker PID {pid}", flush=True)
@@ -105,6 +112,11 @@ def main() -> None:
                 assert saved.getexif()[271] == "Inpaint GUI test"
                 assert saved.info["icc_profile"] == profile
                 assert saved.getpixel((1800,1200)) != (220,35,40)
+            if dialog.hd_quality_button.isChecked():
+                dialog.sd_quality_button.click()
+                wait_until(lambda: dialog._models["inpaint"] == "ready")
+                assert dialog.sd_quality_button.isChecked()
+                print("HD -> SD model switch: OK", flush=True)
             for delta in (1,1,1,-1,-1,-1):
                 dialog.navigate(delta)
             wait_until(lambda: dialog.view.editable)

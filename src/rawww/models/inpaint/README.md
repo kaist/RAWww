@@ -2,6 +2,12 @@
 
 `lama_fp32.onnx`: экспорт big-lama от Carve, вход 512×512, FP32, opset 17.
 
+`lama_fp32_1024.onnx`: тот же checkpoint и граф, повторно экспортированный с
+фиксированным входом 1024×1024. Его URL задаётся константой `HD_MODEL_URL` в
+`rawww.inpaint_pipeline`; пустое значение нарочно не запускает скачивание до
+публикации файла на сервере. SHA-256:
+`49a400fa4e2e8198cc2011753820b9a5dd8bfdee4d26b19e583e37ef2690d1c4`.
+
 - Файл при первом открытии утилиты скачивается с https://shotsync.ru/static/ctrlka/models/lama_fp32.onnx
 - Исходная модель: https://github.com/advimman/lama
 - Лицензия модели и экспорта: Apache-2.0.

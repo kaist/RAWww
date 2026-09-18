@@ -24,19 +24,23 @@ from .runtime_paths import PORTABLE, application_cache_path, data_path
 INPAINT_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"})
 MODEL_URL = "https://shotsync.ru/media/ctrlka/models/lama_fp32.onnx"
 MODEL_SHA256 = "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6"
+# URL заполняется после публикации подготовленного 1024-графа на сервере моделей.
+HD_MODEL_URL = "https://shotsync.ru/media/ctrlka/models/lama_fp32_1024.onnx"
+HD_MODEL_SHA256 = "49a400fa4e2e8198cc2011753820b9a5dd8bfdee4d26b19e583e37ef2690d1c4"
 HORIZON_MODEL_URL = "https://shotsync.ru/media/ctrlka/models/deep-oad.onnx"
 HORIZON_MODEL_SHA256 = "fed21a8aeacc49e362fb66bca1d67d333a4965087d1fc706c961221e334947b9"
 
 
-def inpaint_model_path() -> Path:
+def inpaint_model_path(quality: str = "sd") -> Path:
     """Выбирает место модели, в которое текущая сборка вправе записывать.
 
     Portable-версия хранит её среди поставляемых моделей. Обычная сборка не
     пишет в Program Files и использует пользовательский кэш приложения.
     """
+    name = "lama_fp32_1024.onnx" if quality == "hd" else "lama_fp32.onnx"
     if PORTABLE:
-        return data_path("models") / "inpaint" / "lama_fp32.onnx"
-    return application_cache_path() / "models" / "inpaint" / "lama_fp32.onnx"
+        return data_path("models") / "inpaint" / name
+    return application_cache_path() / "models" / "inpaint" / name
 
 
 def horizon_model_path() -> Path:
@@ -51,21 +55,29 @@ def _file_digest(path: Path) -> str:
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def ensure_inpaint_model(progress: Callable[[int, int | None], None] | None = None) -> Path:
+def ensure_inpaint_model(
+    progress: Callable[[int, int | None], None] | None = None, quality: str = "sd",
+) -> Path:
     """Скачивает LaMa атомарно и возвращает только модель с ожидаемым хешем.
 
     Промежуточный файл никогда не попадает в ONNX Runtime: закрытие окна или
     обрыв сети оставляют прежнюю проверенную модель нетронутой.
     """
-    model = inpaint_model_path()
-    if model.is_file() and _file_digest(model) == MODEL_SHA256:
+    if quality not in {"sd", "hd"}:
+        raise ValueError("unknown_inpaint_quality")
+    url = HD_MODEL_URL if quality == "hd" else MODEL_URL
+    expected_digest = HD_MODEL_SHA256 if quality == "hd" else MODEL_SHA256
+    model = inpaint_model_path(quality)
+    if model.is_file() and _file_digest(model) == expected_digest:
         return model
+    if not url:
+        raise RuntimeError("hd_model_url_missing")
     model.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=".lama-", suffix=".download", dir=model.parent)
     temporary = Path(name)
     try:
         digest = hashlib.sha256()
-        with os.fdopen(descriptor, "wb") as output, urlopen(MODEL_URL, timeout=60) as source:
+        with os.fdopen(descriptor, "wb") as output, urlopen(url, timeout=60) as source:
             length = source.headers.get("Content-Length")
             total = int(length) if length and length.isdigit() else None
             if progress:
@@ -79,7 +91,7 @@ def ensure_inpaint_model(progress: Callable[[int, int | None], None] | None = No
                     progress(downloaded, total)
             output.flush()
             os.fsync(output.fileno())
-        if digest.hexdigest() != MODEL_SHA256:
+        if digest.hexdigest() != expected_digest:
             raise RuntimeError("model_checksum_mismatch")
         os.replace(temporary, model)
         return model
@@ -299,6 +311,14 @@ class LamaInpainter:
         options = ort.SessionOptions()
         options.intra_op_num_threads = max(1, min(8, (os.cpu_count() or 2) - 1))
         self.session = ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"])
+        image_input = next((item for item in self.session.get_inputs() if item.name == "image"), None)
+        mask_input = next((item for item in self.session.get_inputs() if item.name == "mask"), None)
+        image_shape = image_input.shape if image_input is not None else ()
+        mask_shape = mask_input.shape if mask_input is not None else ()
+        if (len(image_shape) != 4 or len(mask_shape) != 4 or not isinstance(image_shape[2], int)
+                or image_shape[2] != image_shape[3] or mask_shape[2:] != image_shape[2:]):
+            raise RuntimeError("unsupported_inpaint_model_shape")
+        self.side = image_shape[2]
 
     def apply(self, frame: EditableImage, mask: Image.Image) -> Image.Image:
         """Дорисовывает расширенную маску и сохраняет остальные пиксели точно."""
@@ -307,24 +327,27 @@ class LamaInpainter:
             return frame.image
         w, h = frame.image.size
         left, top, right, bottom = bounds
-        side = max(512, round(max(right-left, bottom-top) * 2))
-        side = min(side, max(w, h))
-        x = max(0, min(w-side, (left+right-side)//2))
-        y = max(0, min(h-side, (top+bottom-side)//2))
-        box = (x, y, min(w, x+side), min(h, y+side))
+        # HD должен видеть больше исходного кадра, а не растянутый SD-кроп:
+        # иначе детали крупнее обучающего масштаба, а дополнительного контекста нет.
+        crop_side = max(self.side, round(max(right-left, bottom-top) * 2))
+        crop_side = min(crop_side, max(w, h))
+        x = max(0, min(w-crop_side, (left+right-crop_side)//2))
+        y = max(0, min(h-crop_side, (top+bottom-crop_side)//2))
+        box = (x, y, min(w, x+crop_side), min(h, y+crop_side))
         native = frame.image.crop(box)
         rgb = to_srgb(native, frame.icc)
         local_mask = mask.crop(box)
         # Запас маски убирает цветной ореол объекта; мягкий край остаётся снаружи выделения.
         local_mask = local_mask.filter(ImageFilter.MaxFilter(7))
         alpha = local_mask.filter(ImageFilter.GaussianBlur(1))
-        scale = 512 / max(rgb.size)
+        input_side = self.side
+        scale = input_side / max(rgb.size)
         size = (max(1, round(rgb.width*scale)), max(1, round(rgb.height*scale)))
         small = rgb.resize(size, Image.Resampling.LANCZOS)
         small_mask = local_mask.resize(size, Image.Resampling.NEAREST)
         pixels = np.asarray(small, dtype=np.float32) / 255
-        pixels = np.pad(pixels, ((0,512-size[1]), (0,512-size[0]), (0,0)), mode="edge")
-        holes = np.pad(np.asarray(small_mask) > 0, ((0,512-size[1]), (0,512-size[0])))
+        pixels = np.pad(pixels, ((0, input_side-size[1]), (0, input_side-size[0]), (0,0)), mode="edge")
+        holes = np.pad(np.asarray(small_mask) > 0, ((0, input_side-size[1]), (0, input_side-size[0])))
         output = self.session.run(None, {"image": pixels.transpose(2,0,1)[None],
                                          "mask": holes.astype(np.float32)[None,None]})[0]
         generated = Image.fromarray(np.clip(output[0].transpose(1,2,0), 0, 255).astype(np.uint8))

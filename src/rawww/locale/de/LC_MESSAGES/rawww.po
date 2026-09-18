@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-14 16:06+0300\n"
+"POT-Creation-Date: 2026-09-18 08:27+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: de\n"
@@ -1951,15 +1951,14 @@ msgstr "Um 0,5° drehen"
 msgid "Повернуть на 90°"
 msgstr "Um 90° drehen"
 
-#, fuzzy
 msgid "Сбросить (R)"
-msgstr "Zurücksetzen"
+msgstr "Zurücksetzen (R)"
 
 msgid "Назад (Ctrl+Z)"
-msgstr ""
+msgstr "Zurück (Ctrl+Z)"
 
 msgid "Вперёд (Ctrl+Y)"
-msgstr ""
+msgstr "Vor (Ctrl+Y)"
 
 msgid "Сохранить"
 msgstr "Speichern"
@@ -1967,7 +1966,6 @@ msgstr "Speichern"
 msgid "Удалить объекты (Enter)"
 msgstr "Objekte entfernen (Enter)"
 
-#, fuzzy
 msgid "Enter в режиме кадрирования"
 msgstr "Enter beim Zuschneiden"
 
@@ -1979,6 +1977,12 @@ msgstr "Maske löschen"
 
 msgid "Автосохранение"
 msgstr "Automatisch speichern"
+
+msgid "Стандартное качество — LaMa 512×512"
+msgstr "Standardqualität — LaMa 512×512"
+
+msgid "Высокое качество — LaMa 1024×1024"
+msgstr "Hohe Qualität — LaMa 1024×1024"
 
 msgid "Исходный"
 msgstr "Original"
@@ -1998,9 +2002,8 @@ msgstr "Wird geschlossen…"
 msgid "Загрузка модели…"
 msgstr "KI-Modelle werden gestartet…"
 
-#, fuzzy
 msgid "Запускаем ИИ-модели…"
-msgstr "Modell wird geladen…"
+msgstr "KI-Modelle werden gestartet…"
 
 msgid "Загрузка изображения…"
 msgstr "Bild wird geladen…"
@@ -2011,9 +2014,8 @@ msgstr "Horizont wird ausgerichtet…"
 msgid "Поворот изображения…"
 msgstr "Bild wird gedreht…"
 
-#, fuzzy
 msgid "Кадрирование…"
-msgstr "Zuschneiden (C)"
+msgstr "Zuschneiden…"
 
 msgid "Удаление объектов…"
 msgstr "Objekte werden entfernt…"

@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-14 16:06+0300\n"
+"POT-Creation-Date: 2026-09-18 08:27+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -1923,15 +1923,14 @@ msgstr "Rotate by 0.5°"
 msgid "Повернуть на 90°"
 msgstr "Rotate by 90°"
 
-#, fuzzy
 msgid "Сбросить (R)"
-msgstr "Reset"
+msgstr "Reset (R)"
 
 msgid "Назад (Ctrl+Z)"
-msgstr ""
+msgstr "Back (Ctrl+Z)"
 
 msgid "Вперёд (Ctrl+Y)"
-msgstr ""
+msgstr "Forward (Ctrl+Y)"
 
 msgid "Сохранить"
 msgstr "Save"
@@ -1939,7 +1938,6 @@ msgstr "Save"
 msgid "Удалить объекты (Enter)"
 msgstr "Remove objects (Enter)"
 
-#, fuzzy
 msgid "Enter в режиме кадрирования"
 msgstr "Enter while cropping"
 
@@ -1951,6 +1949,12 @@ msgstr "Clear mask"
 
 msgid "Автосохранение"
 msgstr "Autosave"
+
+msgid "Стандартное качество — LaMa 512×512"
+msgstr "Standard quality — LaMa 512×512"
+
+msgid "Высокое качество — LaMa 1024×1024"
+msgstr "High quality — LaMa 1024×1024"
 
 msgid "Исходный"
 msgstr "Original"
@@ -1970,9 +1974,8 @@ msgstr "Closing…"
 msgid "Загрузка модели…"
 msgstr "Starting AI models…"
 
-#, fuzzy
 msgid "Запускаем ИИ-модели…"
-msgstr "Loading model…"
+msgstr "Starting AI models…"
 
 msgid "Загрузка изображения…"
 msgstr "Loading image…"
@@ -1983,9 +1986,8 @@ msgstr "Leveling horizon…"
 msgid "Поворот изображения…"
 msgstr "Rotating image…"
 
-#, fuzzy
 msgid "Кадрирование…"
-msgstr "Crop (C)"
+msgstr "Cropping…"
 
 msgid "Удаление объектов…"
 msgstr "Removing objects…"

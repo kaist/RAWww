@@ -32,3 +32,6 @@ src/rawww/_build_version.py
 .DS_Store
 Thumbs.db
 ya_auth.txt
+scripts/data/sources/lake_centerline.shp.zip
+scripts/data/sources/natural_earth_vector.sqlite.zip
+/scripts/data/sources

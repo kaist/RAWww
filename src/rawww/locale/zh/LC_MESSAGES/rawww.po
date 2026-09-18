@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-14 16:06+0300\n"
+"POT-Creation-Date: 2026-09-18 08:27+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh\n"
@@ -1875,15 +1875,14 @@ msgstr "旋转 0.5°"
 msgid "Повернуть на 90°"
 msgstr "旋转 90°"
 
-#, fuzzy
 msgid "Сбросить (R)"
-msgstr "重置"
+msgstr "重置 (R)"
 
 msgid "Назад (Ctrl+Z)"
-msgstr ""
+msgstr "后退 (Ctrl+Z)"
 
 msgid "Вперёд (Ctrl+Y)"
-msgstr ""
+msgstr "前进 (Ctrl+Y)"
 
 msgid "Сохранить"
 msgstr "保存"
@@ -1891,7 +1890,6 @@ msgstr "保存"
 msgid "Удалить объекты (Enter)"
 msgstr "移除对象（Enter）"
 
-#, fuzzy
 msgid "Enter в режиме кадрирования"
 msgstr "裁剪模式下按 Enter"
 
@@ -1903,6 +1901,12 @@ msgstr "清除蒙版"
 
 msgid "Автосохранение"
 msgstr "自动保存"
+
+msgid "Стандартное качество — LaMa 512×512"
+msgstr "标准质量 — LaMa 512×512"
+
+msgid "Высокое качество — LaMa 1024×1024"
+msgstr "高质量 — LaMa 1024×1024"
 
 msgid "Исходный"
 msgstr "原始"
@@ -1922,9 +1926,8 @@ msgstr "正在关闭…"
 msgid "Загрузка модели…"
 msgstr "正在启动 AI 模型…"
 
-#, fuzzy
 msgid "Запускаем ИИ-модели…"
-msgstr "正在加载模型…"
+msgstr "正在启动 AI 模型…"
 
 msgid "Загрузка изображения…"
 msgstr "正在加载图像…"
@@ -1935,9 +1938,8 @@ msgstr "正在校正水平线…"
 msgid "Поворот изображения…"
 msgstr "正在旋转图像…"
 
-#, fuzzy
 msgid "Кадрирование…"
-msgstr "裁剪 (C)"
+msgstr "正在裁剪…"
 
 msgid "Удаление объектов…"
 msgstr "正在移除对象…"

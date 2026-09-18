@@ -193,6 +193,30 @@ class InpaintDialogTests(unittest.TestCase):
         self.dialog.navigate(1)
         self.assertEqual(self.dialog.path, "b.png")
 
+    def test_hd_quality_is_lazy_and_persisted(self):
+        self.assertTrue(self.dialog.sd_quality_button.isChecked())
+        self.dialog._update()
+        self.dialog.hd_quality_button.click()
+        self.assertEqual(self.dialog._inpaint_quality, "hd")
+        self.assertEqual(self.settings.values["inpaint/quality"], "hd")
+        self.assertEqual(self.dialog._models["inpaint"], "pending")
+        self.sent.assert_called_once_with("set_inpaint_quality", quality="hd")
+
+    def test_saved_hd_quality_is_requested_after_worker_ready(self):
+        self.dialog._closed = True
+        self.dialog.close()
+        self.dialog.deleteLater()
+        self.send.stop()
+        settings = _Settings({"inpaint/quality": "hd"})
+        self.dialog = InpaintDialog([Path("a.png")], Path("a.png"), settings)
+        self.send = patch.object(self.dialog, "_send")
+        self.sent = self.send.start()
+        with patch.object(self.dialog, "_open") as open_frame:
+            self.dialog._event({"event": "ready"})
+        self.assertTrue(self.dialog.hd_quality_button.isChecked())
+        self.sent.assert_called_once_with("set_inpaint_quality", quality="hd")
+        open_frame.assert_called_once()
+
     def test_inpaint_continues_after_navigation_and_keeps_its_own_result(self):
         image = QImage(320, 200, QImage.Format.Format_RGB888)
         image.fill(QColor("yellow"))
