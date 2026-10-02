@@ -120,6 +120,11 @@ jobs:
         if: runner.os == 'macOS'
         run: uv run python scripts/smoke_test_package.py --app-dir dist/ctrlka.app --screenshot dist/ctrlka-startup.png --metadata-sample tests/fixtures/metadata/canon_eos_r/IMG_0642.JPG
 
+      - name: Benchmark CPU and CoreML models
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: uv run python scripts/benchmark_macos_coreml.py --include-downloads --report dist/coreml-benchmark-${{ matrix.macos_arch }}.json
+
       - name: Build macOS DMG
         if: runner.os == 'macOS'
         shell: bash
@@ -240,6 +245,7 @@ jobs:
           path: |
             dist/ctrlka-macos-${{ matrix.macos_arch }}.dmg
             dist/ctrlka-startup.png
+            dist/coreml-benchmark-${{ matrix.macos_arch }}.json
           if-no-files-found: error
 
       - name: Upload Linux artifact

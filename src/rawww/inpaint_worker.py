@@ -443,7 +443,8 @@ def main() -> int:
             with models_lock:
                 models["inpaint"] = loaded
                 loaded_inpaint_quality = quality
-            emit("model_ready", model="inpaint", quality=quality)
+            emit("model_ready", model="inpaint", quality=quality,
+                 provider=loaded.session.get_providers()[0])
         except Exception as exc:
             emit("model_error", model="inpaint", quality=quality, error=str(exc))
 

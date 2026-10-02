@@ -369,6 +369,20 @@ class FacialMaskTest(unittest.TestCase):
             self.assertLess(values.max(), .25, f"{name}: маска наползает на запретный класс")
             self.assertLess(values.mean(), .05, f"{name}: слишком большой средний вес")
 
+    def test_face_outside_frame_is_ignored(self) -> None:
+        """Рамка с заполненного поля детектора не должна попасть в Image.crop."""
+        retoucher = object.__new__(retouch_pipeline.SkinRetoucher)
+        retoucher._face_parser = mock.Mock()
+        rgb = np.zeros((100, 120, 3), dtype=np.uint8)
+        boxes = np.array([[200.0, 20.0, 240.0, 70.0], [-80.0, 20.0, -40.0, 70.0]])
+        with mock.patch("rawww.face_analysis._detect", return_value=(boxes, None, None)):
+            skin, coverage, _area, scale, faces = retoucher._facial_masks(rgb, (100, 100))
+        self.assertEqual(int(skin.max()), 0)
+        self.assertEqual(int(coverage.max()), 0)
+        self.assertEqual(scale, 0.0)
+        self.assertEqual(faces, ())
+        retoucher._face_parser.run.assert_not_called()
+
 
 class PerFaceToneTest(unittest.TestCase):
     """Групповой портрет: тон каждого лица считается со своими радиусами."""

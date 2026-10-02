@@ -1,7 +1,7 @@
 ## Copyright (c) 2026 Игорь Заломский <igor@zalomskij.ru>
 ## SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Поиск лиц и эмбеддингов на CPU с моделями, поставляемыми вместе с приложением."""
+"""Поиск лиц и эмбеддингов с DirectML на Windows и резервным CPU."""
 
 from __future__ import annotations
 
@@ -59,23 +59,21 @@ class Face:
 _detector_session = None
 _recognition_session = None
 _landmark_session = None
-# Пакетная ретушь считает кадры параллельно и просит детектор из нескольких
-# потоков: сессию ONNX можно вызывать одновременно, но создавать её дважды
-# незачем — это секунды и десятки мегабайт впустую.
+# Пакетная ретушь просит детектор из нескольких потоков. Сессия создаётся
+# однажды, а ModelSession упорядочивает её DirectML-вызовы с остальными моделями.
 _session_lock = threading.Lock()
 
 
 def _session(model: Path):
-    from onnxruntime import GraphOptimizationLevel, InferenceSession, SessionOptions
+    from onnxruntime import GraphOptimizationLevel, SessionOptions
+    from .onnx_sessions import ModelSession
 
     options = SessionOptions()
     options.graph_optimization_level = GraphOptimizationLevel.ORT_ENABLE_ALL
     options.use_deterministic_compute = True
     options.intra_op_num_threads = 1
     options.inter_op_num_threads = 1
-    session = InferenceSession(str(model), options, providers=["CPUExecutionProvider"])
-    session.disable_fallback()
-    return session
+    return ModelSession(model, options)
 
 
 def _detector():

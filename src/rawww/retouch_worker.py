@@ -56,8 +56,11 @@ def _read(path: Path, max_side: int | None, region: tuple[int, int, int, int] | 
             image = ImageOps.exif_transpose(opened).convert("RGB")
             full_size = image.size
             x, y, width, height = region
-            left, top = max(0, x), max(0, y)
-            right, bottom = min(full_size[0], x + width), min(full_size[1], y + height)
+            # Область может быть рассчитана по прошлому кадру при быстрой навигации.
+            left = min(max(0, x), full_size[0] - 1)
+            top = min(max(0, y), full_size[1] - 1)
+            right = max(left + 1, min(full_size[0], x + width))
+            bottom = max(top + 1, min(full_size[1], y + height))
             return np.asarray(image.crop((left, top, right, bottom)), dtype=np.uint8), (left, top), full_size
     # Для вписанного preview JPEG декодируется сразу в нужном черновом размере:
     # ``decode_pixels`` использует Pillow.draft, не распаковывая оригинал целиком.
@@ -285,6 +288,7 @@ def _frame_workers(
     neural: bool = True,
     memory_gb: float | None = None,
     megapixels: float = 24.0,
+    gpu: bool = False,
 ) -> int:
     """Сколько кадров пакета считается одновременно.
 
@@ -307,6 +311,10 @@ def _frame_workers(
         memory_gb = _memory_gb()
     per_frame_gb = max(4.0, megapixels) * .06
     by_memory = int(max(memory_gb - 2.0, per_frame_gb) / per_frame_gb)
+    if gpu:
+        # GPU-вызовы сериализованы между моделями; два кадра перекрывают
+        # декодирование, цветовые этапы и запись без лишнего давления на память.
+        return max(1, min(2, by_memory))
     if not neural:
         return max(1, min(6, cpus, by_memory))
     if cpus < 4:
@@ -380,6 +388,8 @@ def _batch(
     workers = _frame_workers(
         neural=bool(settings.neural_retouch and settings.neural_strength > 0),
         megapixels=_batch_megapixels(tasks),
+        gpu=any(getattr(getattr(retoucher, name, None), "gpu", False)
+                for name in ("_segmenter", "_face_parser", "_retoucher_session")),
     )
     stopped = False
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="retouch-frame") as executor:

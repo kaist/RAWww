@@ -23,7 +23,7 @@ from PIL import Image
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QProcess
+from PySide6.QtCore import QProcess, QRectF, QSettings
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import QApplication
 
@@ -170,6 +170,43 @@ class RegionMaskTests(unittest.TestCase):
         self.assertEqual(self.retoucher.mask_calls, 1)
         # Кроп увеличивает лицо в 2.5 раза относительно кадра масок 1600 px.
         self.assertAlmostEqual(masks.face_scale, 100.0 * 400 / 160, places=3)
+
+    def test_requested_region_outside_photo_is_clamped(self) -> None:
+        """Запрос по старой сцене при смене фото не должен ломать Pillow.crop."""
+        from rawww.retouch_worker import _read
+
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "photo.jpg"
+            Image.new("RGB", (100, 80), "white").save(photo)
+            pixels, origin, full_size = _read(photo, None, (200, 150, 20, 20))
+        self.assertEqual(pixels.shape, (1, 1, 3))
+        self.assertEqual(origin, (99, 79))
+        self.assertEqual(full_size, (100, 80))
+
+
+class PreviewRegionBoundsTests(unittest.TestCase):
+    """Прямоугольник запроса предпросмотра всегда лежит внутри размера фото."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_visible_area_outside_canvas_requests_last_pixel(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            photo = Path(directory) / "photo.jpg"
+            settings = QSettings(str(Path(directory) / "settings.ini"), QSettings.Format.IniFormat)
+            dialog = BatchRetouchDialog([photo], photo, settings)
+            try:
+                dialog._fit = False
+                dialog._source_size = (100, 80)
+                with mock.patch.object(dialog.preview, "visible_scene_rect", return_value=QRectF(200, 250, 20, 20)), \
+                     mock.patch.object(dialog, "_ensure_preview_process", return_value=object()), \
+                     mock.patch.object(dialog, "_send") as send:
+                    dialog._start_preview()
+                task = send.call_args.args[1]["tasks"][0]
+                self.assertEqual(task["region"], (99, 79, 1, 1))
+            finally:
+                dialog.close()
 
 
 class PreviewWorkerTests(unittest.TestCase):
@@ -346,6 +383,14 @@ class BatchPipelineTests(unittest.TestCase):
         self.assertEqual(retouch_worker._frame_workers(16, memory_gb=32), 5)
         self.assertEqual(retouch_worker._frame_workers(32, memory_gb=64), 6)
 
+    def test_frame_workers_use_two_frames_on_gpu(self) -> None:
+        """DirectML перекрывает CPU-этапы двух кадров с учётом памяти."""
+        from rawww import retouch_worker
+
+        self.assertEqual(retouch_worker._frame_workers(16, memory_gb=32, gpu=True), 2)
+        self.assertEqual(retouch_worker._frame_workers(16, neural=False, memory_gb=32, gpu=True), 2)
+        self.assertEqual(retouch_worker._frame_workers(16, memory_gb=2, gpu=True), 1)
+
     def test_frame_workers_fill_cores_without_neural(self) -> None:
         """Без нейроретуши никакой этап сам по ядрам не растёт — растёт кадрами."""
         from rawww import retouch_worker
@@ -378,6 +423,20 @@ class BatchPipelineTests(unittest.TestCase):
             retouch_worker._batch(object(), [], RetouchSettings(neural_retouch=False))
             retouch_worker._batch(object(), [], RetouchSettings(neural_retouch=True, neural_strength=.5))
         self.assertEqual(asked, [False, True])
+
+    def test_batch_detects_active_directml_session(self) -> None:
+        """Лимит кадров зависит от реально запущенной GPU-сессии."""
+        from rawww import retouch_worker
+
+        selected: list[bool] = []
+        retoucher = SimpleNamespace(_segmenter=SimpleNamespace(gpu=True))
+        with mock.patch.object(
+            retouch_worker,
+            "_frame_workers",
+            lambda **kwargs: selected.append(kwargs["gpu"]) or 1,
+        ):
+            retouch_worker._batch(retoucher, [], RetouchSettings())
+        self.assertEqual(selected, [True])
 
     def test_frames_overlap_and_progress_counts_every_frame(self) -> None:
         """Пока один кадр ждёт, второй обязан идти: иначе ядра простаивают."""
@@ -599,6 +658,49 @@ class ClosedDialogCallbackTests(unittest.TestCase):
         BatchRetouchDialog._finished(closed, process, False)
         BatchRetouchDialog._worker_start_error(closed, process)
         BatchRetouchDialog._read_events(closed, process, False)
+
+    def test_batch_finish_preserves_frame_error(self) -> None:
+        """Итог пакета не должен скрывать имя провалившегося кадра и причину."""
+        process = object()
+        dialog = SimpleNamespace(
+            _closed=False,
+            _batch_process=process,
+            _batch_running=True,
+            _batch_control=None,
+            _batch_result=(1, 2, 1),
+            _batch_errors=["IMG_1234.jpg: coordinate right is less than left"],
+            _release_batch_entry=lambda: None,
+            batch=mock.Mock(),
+            progress=mock.Mock(),
+            status=mock.Mock(),
+        )
+        BatchRetouchDialog._finished(dialog, process, False)
+        message = dialog.status.setText.call_args.args[0]
+        self.assertIn("IMG_1234.jpg", message)
+        self.assertIn("coordinate right is less than left", message)
+
+    def test_batch_finish_reports_native_directml_crash(self) -> None:
+        """При нативной аварии без JSON-события остаются код и узел DirectML."""
+        process = SimpleNamespace(
+            exitCode=lambda: -1073741819,
+            readAllStandardError=lambda: b"while running DmlFusedNode_0_0 node",
+        )
+        dialog = SimpleNamespace(
+            _closed=False,
+            _batch_process=process,
+            _batch_running=True,
+            _batch_control=None,
+            _batch_result=None,
+            _batch_errors=[],
+            _release_batch_entry=lambda: None,
+            batch=mock.Mock(),
+            progress=mock.Mock(),
+            status=mock.Mock(),
+        )
+        BatchRetouchDialog._finished(dialog, process, False)
+        message = dialog.status.setText.call_args.args[0]
+        self.assertIn("DirectML DmlFusedNode_0_0", message)
+        self.assertIn("0xC0000005", message)
 
     def test_detach_removes_every_subscription(self) -> None:
         self.app = QApplication.instance() or QApplication([])

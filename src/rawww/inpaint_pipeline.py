@@ -306,11 +306,22 @@ class LamaInpainter:
 
     def __init__(self, model: Path | None = None) -> None:
         import onnxruntime as ort
+        from .onnx_sessions import ModelSession, directml_available
 
         model = model or inpaint_model_path()
         options = ort.SessionOptions()
         options.intra_op_num_threads = max(1, min(8, (os.cpu_count() or 2) - 1))
-        self.session = ort.InferenceSession(str(model), sess_options=options, providers=["CPUExecutionProvider"])
+        gpu_model = model
+        prefer_gpu = directml_available()
+        if prefer_gpu:
+            try:
+                from .onnx_directml import directml_lama_model
+
+                gpu_model = directml_lama_model(model)
+            except Exception:
+                # Ошибка подготовки производного графа не мешает редактированию на CPU.
+                prefer_gpu = False
+        self.session = ModelSession(gpu_model, options, prefer_gpu=prefer_gpu, cpu_model=model)
         image_input = next((item for item in self.session.get_inputs() if item.name == "image"), None)
         mask_input = next((item for item in self.session.get_inputs() if item.name == "mask"), None)
         image_shape = image_input.shape if image_input is not None else ()
@@ -370,12 +381,12 @@ class DeepOad:
 
     def __init__(self, model: Path | None = None) -> None:
         import onnxruntime as ort
+        from .onnx_sessions import ModelSession
 
         options = ort.SessionOptions()
         options.intra_op_num_threads = max(1, min(8, (os.cpu_count() or 2) - 1))
-        self.session = ort.InferenceSession(
-            str(model or horizon_model_path()), sess_options=options, providers=["CPUExecutionProvider"]
-        )
+        # На Iris Xe DirectML делит Deep-OAD с CPU и работает медленнее CPU.
+        self.session = ModelSession(model or horizon_model_path(), options, prefer_gpu=False)
         self.input_name = self.session.get_inputs()[0].name
 
     def predict_angle(self, frame: EditableImage) -> float:

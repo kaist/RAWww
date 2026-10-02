@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import sys
 from time import monotonic
 from pathlib import Path
@@ -31,6 +32,18 @@ _FIELD_HEIGHT = 40
 # Задержка дребезга предпросмотра: ползунок успевает доехать, а воркер не
 # считает кадры, которые всё равно устареют.
 _PREVIEW_DELAY = 350
+
+
+def _native_failure_detail(process: QProcess) -> str:
+    """Сохраняет код аварии и имя сбойного узла, когда воркер не успел послать событие."""
+    stderr = bytes(process.readAllStandardError()).decode("utf-8", errors="replace")
+    node = re.search(r"running (Dml\w+) node", stderr)
+    code = process.exitCode() & 0xffffffff
+    if node:
+        return f"DirectML {node.group(1)}, 0x{code:08X}"
+    if code:
+        return f"0x{code:08X}"
+    return ""
 
 
 class RetouchPreviewView(QGraphicsView):
@@ -259,6 +272,7 @@ class BatchRetouchDialog(QDialog):
         self._batch_paused_total = 0.0
         # Итог пакета берётся из события воркера, а не из кода выхода процесса.
         self._batch_result: tuple[int, int, int] | None = None
+        self._batch_errors: list[str] = []
         self._sliders: list[QSlider] = []
         self._before_preview = QPixmap()
         self._after_preview = QPixmap()
@@ -565,11 +579,13 @@ class BatchRetouchDialog(QDialog):
         if not self._fit and self._source_size is not None:
             visible = self.preview.visible_scene_rect()
             margin = 96
-            x = max(0, round(visible.left()) - margin)
-            y = max(0, round(visible.top()) - margin)
-            right = min(self._source_size[0], round(visible.right()) + margin)
-            bottom = min(self._source_size[1], round(visible.bottom()) + margin)
-            region = (x, y, max(1, right - x), max(1, bottom - y))
+            width, height = self._source_size
+            if width > 0 and height > 0:
+                x = min(max(0, round(visible.left()) - margin), width - 1)
+                y = min(max(0, round(visible.top()) - margin), height - 1)
+                right = max(x + 1, min(width, round(visible.right()) + margin))
+                bottom = max(y + 1, min(height, round(visible.bottom()) + margin))
+                region = (x, y, right - x, bottom - y)
         max_side = None if region is not None else max(1080, max(self.preview.viewport().width(), self.preview.viewport().height()) * 2)
         self.status.clear()
         self.preview.set_loading(True)
@@ -601,6 +617,7 @@ class BatchRetouchDialog(QDialog):
         self._batch_paused_at = None
         self._batch_paused_total = 0.0
         self._batch_result = None
+        self._batch_errors = []
         self.batch.setEnabled(False)
         self.progress.start(len(sources), _("Подготовка…"))
         self.status.setText(_("Запущена пакетная ретушь…"))
@@ -716,7 +733,10 @@ class BatchRetouchDialog(QDialog):
                     int(event.get("failed", 0)),
                 )
             elif kind == "error":
-                self.status.setText(_("Ошибка ретуши: {error}").format(error=event.get("message", "")))
+                message = str(event.get("message", ""))
+                if not preview:
+                    self._batch_errors.append(message)
+                self.status.setText(_("Ошибка ретуши: {error}").format(error=message))
             elif kind == "preview" and preview:
                 self._show_preview(event)
             elif kind == "finished" and preview:
@@ -844,7 +864,17 @@ class BatchRetouchDialog(QDialog):
         # из события воркера: ошибкой называется только неполучившийся кадр.
         result = self._batch_result
         good = result is not None and not result[2] and result[0] >= result[1]
-        self.status.setText(_("Пакетная ретушь завершена.") if good else _("Пакетная ретушь завершилась с ошибкой."))
+        if self._batch_errors:
+            self.status.setText(_("Ошибка ретуши: {error}").format(error=self._batch_errors[0]))
+            self.status.setToolTip("\n".join(self._batch_errors))
+        else:
+            detail = _native_failure_detail(process) if not good else ""
+            self.status.setText(
+                _("Пакетная ретушь завершена.") if good else
+                _("Ошибка ретуши: {error}").format(error=detail) if detail else
+                _("Пакетная ретушь завершилась с ошибкой.")
+            )
+            self.status.setToolTip("")
 
     def _release_batch_entry(self) -> None:
         entry, self._batch_entry = self._batch_entry, None

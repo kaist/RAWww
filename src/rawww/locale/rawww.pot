@@ -2407,4 +2407,3 @@ msgstr ""
 
 msgid "Быстрый просмотр и отбор RAW и JPG"
 msgstr ""
-

@@ -112,15 +112,17 @@ def prepare_analysis_batch(paths: list[str]) -> list[tuple[str, bytes]]:
 def _clip():
     global _clip_session
     if _clip_session is None:
-        from onnxruntime import GraphOptimizationLevel, InferenceSession, SessionOptions
+        from onnxruntime import GraphOptimizationLevel, SessionOptions
+        from .onnx_sessions import ModelSession
 
         options = SessionOptions()
         options.graph_optimization_level = GraphOptimizationLevel.ORT_ENABLE_ALL
         options.use_deterministic_compute = True
         options.intra_op_num_threads = 1
         options.inter_op_num_threads = 1
-        _clip_session = InferenceSession(str(CLIP_MODEL), options, providers=["CPUExecutionProvider"])
-        _clip_session.disable_fallback()
+        # На проверенной Iris Xe короткий прогон CLIP быстрее на CPU; выбор
+        # DirectML для этой модели отложен до замеров на других видеокартах.
+        _clip_session = ModelSession(CLIP_MODEL, options, prefer_gpu=False)
     return _clip_session
 
 

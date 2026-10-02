@@ -747,6 +747,7 @@ class SkinRetoucher:
 
     def __init__(self, models_dir: Path) -> None:
         import onnxruntime as ort
+        from .onnx_sessions import ModelSession
 
         segmenter = models_dir / "selfie_multiclass_256x256.onnx"
         retoucher = models_dir / "opt.onnx"
@@ -759,8 +760,8 @@ class SkinRetoucher:
         options.inter_op_num_threads = 1
         self._options = options
         self._retoucher_path = retoucher
-        self._segmenter = ort.InferenceSession(str(segmenter), options, providers=["CPUExecutionProvider"])
-        self._face_parser = ort.InferenceSession(str(face_parser), options, providers=["CPUExecutionProvider"])
+        self._segmenter = ModelSession(segmenter, options)
+        self._face_parser = ModelSession(face_parser, options)
         self._segmenter_input = self._segmenter.get_inputs()[0].name
         self._face_parser_input = self._face_parser.get_inputs()[0].name
         # Самая тяжёлая модель грузится первым обращением: пакет без
@@ -871,6 +872,10 @@ class SkinRetoucher:
             y0 = max(0, math.floor(top - face_height * .24))
             x1 = min(width, math.ceil(right + face_width * .20))
             y1 = min(height, math.ceil(bottom + face_height * .18))
+            if x0 >= x1 or y0 >= y1:
+                # Детектор видит и заполненные поля вокруг снимка; такая рамка
+                # не пересекает кадр и не может стать кропом для парсинга.
+                continue
             crop = image.crop((x0, y0, x1, y1)).resize((512, 512), Image.Resampling.BILINEAR)
             values = np.asarray(crop, dtype=np.float32) / 255.0
             values = (values - np.array((.485, .456, .406), dtype=np.float32)) / np.array((.229, .224, .225), dtype=np.float32)
@@ -882,7 +887,7 @@ class SkinRetoucher:
         # Лица независимы, а сессия парсинга потокобезопасна: групповой
         # портрет разбирается через общий пул плиток, а склейка масок ниже
         # остаётся последовательной: PIL-холсты общие для всех лиц.
-        if len(jobs) > 1:
+        if len(jobs) > 1 and not getattr(self._face_parser, "gpu", False):
             parsed = list(self._tiles().map(parse, [job[2] for job in jobs]))
         else:
             parsed = [parse(job[2]) for job in jobs]
@@ -948,13 +953,11 @@ class SkinRetoucher:
         Модель отключают целыми пакетами, а стоит она секунды загрузки и
         сотни мегабайт памяти, нужной параллельным кадрам.
         """
-        import onnxruntime as ort
+        from .onnx_sessions import ModelSession
 
         with self._retoucher_lock:
             if self._retoucher_session is None:
-                session = ort.InferenceSession(
-                    str(self._retoucher_path), self._options, providers=["CPUExecutionProvider"]
-                )
+                session = ModelSession(self._retoucher_path, self._options)
                 self._retoucher_input = session.get_inputs()[0].name
                 self._retoucher_session = session
             return self._retoucher_session
@@ -990,7 +993,8 @@ class SkinRetoucher:
             prediction = session.run(None, {self._retoucher_input: patch})[0][0]
             return y, x, np.clip(prediction.transpose(1, 2, 0) * 255, 0, 255).astype(np.uint8)
 
-        for y, x, prediction in self._tiles().map(infer, jobs):
+        predictions = map(infer, jobs) if getattr(session, "gpu", False) else self._tiles().map(infer, jobs)
+        for y, x, prediction in predictions:
             result[y:y + core, x:x + core] = prediction
         return result[:height, :width]
 
