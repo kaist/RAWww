@@ -51,6 +51,16 @@ class DecodeCache:
         self.memory.move_to_end(key)
         self._trim_memory()
 
+    def sufficient_preview(self, path: Path, max_size: int) -> DecodedImage | None:
+        """Повторно использует больший fit-кадр; оригинал и миниатюру не подменяет."""
+        if max_size <= self._thumb_size:
+            return None
+        variants = [key for key in self.memory if key[0] == path and key[1] >= max_size
+                    and key[1] != self._original_size]
+        if not variants:
+            return None
+        return self.get(min(variants, key=lambda key: key[1]))
+
     def _trim_memory(self) -> None:
         original_keys = [key for key in self.memory if key[1] == self._original_size]
         while len(original_keys) > 1:

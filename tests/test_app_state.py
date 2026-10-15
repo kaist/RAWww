@@ -396,6 +396,7 @@ class AppStateTests(unittest.TestCase):
         workspace = SimpleNamespace(
             closing=False,
             workspace_active=True,
+            cloud_account_id=None,
             folder_cache=object(),
             cache_ready=True,
             stack=SimpleNamespace(currentWidget=lambda: grid_page),
@@ -421,6 +422,7 @@ class AppStateTests(unittest.TestCase):
         future = Future()
         workspace = SimpleNamespace(
             thumb_timer=SimpleNamespace(stop=Mock()),
+            thumb_refill_timer=SimpleNamespace(stop=Mock()),
             visible_thumb_timer=SimpleNamespace(stop=Mock()),
             pending={key: future},
             visible_thumb_pending={key},
@@ -431,6 +433,81 @@ class AppStateTests(unittest.TestCase):
         self.assertTrue(future.cancelled())
         self.assertNotIn(key, workspace.pending)
         self.assertNotIn(key, workspace.visible_thumb_pending)
+        workspace.thumb_refill_timer.stop.assert_called_once_with()
+
+    def test_finished_thumbnails_refill_queue_without_waiting_for_periodic_tick(self) -> None:
+        timer = SimpleNamespace(isActive=Mock(return_value=False), start=Mock())
+        workspace = SimpleNamespace(
+            scheduler=SimpleNamespace(handle_completion=Mock()),
+            _resume_incomplete_thumbnail_work=Mock(),
+            closing=False,
+            workspace_active=True,
+            cache_ready=True,
+            cloud_account_id=None,
+            thumb_timer=SimpleNamespace(isActive=lambda: True),
+            thumb_refill_timer=timer,
+        )
+        payload = ("cache_batch",)
+        Workspace._on_scheduler_finished(workspace, payload)
+        workspace.scheduler.handle_completion.assert_called_once_with(payload)
+        timer.start.assert_called_once_with(0)
+        timer.start.reset_mock()
+        timer.isActive.return_value = True
+        Workspace._on_scheduler_finished(workspace, payload)
+        timer.start.assert_not_called()
+        timer.isActive.return_value = False
+        for attribute in ("closing", "workspace_active", "cache_ready"):
+            original = getattr(workspace, attribute)
+            setattr(workspace, attribute, not original)
+            Workspace._on_scheduler_finished(workspace, payload)
+            timer.start.assert_not_called()
+            setattr(workspace, attribute, original)
+
+    def test_card_paint_uses_stored_path_type_without_filesystem_reads(self) -> None:
+        """Прокрутка готовых фотографий не проверяет их тип через stat."""
+        from PySide6.QtGui import QImage, QPainter
+        from PySide6.QtCore import QRect
+        from PySide6.QtWidgets import QStyleOptionViewItem
+        from rawww.app import DIRECTORY_ROLE, PhotoGrid
+
+        grid = PhotoGrid()
+        item = QListWidgetItem("photo.jpg")
+        item.setData(Qt.ItemDataRole.UserRole, Path("/photos/photo.jpg"))
+        item.setData(DIRECTORY_ROLE, False)
+        grid.addItem(item)
+        canvas = QImage(256, 256, QImage.Format.Format_RGB32)
+        painter = QPainter(canvas)
+        option = QStyleOptionViewItem()
+        option.rect = QRect(0, 0, 256, 256)
+        option.widget = grid
+        try:
+            with patch.object(Path, "is_dir", side_effect=AssertionError("paint requested is_dir")), patch.object(Path, "is_file", side_effect=AssertionError("paint requested is_file")):
+                grid.itemDelegate().paint(painter, option, grid.model().index(0, 0))
+        finally:
+            painter.end()
+            grid.close()
+            grid.deleteLater()
+
+    def test_thumbnail_submission_respects_pending_limit(self) -> None:
+        from rawww.app import MAX_PENDING_THUMBS
+
+        candidates = [Path(f"/photos/{index}.jpg") for index in range(32)]
+        workspace = SimpleNamespace(
+            closing=False, workspace_active=True, folder_cache=object(), cache_ready=True,
+            pending_full_request=None, foreground_full_futures={}, thumb_priority=[],
+            visible_thumb_pending=set(),
+            pending={(Path(f"/photos/pending-{i}.jpg"), THUMB_SIZE): Future() for i in range(MAX_PENDING_THUMBS-2)},
+            thumb_index=0, paths=candidates,
+            scheduler=SimpleNamespace(submit_thumbnail_batch=Mock()),
+            _refresh_status_panel=Mock(),
+        )
+        def next_path():
+            path = workspace.paths[workspace.thumb_index]
+            workspace.thumb_index += 1
+            return path, False
+        workspace._next_thumb_path = next_path
+        Workspace._submit_next_thumbs(workspace)
+        workspace.scheduler.submit_thumbnail_batch.assert_called_once_with(candidates[:2])
 
     def test_failed_video_thumbnail_finishes_its_progress_slot(self) -> None:
         thumbnailer = VideoThumbnailer()
@@ -904,8 +981,8 @@ class AppStateTests(unittest.TestCase):
             workspace.close()
             workspace.deleteLater()
 
-    def test_preview_progress_names_cache_read_and_generation(self) -> None:
-        """Строка состояния различает чтение готовых превью и их генерацию."""
+    def test_preview_progress_is_hidden_for_cache_and_shown_for_generation(self) -> None:
+        """Чтение кэша не занимает индикатор ни до генерации, ни после неё."""
         workspace = Workspace(defer_initial_scan=True)
         paths = {Path("/photos/a.jpg"), Path("/photos/b.jpg")}
         workspace.preview_paths = set(paths)
@@ -914,11 +991,15 @@ class AppStateTests(unittest.TestCase):
 
         workspace.scheduler.preview_decode_pending.clear()
         workspace._refresh_status_panel()
-        self.assertEqual(workspace.status_progress.format(), "Чтение превью: 1/2")
+        self.assertTrue(workspace.status_progress.isHidden())
 
         workspace.scheduler.preview_decode_pending.add(Path("/photos/b.jpg"))
         workspace._refresh_status_panel()
         self.assertEqual(workspace.status_progress.format(), "Генерация превью: 1/2")
+        self.assertFalse(workspace.status_progress.isHidden())
+        workspace.scheduler.preview_decode_pending.clear()
+        workspace._refresh_status_panel()
+        self.assertTrue(workspace.status_progress.isHidden())
 
         workspace.close()
         workspace.deleteLater()
@@ -1753,6 +1834,7 @@ class AppStateTests(unittest.TestCase):
             video_thumbnailer=SimpleNamespace(set_active=Mock()),
             populate_timer=timer(),
             thumb_timer=timer(),
+            thumb_refill_timer=timer(),
             visible_thumb_timer=timer(),
             grid_full_request_timer=timer(),
             full_request_timer=timer(),

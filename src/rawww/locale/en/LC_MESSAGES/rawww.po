@@ -7,7 +7,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-09-18 08:27+0300\n"
+"POT-Creation-Date: 2026-10-15 23:28+0300\n"
 "PO-Revision-Date: 2026-07-21 17:06+0000\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: en\n"
@@ -948,10 +948,6 @@ msgstr "Analysis: {done}/{total}{eta}"
 #, python-brace-format
 msgid "Генерация превью: {done}/{total}"
 msgstr "Generating previews: {done}/{total}"
-
-#, python-brace-format
-msgid "Чтение превью: {done}/{total}"
-msgstr "Reading previews: {done}/{total}"
 
 #, python-brace-format
 msgid "Закрытые глаза  {n}"
@@ -2633,3 +2629,6 @@ msgstr "Fast RAW and JPG viewing and culling"
 
 #~ msgid "Модели загружаются в фоне…"
 #~ msgstr "Models are loading in background…"
+
+#~ msgid "Чтение превью: {done}/{total}"
+#~ msgstr "Reading previews: {done}/{total}"

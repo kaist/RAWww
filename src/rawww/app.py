@@ -184,6 +184,7 @@ FULL_STRIP_PAGE_SIZE = 160
 PREVIEW_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 DETAIL_ROLE = PREVIEW_ROLE + 1
 SERIES_ROLE = DETAIL_ROLE + 1
+DIRECTORY_ROLE = SERIES_ROLE + 1
 
 
 def _has_visible_annotations(detail: dict) -> bool:
@@ -225,11 +226,12 @@ def _media_value(value: object):
     if isinstance(value, (Path, BurstFrame)):
         return value
     return Path(value) if value else None
-MAX_PENDING_THUMBS = 8
+MAX_PENDING_THUMBS = 32
 VISIBLE_THUMB_LOOKUP_WORKERS = 2
-MAX_VISIBLE_THUMB_PENDING = 1
+MAX_VISIBLE_THUMB_PENDING = 32
 POPULATE_BATCH = 48
-THUMB_SUBMIT_BATCH = 8
+THUMB_SUBMIT_BATCH = 32
+VISIBLE_THUMB_SUBMIT_BATCH = 32
 WORK_PUMP_INTERVAL_MS = 16
 FLUSH_INTERVAL_MS = 30_000
 FOLDER_CHANGE_DEBOUNCE_MS = 1_000
@@ -478,6 +480,7 @@ class DecodeBridge(QObject):
     faceSearchFinished = Signal(object)
     cloudDirectoryLoaded = Signal(object)
     cloudPreviewLoaded = Signal(object)
+    cloudVideoLoaded = Signal(object)
     cloudOperationFinished = Signal(object)
 
 
@@ -1584,7 +1587,11 @@ class PhotoCardDelegate(QStyledItemDelegate):
         image_rect = rect.adjusted(side, top, -side, -bottom)
         path = index.data(Qt.ItemDataRole.UserRole)
         path_obj = _media_value(path)
-        if path_obj and path_obj.is_dir():
+        directory_flag = index.data(DIRECTORY_ROLE)
+        # Тип пути известен при создании карточки; paint не должен делать stat
+        # для каждого значка, подписи и рейтинга во время прокрутки.
+        is_folder = bool(directory_flag) if directory_flag is not None else bool(path_obj and path_obj.is_dir())
+        if is_folder:
             text_height = 22 if self.compact else 28
             text_rect = QRect(rect.left() + 8, rect.bottom() - text_height - 5, rect.width() - 16, text_height)
             folder_rect = QRect(
@@ -1665,9 +1672,9 @@ class PhotoCardDelegate(QStyledItemDelegate):
 
         caption_rect = QRect(rect.left() + 5, rect.bottom() - bottom + 2, rect.width() - 10, bottom - 2)
         text_rect = QRect(caption_rect)
-        if path_obj and path_obj.is_dir():
+        if is_folder:
             text_rect = QRect(rect.left() + 8, rect.bottom() - (20 if self.compact else 24) - 1, rect.width() - 16, 20 if self.compact else 24)
-        if path_obj and path_obj.is_dir():
+        if is_folder:
             text = path_obj.name
         else:
             text = index.data(Qt.ItemDataRole.DisplayRole) or ""
@@ -1675,27 +1682,27 @@ class PhotoCardDelegate(QStyledItemDelegate):
         painter.setPen(color)
         font = QFont(option.font)
         font.setPointSizeF(
-            7.0 if self.compact and not (path_obj and path_obj.is_dir())
+            7.0 if self.compact and not is_folder
             else 8.5 if self.compact
-            else 10.5 if path_obj and path_obj.is_dir()
+            else 10.5 if is_folder
             else 7.5
         )
         font.setWeight(QFont.Weight.Normal)
         painter.setFont(font)
-        rating = int(detail.get("rating") or 0) if not (path_obj and path_obj.is_dir()) else 0
+        rating = int(detail.get("rating") or 0) if not is_folder else 0
         rating_text = "★" * rating
         display_text = text
         font_metrics = painter.fontMetrics()
-        if path_obj and path_obj.is_file() and font_metrics.horizontalAdvance(text) > text_rect.width():
+        if path_obj and not is_folder and font_metrics.horizontalAdvance(text) > text_rect.width():
             display_text = path_obj.stem
         painter.drawText(
             text_rect,
             (Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter)
-            if path_obj and path_obj.is_dir()
+            if is_folder
             else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
             font_metrics.elidedText(display_text, Qt.TextElideMode.ElideMiddle, text_rect.width()),
         )
-        if not (path_obj and path_obj.is_dir()):
+        if not is_folder:
             count = int(series.get("count", 0) or 0)
             badge_height = 10 if self.compact else 12
             badge_top = rect.top() + 4
@@ -1924,6 +1931,7 @@ class ViewerStrip(QListWidget):
         """Собирает карточку ленты с метаданными и готовым превью, если оно есть."""
         item = QListWidgetItem(path.name)
         item.setData(Qt.ItemDataRole.UserRole, path)
+        item.setData(DIRECTORY_ROLE, False)
         item.setData(DETAIL_ROLE, details.get(path.name, {}))
         item.setData(SERIES_ROLE, (series_cards or {}).get(path, {}))
         preview = previews.get(path)
@@ -2660,13 +2668,10 @@ class FullView(QFrame):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._pixmap: QPixmap | None = None
         self._preview_pixmap: QPixmap | None = None
+        self._preview_image_key: int | None = None
         self._path: Path | None = None
         self._is_fallback = False
         self._photo_generation = -1
-        self._smooth_timer = QTimer(self)
-        self._smooth_timer.setSingleShot(True)
-        self._smooth_timer.timeout.connect(self._smooth_fit)
-
         self.image_view = FullImageView()
         self.image_view.setObjectName("fullImageView")
         self.image_view.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -2685,6 +2690,7 @@ class FullView(QFrame):
         self.video_player.positionChanged.connect(self._video_position_changed)
         self.video_player.durationChanged.connect(self._video_duration_changed)
         self.video_player.playbackStateChanged.connect(self._video_state_changed)
+        self.video_player.errorOccurred.connect(self._video_error)
         self._is_video = False
         self.video_controls = QFrame(self)
         self.video_controls.setObjectName("videoControls")
@@ -3363,17 +3369,24 @@ class FullView(QFrame):
         self.media_stack.setCurrentWidget(self.image_view)
         self._path = decoded.path
         self._is_fallback = fallback
-        self._pixmap = QPixmap.fromImage(decoded.image)
-        self._preview_pixmap = self._pixmap
+        # RAM-кэш может повторно прислать уже показанный QImage. Сохраняем
+        # QPixmap и его cacheKey, чтобы не повторять конвертацию и fit-масштаб.
+        image_key = decoded.image.cacheKey()
+        if self._preview_pixmap is None or self._preview_image_key != image_key:
+            self._preview_pixmap = QPixmap.fromImage(decoded.image)
+            self._preview_image_key = image_key
+        self._pixmap = self._preview_pixmap
         suffix = "  -  preview" if fallback else ""
         self.info_label.setText(f"{decoded.path.name}  ·  {decoded.width} × {decoded.height}{suffix}")
         # Запоздалое экранное превью не должно заменить уже открытый оригинал.
         if self.image_view.zoom_requested:
             return
-        self.image_view.set_pixmap(self._pixmap, smooth=False)
-        self._schedule_smooth_fit()
+        # Ближайший сосед на первом показе даёт ложную «резкость», которая
+        # исчезает при сглаживании. Большой кадр сразу рисуем тем же способом.
+        self.image_view.set_pixmap(self._pixmap, smooth=True)
 
-    def set_video(self, path: Path, preview: QImage | None = None) -> None:
+    def set_video(self, path: Path, preview: QImage | None = None, *, source: QUrl | None = None) -> None:
+        """Готовит локальное видео или сетевой источник; пустой URL означает ожидание ссылки."""
         if self._path != path:
             self.stop_audio()
         self._reset_zoom()
@@ -3382,7 +3395,8 @@ class FullView(QFrame):
         self._update_mark_indicator()
         self._is_fallback = True
         self.video_player.stop()
-        self.video_player.setSource(QUrl.fromLocalFile(str(path)))
+        self.video_player.setSource(QUrl.fromLocalFile(str(path)) if source is None else source)
+        self.video_play_button.setEnabled(not self.video_player.source().isEmpty())
         self.video_seek.setRange(0, 0)
         self.video_time_label.setText("0:00 / 0:00")
         self.video_play_button.setIcon(_fomantic_icon("play", 12))
@@ -3390,10 +3404,23 @@ class FullView(QFrame):
         self.video_controls.show()
         self._position_video_controls()
         self.media_stack.setCurrentWidget(self.image_view)
+        self._pixmap = None
+        self.image_view.set_pixmap(QPixmap())
         if preview is not None and not preview.isNull():
             self._pixmap = QPixmap.fromImage(preview)
             self.image_view.set_pixmap(self._pixmap, smooth=False)
         self.info_label.setText(path.name)
+
+    def _video_error(self, *_args) -> None:
+        """Показывает понятную ошибку, не раскрывая временный URL из сообщения backend."""
+        if not self._is_video:
+            return
+        self.video_player.stop()
+        self.media_stack.setCurrentWidget(self.image_view)
+        self.video_controls.setParent(self.media_panel)
+        self._position_video_controls()
+        self.video_controls.show()
+        self.info_label.setText(_("Не удалось воспроизвести видео."))
 
     def set_video_preview(self, path: Path, preview: QImage) -> None:
         if self._is_video and self._path == path and self.media_stack.currentWidget() is self.image_view:
@@ -3401,7 +3428,7 @@ class FullView(QFrame):
             self.image_view.set_pixmap(self._pixmap, smooth=False)
 
     def _toggle_video_playback(self) -> None:
-        if not self._is_video:
+        if not self._is_video or self.video_player.source().isEmpty():
             return
         if self.video_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.video_player.pause()
@@ -3696,21 +3723,13 @@ class FullView(QFrame):
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         self.exitRequested.emit()
 
-    def _fast_fit(self) -> None:
-        self.image_view.set_smooth(False)
-        
-    def _smooth_fit(self) -> None:
+    def begin_fast_resize(self) -> None:
+        """Готовит переход геометрии, сохраняя качество первого кадра."""
         self.image_view.set_smooth(True)
 
-    def _schedule_smooth_fit(self) -> None:
-        self._smooth_timer.start(140)
-
-    def begin_fast_resize(self) -> None:
-        self._smooth_timer.stop()
-        self.image_view.set_smooth(False)
-
     def finish_fast_resize(self) -> None:
-        self._schedule_smooth_fit()
+        """Завершает переход без отложенной смены фильтра масштабирования."""
+        self.image_view.set_smooth(True)
 
 
 class FullImageView(QWidget):
@@ -5170,6 +5189,7 @@ class Workspace(QMainWindow):
         self.bridge.faceSearchFinished.connect(self._on_face_search_finished)
         self.bridge.cloudDirectoryLoaded.connect(self._on_cloud_directory_loaded)
         self.bridge.cloudPreviewLoaded.connect(self._on_cloud_preview_loaded)
+        self.bridge.cloudVideoLoaded.connect(self._on_cloud_video_loaded)
         self.bridge.cloudOperationFinished.connect(self._on_cloud_operation_finished)
         self.items_by_path: dict[Path, QListWidgetItem] = {}
         self.all_paths: list[Path] = []
@@ -5210,6 +5230,7 @@ class Workspace(QMainWindow):
         self.cloud_account_id: str | None = None
         self.cloud_path = "disk:/"
         self.cloud_generation = 0
+        self._cloud_video_request_id = 0
         self.cloud_items_by_key: dict[Path, YandexDiskItem] = {}
         self.cloud_keys_by_remote_path: dict[str, Path] = {}
         self._cloud_clients: dict[str, YandexDiskClient] = {}
@@ -5407,6 +5428,9 @@ class Workspace(QMainWindow):
         self.thumb_timer = QTimer(self)
         self.thumb_timer.setInterval(WORK_PUMP_INTERVAL_MS)
         self.thumb_timer.timeout.connect(self._submit_next_thumbs)
+        self.thumb_refill_timer = QTimer(self)
+        self.thumb_refill_timer.setSingleShot(True)
+        self.thumb_refill_timer.timeout.connect(self._submit_next_thumbs)
         self.visible_thumb_timer = QTimer(self)
         self.visible_thumb_timer.setSingleShot(True)
         self.visible_thumb_timer.timeout.connect(self._prioritize_visible_thumbs)
@@ -5467,6 +5491,7 @@ class Workspace(QMainWindow):
         self.grid_full_request_timer.stop()
         self.populate_timer.stop()
         self.thumb_timer.stop()
+        self.thumb_refill_timer.stop()
         self.cloud_visible_thumb_timer.stop()
         self.ai_progress_timer.stop()
         self._ai_progress_started_at = None
@@ -5612,6 +5637,7 @@ class Workspace(QMainWindow):
         if touches_workspace:
             self.populate_timer.stop()
             self.thumb_timer.stop()
+            self.thumb_refill_timer.stop()
             self.visible_thumb_timer.stop()
             self.full_request_timer.stop()
             self.grid_full_request_timer.stop()
@@ -5738,6 +5764,7 @@ class Workspace(QMainWindow):
         if not active:
             self.populate_timer.stop()
             self.thumb_timer.stop()
+            self.thumb_refill_timer.stop()
             self.visible_thumb_timer.stop()
             self.grid_full_request_timer.stop()
             self.full_request_timer.stop()
@@ -8119,6 +8146,7 @@ class Workspace(QMainWindow):
         self.scheduler.cancel_pending()
         self.populate_timer.stop()
         self.thumb_timer.stop()
+        self.thumb_refill_timer.stop()
         self.grid_full_request_timer.stop()
         self.full_request_timer.stop()
         self.folder_change_timer.stop()
@@ -8261,7 +8289,7 @@ class Workspace(QMainWindow):
         visible_items = sorted(
             (
                 item for item in items
-                if item.is_dir or is_supported_image(Path(item.name))
+                if item.is_dir or is_supported_media(Path(item.name))
             ),
             key=lambda item: (not item.is_dir, item.name.casefold()),
         )
@@ -8275,6 +8303,7 @@ class Workspace(QMainWindow):
             self.cloud_keys_by_remote_path[remote.path] = key
             item = QListWidgetItem(remote.name)
             item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setData(DIRECTORY_ROLE, remote.is_dir)
             item.setData(DETAIL_ROLE, {})
             item.setData(SERIES_ROLE, {})
             item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
@@ -8826,6 +8855,8 @@ class Workspace(QMainWindow):
             item = self.items_by_path.get(key)
             if item is not None:
                 item.setData(PREVIEW_ROLE, image)
+            if is_supported_video(key) and key == self.current_path:
+                self.full_view.set_video_preview(key, image)
             return
         self._cloud_full_previews[key] = image
         if key == self.current_path and self.stack.currentWidget() is self.full_view:
@@ -10071,6 +10102,7 @@ class Workspace(QMainWindow):
         self.decode_cache.clear()
         self.populate_timer.stop()
         self.thumb_timer.stop()
+        self.thumb_refill_timer.stop()
         if self._ai_pipeline is None or self._ai_pipeline.pending_count() == 0:
             self.ai_progress_timer.stop()
         self.ai_progress_total = 0
@@ -10697,6 +10729,7 @@ class Workspace(QMainWindow):
         """Создаёт карточку пути и повторно использует уже загруженную миниатюру."""
         item = QListWidgetItem(path.name)
         item.setData(Qt.ItemDataRole.UserRole, path)
+        item.setData(DIRECTORY_ROLE, path.is_dir())
         item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter)
         item.setToolTip(str(path))
         item.setData(DETAIL_ROLE, self.photo_details.get(path.name, {}))
@@ -10719,8 +10752,9 @@ class Workspace(QMainWindow):
 
     def _submit_next_thumbs(self) -> None:
         """Дозированно добавляет следующую порцию миниатюр в фоновую очередь."""
-        if not self.workspace_active:
+        if self.closing or not self.workspace_active:
             self.thumb_timer.stop()
+            self.thumb_refill_timer.stop()
             return
         if self.folder_cache is None or not self.cache_ready:
             return
@@ -10733,8 +10767,13 @@ class Workspace(QMainWindow):
         elif self.visible_thumb_pending or pending_thumbs >= MAX_PENDING_THUMBS:
             return
         image_batch: list[Path] = []
+        visible_batch: list[Path] = []
         submitted = 0
-        submit_limit = 1 if self.thumb_priority else THUMB_SUBMIT_BATCH
+        submit_limit = (
+            min(VISIBLE_THUMB_SUBMIT_BATCH, MAX_VISIBLE_THUMB_PENDING - len(self.visible_thumb_pending))
+            if self.thumb_priority
+            else min(THUMB_SUBMIT_BATCH, MAX_PENDING_THUMBS - pending_thumbs)
+        )
         while submitted < submit_limit:
             next_path = self._next_thumb_path()
             if next_path is None:
@@ -10744,14 +10783,19 @@ class Workspace(QMainWindow):
                 self._submit_video_thumbnail(path, visible_priority=visible_priority)
             else:
                 if visible_priority:
-                    self._submit_decode(path, THUMB_SIZE, full_priority=False, visible_priority=True)
+                    visible_batch.append(path)
                 else:
                     image_batch.append(path)
             submitted += 1
+            if visible_batch and not self.thumb_priority:
+                break
+        if visible_batch:
+            self.scheduler.submit_thumbnail_batch(visible_batch, visible_priority=True)
         if image_batch:
             self.scheduler.submit_thumbnail_batch(image_batch)
         if self.thumb_index >= len(self.paths) and not self.thumb_priority:
             self.thumb_timer.stop()
+            self.thumb_refill_timer.stop()
         self._refresh_status_panel()
 
     def _schedule_visible_thumb_priority(self) -> None:
@@ -12179,15 +12223,13 @@ class Workspace(QMainWindow):
 
         loaded = len(self.preview_finished_paths & self.preview_paths)
         if self.preview_progress_total and loaded < self.preview_progress_total:
+            if not self.scheduler.preview_decode_pending:
+                self.status_progress.hide()
+                self._set_taskbar_progress(0, 0)
+                return
             self.status_progress.setRange(0, self.preview_progress_total)
             self.status_progress.setValue(loaded)
-            # Промах кэша запускает декодирование: пока оно идёт, цена ожидания
-            # совсем другая, чем у чтения готовых миниатюр из кэша папки.
-            template = (
-                _("Генерация превью: {done}/{total}")
-                if self.scheduler.preview_decode_pending
-                else _("Чтение превью: {done}/{total}")
-            )
+            template = _("Генерация превью: {done}/{total}")
             self.status_progress.setFormat(template.format(done=loaded, total=self.preview_progress_total))
             self.status_progress.setToolTip(self.status_progress.format())
             self.status_progress.show()
@@ -13768,6 +13810,17 @@ class Workspace(QMainWindow):
         """Принимает bookkeeping декодера в главном потоке Qt."""
         self.scheduler.handle_completion(payload)
         self._resume_incomplete_thumbnail_work()
+        if (
+            not self.closing
+            and self.workspace_active
+            and self.cache_ready
+            and self.cloud_account_id is None
+            and self.thumb_timer.isActive()
+            and not self.thumb_refill_timer.isActive()
+        ):
+            # Одна отложенная подача объединяет завершения пачки и даёт Qt
+            # обработать ввод. Быстрый JPEG-кэш не ждёт следующего тика 16 мс.
+            self.thumb_refill_timer.start(0)
 
     def _open_selected(self) -> None:
         item = self.grid.currentItem()
@@ -13973,8 +14026,10 @@ class Workspace(QMainWindow):
         )
 
     def _open_cloud_full(self, path: Path) -> None:
-        """Показывает серверное превью, не запуская декодер и чтение оригинала."""
+        """Открывает серверное фото-превью либо сетевое видео без локального оригинала."""
         remote = self.cloud_items_by_key[path]
+        self._cloud_video_request_id += 1
+        self.full_view.stop_video()
         self.current_path = path
         self.workspace_state.current_photo = path
         self.full_view.stop_audio()
@@ -13992,6 +14047,16 @@ class Workspace(QMainWindow):
             candidate = item.data(PREVIEW_ROLE) if item is not None else None
             image = candidate if isinstance(candidate, QImage) and not candidate.isNull() else None
             fallback = image is not None
+        if is_supported_video(path):
+            self.full_view.set_video(path, image, source=QUrl())
+            self._cloud_full_preview_targets.clear()
+            self._cloud_full_previews.clear()
+            self._cloud_preview_totals[1920] = 0
+            self._cloud_preview_completed[1920] = set()
+            self._refresh_full_view_navigation(path)
+            self._refresh_status_panel()
+            self._request_cloud_video(path, remote)
+            return
         if image is not None:
             self.full_view.set_image(
                 DecodedImage(path, image, image.width(), image.height()),
@@ -14005,6 +14070,7 @@ class Workspace(QMainWindow):
         current_index = image_paths.index(path) if path in image_paths else -1
         if current_index >= 0:
             targets = image_paths[max(0, current_index - 1): current_index + 2]
+            targets = [candidate for candidate in targets if not is_supported_video(candidate)]
             self._cloud_full_preview_targets = set(targets)
             self._cloud_full_previews = {
                 candidate: cached
@@ -14020,6 +14086,49 @@ class Workspace(QMainWindow):
                     candidate, self.cloud_items_by_key[candidate], 1920
                 )
 
+    def _request_cloud_video(self, path: Path, remote: YandexDiskItem) -> None:
+        """Получает короткоживущий URL в фоне; ссылка не сохраняется в дисковом кэше."""
+        account_id = self.cloud_account_id
+        generation = self.cloud_generation
+        request_id = self._cloud_video_request_id
+        client = self._yandex_client(str(account_id))
+        future = self.cloud_full_executor.submit(client.download_url, remote.path)
+
+        def finished(done: Future) -> None:
+            try:
+                url, error = done.result(), False
+            except Exception:
+                url, error = "", True
+            if self.closing:
+                return
+            try:
+                self.bridge.cloudVideoLoaded.emit(
+                    {"account": account_id, "generation": generation, "request_id": request_id,
+                     "key": path, "url": url, "error": error}
+                )
+            except RuntimeError:
+                pass  # Qt-владелец мог быть удалён между проверкой и отправкой сигнала.
+
+        future.add_done_callback(finished)
+
+    def _on_cloud_video_loaded(self, result: dict) -> None:
+        """Принимает ссылку только для всё ещё открытого ролика и конкретного запроса."""
+        if (
+            self.closing
+            or result["account"] != self.cloud_account_id
+            or result["generation"] != self.cloud_generation
+            or result["request_id"] != self._cloud_video_request_id
+            or result["key"] != self.current_path
+            or self.stack.currentWidget() is not self.full_view
+            or not self.full_view._is_video
+        ):
+            return
+        if result["error"]:
+            self.full_view.info_label.setText(_("Не удалось воспроизвести видео."))
+            return
+        self.full_view.video_player.setSource(QUrl(result["url"]))
+        self.full_view.video_play_button.setEnabled(True)
+
     def _finish_open_full_video(self, path: Path) -> None:
         """Достраивает ленты видео после первой отрисовки его превью."""
         if not self.closing and path == self.current_path and self.stack.currentWidget() is self.full_view:
@@ -14031,7 +14140,6 @@ class Workspace(QMainWindow):
             return
         self._suspend_thumbnail_work()
         self._cancel_outdated_full_tasks(path, self._full_preview_size())
-        self._refresh_full_view_navigation(path)
         full_size = self._full_preview_size()
         in_series = len(self._series_for_path(path)) > 1
         if in_series:
@@ -14046,6 +14154,8 @@ class Workspace(QMainWindow):
             self._promote_current_full_task(path, full_size)
             self._submit_decode(path, full_size, full_priority=True)
             self._preload_neighbors(path)
+        # Декодер уже работает, пока главный поток достраивает карточки лент.
+        self._refresh_full_view_navigation(path)
 
     def _request_original_zoom(self, _position: object) -> None:
         """Загружает оригинал только для масштаба 100 % и повторно использует RAM-кэш."""
@@ -14341,6 +14451,7 @@ class Workspace(QMainWindow):
     def _suspend_thumbnail_work(self) -> None:
         """Даёт декодированию текущего полного кадра исключительный приоритет."""
         self.thumb_timer.stop()
+        self.thumb_refill_timer.stop()
         self.visible_thumb_timer.stop()
         for key, future in list(self.pending.items()):
             if key[1] == THUMB_SIZE:
@@ -14482,7 +14593,6 @@ class Workspace(QMainWindow):
         navigation_paths, index = self._full_navigation_context(path)
         if index < 0:
             return
-        full_size = self._full_preview_size()
         before = list(reversed(navigation_paths[max(0, index - FULL_PRELOAD_RADIUS) : index]))
         after = navigation_paths[index + 1 : index + FULL_PRELOAD_RADIUS + 1]
         if self.last_move_direction >= 0:
@@ -14496,7 +14606,7 @@ class Workspace(QMainWindow):
             for neighbor in group[distance : distance + 1]
         ]
         for neighbor in neighbors:
-            self._submit_decode(neighbor, full_size, full_priority=True)
+            self._submit_decode(neighbor, self._full_preview_size(neighbor), full_priority=True)
 
     def _full_preload_paths(self, path: Path) -> list[Path]:
         """Выбирает соседние кадры для упреждающей загрузки внутри серии."""
@@ -14522,9 +14632,12 @@ class Workspace(QMainWindow):
 
         for key, future in list(self.pending.items()):
             pending_path, pending_size = key
+            if pending_size <= THUMB_SIZE:
+                continue
             stale_foreground = key in self.foreground_full_futures and pending_path != path
-            if pending_size > THUMB_SIZE and (
-                stale_foreground or pending_size != full_size or pending_path not in keep
+            required_size = full_size if pending_path == path else self._full_preview_size(pending_path)
+            if (
+                stale_foreground or pending_size < required_size or pending_path not in keep
             ):
                 future.cancel()
 
@@ -14539,6 +14652,8 @@ class Workspace(QMainWindow):
 
     def _show_best_cached_full(self, path: Path, full_size: int) -> None:
         full = self._cache_get((path, full_size))
+        if full is None:
+            full = self.decode_cache.sufficient_preview(path, full_size)
         if full is not None:
             self.full_view.set_image(full)
             return
@@ -14554,13 +14669,28 @@ class Workspace(QMainWindow):
                 fallback=True,
             )
 
-    def _full_preview_size(self) -> int:
+    def _full_preview_size(self, path: Path | None = None) -> int:
+        """Даёт достаточную длинную сторону с учётом пропорций кадра и DPR экрана."""
         screen = self.screen() or QApplication.primaryScreen()
         if screen is None:
             return 2560
         size = screen.geometry().size()
         ratio = screen.devicePixelRatio()
-        return max(THUMB_SIZE, int(max(size.width(), size.height()) * ratio))
+        limit = max(THUMB_SIZE, math.ceil(max(size.width(), size.height()) * ratio))
+        path = self.current_path if path is None else path
+        if path is None:
+            return limit
+        preview = self._thumbnail_cache_get(path)
+        if preview is None:
+            cached = self._cache_get((path, THUMB_SIZE))
+            preview = cached.image if cached is not None else None
+        if preview is None or preview.isNull():
+            return limit
+        fitted = preview.size().scaled(size, Qt.AspectRatioMode.KeepAspectRatio)
+        # Экран, а не скрытый виджет, делает размер стабильным ещё до входа
+        # в fullscreen. Шаг 64 даёт запас на округление пропорций миниатюры.
+        needed = max(fitted.width(), fitted.height()) * ratio
+        return min(limit, max(THUMB_SIZE, math.ceil(needed / 64) * 64))
 
     def _submit_pending_full_request(self) -> None:
         path = self.pending_full_request

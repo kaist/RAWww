@@ -99,6 +99,8 @@ class DecodeScheduler:
             return
         key = (path, max_size)
         cached = self._host.decode_cache.get(key)
+        if cached is None and max_size > self._thumb_size:
+            cached = self._host.decode_cache.sufficient_preview(path, max_size)
         if cached is not None:
             self._host.bridge.decoded.emit((cached, max_size))
             return
@@ -123,8 +125,8 @@ class DecodeScheduler:
             return
         self._submit_process_decode(path, max_size, full_priority=full_priority, visible_priority=visible_priority)
 
-    def submit_thumbnail_batch(self, paths: list[Path]) -> None:
-        """Запрашивает фоновую пачку миниатюр одним чтением SQLite без приоритета экрана."""
+    def submit_thumbnail_batch(self, paths: list[Path], *, visible_priority: bool = False) -> None:
+        """Читает пачку SQLite в очереди экрана либо фонового обхода."""
         if self._host.closing or self._host.folder_cache is None:
             return
         requested = []
@@ -136,15 +138,18 @@ class DecodeScheduler:
         if not requested:
             return
         cache = self._host.folder_cache
-        future = self.background_cache_lookup_executor.submit(
+        executor = self.visible_thumb_cache_lookup_executor if visible_priority else self.background_cache_lookup_executor
+        future = executor.submit(
             cache.load_batch, requested, self._thumb_size
         )
         for path in requested:
             self.pending[(path, self._thumb_size)] = future
+            if visible_priority:
+                self.visible_thumb_pending.add((path, self._thumb_size))
         generation = self._host.directory_generation
         future.add_done_callback(
             lambda done, paths=tuple(requested), g=generation: self._queue_completion(
-                "cache_batch", paths, g, done
+                "cache_batch", paths, g, done, visible_priority
             )
         )
 
@@ -245,6 +250,8 @@ class DecodeScheduler:
         self.pending[key] = future
         if max_size == self._thumb_size:
             self.preview_decode_pending.add(path)
+            if visible_priority:
+                self.visible_thumb_pending.add(key)
         if is_foreground:
             self.foreground_full_futures[key] = future
         generation = self._host.directory_generation
@@ -322,13 +329,14 @@ class DecodeScheduler:
         self._host.schedule_status_refresh()
 
     def _cache_batch_lookup_done(
-        self, paths: tuple[Path, ...], generation: int, future: Future
+        self, paths: tuple[Path, ...], generation: int, future: Future, visible_priority: bool = False
     ) -> None:
         """Раздаёт результат пакетного чтения и декодирует только отсутствующие миниатюры."""
         for path in paths:
             key = (path, self._thumb_size)
             if self.pending.get(key) is future:
                 self.pending.pop(key, None)
+                self.visible_thumb_pending.discard(key)
         if (
             self._host.closing
             or generation != self._host.directory_generation
@@ -348,7 +356,7 @@ class DecodeScheduler:
                 self._host.bridge.decoded.emit((image, self._thumb_size))
             elif path.is_file():
                 self._submit_process_decode(
-                    path, self._thumb_size, full_priority=False, visible_priority=False
+                    path, self._thumb_size, full_priority=False, visible_priority=visible_priority
                 )
         self._host.schedule_status_refresh()
 

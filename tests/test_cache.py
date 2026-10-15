@@ -222,6 +222,38 @@ class CacheTests(unittest.TestCase):
             self.assertTrue(all(max(item.width, item.height) <= 256 for item in loaded.values()))
             cache.close(flush=False)
 
+    def test_cached_jpeg_owns_pixels_and_preserves_rgb_for_unaligned_width(self) -> None:
+        """Прямая загрузка Qt не зависит от жизни bytes, SQLite и padding RGB-строки."""
+        from PySide6.QtGui import QImage
+
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            path = folder / "sample.jpg"
+            Image.effect_noise((255, 170), 50).convert("RGB").save(path)
+            pixel = decode_pixels(path, 256)
+            encoded = cache_module._encode_jpeg(pixel.pixels, pixel.width, pixel.height)
+            rgba = cache_module._decode_jpeg_to_rgba(encoded)
+            expected = QImage(rgba, pixel.width, pixel.height, pixel.width * 4, QImage.Format.Format_RGBA8888).copy().convertToFormat(QImage.Format.Format_RGB888)
+            cache = FolderCache(folder, {path.name}, cache_root=folder / "cache")
+            cache.store_pixels(pixel, 256)
+            single = cache.load(path, 256)
+            batch = cache.load_batch([path], 256)[path]
+            cache.close(flush=False)
+            self.assertEqual(single.image, expected)
+            self.assertEqual(batch.image, expected)
+
+    def test_cached_jpeg_geometry_mismatch_is_a_cache_miss(self) -> None:
+        with TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            path = folder / "sample.jpg"
+            Image.new("RGB", (256, 171), "red").save(path)
+            cache = FolderCache(folder, {path.name}, cache_root=folder / "cache")
+            cache.load_or_decode(path, 256)
+            cache._db_or_raise().execute("UPDATE previews SET width=width+1")
+            self.assertIsNone(cache.load(path, 256))
+            self.assertEqual(cache.load_batch([path], 256), {})
+            cache.close(flush=False)
+
     def test_selection_keywords_and_xmp_sync_state_round_trip(self) -> None:
         with TemporaryDirectory() as directory:
             folder = Path(directory)

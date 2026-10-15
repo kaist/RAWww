@@ -263,12 +263,14 @@ class FolderCache:
 
         width, height, fmt, data = row
         if fmt == "jpeg":
-            data = _decode_jpeg_to_rgba(data)
-            fmt = "rgba"
-        if fmt != "rgba":
+            image = _decode_cached_jpeg(data)
+            if (image.width(), image.height()) != (width, height):
+                return None
+        elif fmt == "rgba":
+            image = QImage(data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
+            image = image.convertToFormat(QImage.Format.Format_RGB888)
+        else:
             return None
-        image = QImage(data, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
-        image = image.convertToFormat(QImage.Format.Format_RGB888)
         return DecodedImage(path=path, image=image, width=width, height=height)
 
     def load_batch(self, paths: list[Path], max_size: int) -> dict[Path, DecodedImage]:
@@ -301,9 +303,9 @@ class FolderCache:
             if file_size != stamp.size or mtime_ns != stamp.mtime_ns or fmt != "jpeg":
                 continue
             try:
-                rgba = _decode_jpeg_to_rgba(data)
-                image = QImage(rgba, width, height, width * 4, QImage.Format.Format_RGBA8888).copy()
-                image = image.convertToFormat(QImage.Format.Format_RGB888)
+                image = _decode_cached_jpeg(data)
+                if (image.width(), image.height()) != (width, height):
+                    continue
             except Exception:
                 continue
             decoded[path] = DecodedImage(path=path, image=image, width=width, height=height)
@@ -1261,3 +1263,11 @@ def _decode_jpeg_to_rgba(data: bytes) -> bytes:
         raise RuntimeError("Failed to decode cached JPEG preview")
     rgba = image.convertToFormat(QImage.Format.Format_RGBA8888)
     return bytes(rgba.bits())
+
+
+def _decode_cached_jpeg(data: bytes) -> QImage:
+    """Даёт принадлежащий Qt RGB без промежуточных RGBA и Python-копии пикселей."""
+    image = QImage.fromData(data, "JPG")
+    if image.isNull():
+        raise RuntimeError("Failed to decode cached JPEG preview")
+    return image.convertToFormat(QImage.Format.Format_RGB888)

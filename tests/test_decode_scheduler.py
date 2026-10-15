@@ -186,6 +186,16 @@ class DecodeSchedulerTests(unittest.TestCase):
         self.assertEqual(scheduler.background_cache_lookup_executor.calls, [])
         self.assertEqual(host.bridge.decoded.emitted, [])
 
+    def test_large_cached_fit_satisfies_smaller_request_without_decode(self) -> None:
+        scheduler, host = _make()
+        path = host.current_dir / "a.jpg"
+        decoded = _decoded(str(path))
+        host.decode_cache.put((path, 2880), decoded)
+        scheduler.submit_decode(path, 1856, full_priority=True)
+        self.assertEqual(host.bridge.decoded.emitted, [((decoded, 1856),)])
+        self.assertIsNone(scheduler.current_decode_executor)
+        self.assertEqual(scheduler.pending, {})
+
     def test_missing_folder_cache_does_nothing(self) -> None:
         scheduler, host = _make()
         host.folder_cache = None
@@ -283,6 +293,35 @@ class DecodeSchedulerTests(unittest.TestCase):
             [((first_decoded, THUMB_SIZE),), ((second_decoded, THUMB_SIZE),)],
         )
         self.assertEqual(scheduler.pending, {})
+
+    def test_visible_batch_uses_screen_queue_and_preserves_priority_on_miss(self) -> None:
+        from unittest.mock import patch
+
+        first, second = Path("/photos/a.jpg"), Path("/photos/b.jpg")
+        hit = _decoded(str(first))
+        scheduler, host = _make(_FolderCache(loads={(first, THUMB_SIZE): hit}))
+        scheduler.visible_thumb_decode_executor = _PendingExecutor()
+        with patch.object(Path, "is_file", return_value=True):
+            scheduler.submit_thumbnail_batch([first, second], visible_priority=True)
+        self.assertEqual(len(scheduler.visible_thumb_cache_lookup_executor.calls), 1)
+        self.assertEqual(scheduler.background_cache_lookup_executor.calls, [])
+        self.assertEqual(host.bridge.decoded.emitted, [((hit, THUMB_SIZE),)])
+        self.assertNotIn((first, THUMB_SIZE), scheduler.visible_thumb_pending)
+        self.assertIn((second, THUMB_SIZE), scheduler.visible_thumb_pending)
+        self.assertEqual(scheduler.visible_thumb_decode_executor.calls[0][1], (second, THUMB_SIZE))
+
+    def test_stale_visible_batch_does_not_publish_or_decode_misses(self) -> None:
+        path = Path("/photos/a.jpg")
+        scheduler, host = _make(_FolderCache(loads={(path, THUMB_SIZE): _decoded(str(path))}))
+        scheduler.visible_thumb_cache_lookup_executor = _PendingExecutor()
+        scheduler.submit_thumbnail_batch([path], visible_priority=True)
+        future = scheduler.pending[(path, THUMB_SIZE)]
+        host.directory_generation += 1
+        future.set_result({path: _decoded(str(path))})
+        self.assertEqual(host.bridge.decoded.emitted, [])
+        self.assertEqual(scheduler.pending, {})
+        self.assertEqual(scheduler.visible_thumb_pending, set())
+        self.assertIsNone(scheduler.visible_thumb_decode_executor)
 
     def test_result_from_previous_generation_of_same_folder_is_rejected(self) -> None:
         path = Path("/photos/a.jpg")

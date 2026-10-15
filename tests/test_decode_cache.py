@@ -60,6 +60,19 @@ class DecodeCacheMemoryTests(unittest.TestCase):
         self.assertIsNone(cache.get(b))
         self.assertIsNotNone(cache.get(c))
 
+    def test_sufficient_preview_reuses_smallest_large_fit_and_updates_lru(self) -> None:
+        cache = _make_cache()
+        path = Path("a.jpg")
+        for size in (256, 4096, 2560, ORIGINAL_SIZE):
+            cache.put((path, size), _decoded(str(path), size))
+        result = cache.sufficient_preview(path, 1856)
+        self.assertIs(result, cache.memory[(path, 2560)])
+        self.assertEqual(next(reversed(cache.memory)), (path, 2560))
+        self.assertIsNone(cache.sufficient_preview(path, 8192))
+        self.assertIsNone(cache.sufficient_preview(path, ORIGINAL_SIZE))
+        self.assertIsNone(cache.sufficient_preview(path, THUMB_SIZE))
+        self.assertIsNone(cache.sufficient_preview(Path("b.jpg"), 1856))
+
     def test_ram_limit_evicts_oldest(self) -> None:
         cache = _make_cache(ram_limit=3)
         for index in range(5):
