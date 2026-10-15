@@ -3405,7 +3405,7 @@ class FullView(QFrame):
         self._position_video_controls()
         self.media_stack.setCurrentWidget(self.image_view)
         self._pixmap = None
-        self.image_view.set_pixmap(QPixmap())
+        self.image_view.set_pixmap(QPixmap(), smooth=False)
         if preview is not None and not preview.isNull():
             self._pixmap = QPixmap.fromImage(preview)
             self.image_view.set_pixmap(self._pixmap, smooth=False)
@@ -8080,6 +8080,7 @@ class Workspace(QMainWindow):
         """Инвалидирует поздние сетевые ответы перед возвратом к локальной папке."""
         if self.cloud_account_id is None:
             return
+        self.full_view.stop_video()
         self.cloud_generation += 1
         self.cloud_account_id = None
         self.cloud_items_by_key.clear()
@@ -8126,6 +8127,7 @@ class Workspace(QMainWindow):
         """Очищает локальное состояние и асинхронно открывает каталог Диска."""
         if self.cloud_account_id is None:
             return
+        self.full_view.stop_video()
         # Поздняя проверка локальной папки не должна возвращать пользователя
         # из облака, поэтому здесь полностью снимаем прежнее наблюдение.
         self.folder_change_timer.stop()

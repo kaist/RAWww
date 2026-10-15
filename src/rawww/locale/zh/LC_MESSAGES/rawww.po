@@ -2446,6 +2446,11 @@ msgstr "Controlka：RAW 和 JPG 照片"
 msgid "Быстрый просмотр и отбор RAW и JPG"
 msgstr "快速查看和筛选 RAW 与 JPG 照片"
 
+
+#: src/rawww/app.py
+msgid "Не удалось воспроизвести видео."
+msgstr "无法播放视频。"
+
 #~ msgid "Готовится предпросмотр…"
 #~ msgstr "正在准备预览…"
 

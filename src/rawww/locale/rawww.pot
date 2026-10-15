@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-10-15 23:28+0300\n"
+"POT-Creation-Date: 2026-10-16 00:31+0300\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -136,6 +136,9 @@ msgid "Добавить лицо в набор"
 msgstr ""
 
 msgid "Стоп"
+msgstr ""
+
+msgid "Не удалось воспроизвести видео."
 msgstr ""
 
 msgid "Снять все метки"
@@ -2403,3 +2406,4 @@ msgstr ""
 
 msgid "Быстрый просмотр и отбор RAW и JPG"
 msgstr ""
+
