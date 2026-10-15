@@ -296,6 +296,11 @@ def main() -> None:
     parser.add_argument("--console", action="store_true", help="keep a console for diagnosing startup errors")
     parser.add_argument("--portable", action="store_true", help="mark the frozen build as portable")
     args = parser.parse_args()
+    # ctypes-мост не виден статическому анализу PyInstaller. Сначала собираем
+    # его под SDK текущей LibRaw, затем явно включаем рядом с Python-модулем.
+    from build_native_previews import build as build_native_previews
+
+    preview_bridge = build_native_previews()
     _clean_previous_build()
     _bake_build_version()
     try:
@@ -316,6 +321,7 @@ def main() -> None:
             # PyInstaller не видит их обычным статическим анализом импортов.
             "--collect-all", "pyexiv2",
             "--hidden-import", "rawpy",
+            "--add-binary", f"{preview_bridge}{os.pathsep}rawww/_native",
             "--hidden-import", "rawww._build_version",
         ]
         if sys.platform.startswith("linux"):

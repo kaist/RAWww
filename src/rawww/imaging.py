@@ -160,6 +160,19 @@ def pixel_to_decoded(pixel: PixelImage) -> DecodedImage:
 
 
 def _decode_raw_preview(path: Path, max_size: int | None) -> PixelImage:
+    # 100 % требует самого большого встроенного JPEG. Для миниатюр и fit
+    # выбираем достаточный вариант, сохраняя запас штатного Qt-уменьшения.
+    if max_size is not None:
+        from .raw_previews import extract_preview
+
+        try:
+            required_size = max_size if max_size <= 512 else round(max_size * 1.25)
+            preview = extract_preview(path, required_size)
+            if preview is not None:
+                return _decode_qt_jpeg_bytes(path, preview.data, max_size)
+        except (OSError, RuntimeError, ValueError):
+            # Повреждённое малое превью не отменяет возможность прочитать большое.
+            pass
     decoder = _rawpy()
 
     with decoder.imread(str(path)) as raw:

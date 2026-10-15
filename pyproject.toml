@@ -41,9 +41,13 @@ version = { attr = "rawww.version.__version__" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+rawww = ["_native/*.dll", "_native/*.so", "_native/*.dylib"]
+
 [dependency-groups]
 dev = [
     "babel>=2.18.0",
     "pybind11>=2.13,<3",
     "pyinstaller>=6.21.0",
+    "ziglang==0.15.2 ; sys_platform == 'win32'",
 ]
