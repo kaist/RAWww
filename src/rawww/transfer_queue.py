@@ -554,8 +554,10 @@ class TransferManager(QObject):
         task = self.active.get(identifier)
         if task is None:
             return
-        task.completed_files = completed
-        task.total_files = total
+        # Внешний пул уже обновил счётчики; старый Qt-сигнал не должен их откатывать.
+        if task.external_runner is None:
+            task.completed_files = completed
+            task.total_files = total
         now = monotonic()
         if task.speed_sample_at is None:
             task.speed_sample_at = now
@@ -572,8 +574,9 @@ class TransferManager(QObject):
         if transferred != task.speed_sample_bytes:
             task.speed_sample_at = now
             task.speed_sample_bytes = transferred
-        task.transferred_bytes = transferred
-        task.total_bytes = total_bytes
+        if task.external_runner is None:
+            task.transferred_bytes = transferred
+            task.total_bytes = total_bytes
         if task.status == "preparing":
             task.status = "running"
         self.changed.emit()

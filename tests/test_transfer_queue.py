@@ -51,6 +51,18 @@ class TransferQueueTests(unittest.TestCase):
         self.manager.shutdown()
         self.temp.cleanup()
 
+    def test_stale_external_progress_does_not_rewind_worker_counters(self) -> None:
+        task = TransferTask([], Path(), False, external_runner=lambda task, manager: None)
+        task.completed_files = 8
+        task.total_files = 16
+        task.transferred_bytes = 800
+        task.total_bytes = 1600
+        self.manager.active[task.identifier] = task
+        self.manager._apply_progress(task.identifier, 1, 16, 100, 1600, "")
+        self.assertEqual(task.completed_files, 8)
+        self.assertEqual(task.transferred_bytes, 800)
+        self.manager.active.clear()
+
     def test_copy_uses_atomic_target_and_reports_completion(self) -> None:
         root = Path(self.temp.name)
         source = root / "source.raw"

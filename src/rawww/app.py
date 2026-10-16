@@ -143,7 +143,7 @@ from .dialogs import (
 from .retouch_dialog import BatchRetouchDialog
 from .workspace import WorkspaceRequest, WorkspaceState
 from .storage_sources import YandexAccounts
-from .yandex_cloud import YandexPreviewCache
+from .yandex_cloud import YandexPreviewCache, download_files
 from .yandex_disk import YandexDiskClient, YandexDiskError, YandexDiskItem, YandexOAuth, YandexOAuthConfig
 from .xmp import (
     XmpChangedError,
@@ -162,7 +162,7 @@ from .i18n import gettext as _
 
 
 THUMB_SIZE = 256
-CLOUD_THUMBNAIL_WORKERS = 4
+CLOUD_THUMBNAIL_WORKERS = 8
 ORIGINAL_SIZE = 0
 VIDEO_THUMBNAIL_TIMEOUT_MS = 10_000
 # Ниже этого eye aspect ratio глаз считается закрытым (порог подобран на кадрах:
@@ -5103,7 +5103,7 @@ class Workspace(QMainWindow):
         self.cloud_thumbnail_executor = ThreadPoolExecutor(
             max_workers=CLOUD_THUMBNAIL_WORKERS, thread_name_prefix="yandex-thumbnail"
         )
-        self.cloud_full_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="yandex-full-preview")
+        self.cloud_full_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="yandex-full-preview")
         self.cloud_operation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yandex-operation")
         self.burst_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="burst-materialize")
         self.face_search_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="face-search")
@@ -8478,6 +8478,8 @@ class Workspace(QMainWindow):
             folders: list[Path] = []
 
             def collect(item: YandexDiskItem, target: Path) -> None:
+                if manager is not None and task is not None:
+                    manager.checkpoint(task)
                 if item.is_dir:
                     folders.append(target)
                     for child in client.list_directory(item.path):
@@ -8491,21 +8493,18 @@ class Workspace(QMainWindow):
                 manager.set_external_total(task, len(files), sum(item.size for item, _target in files))
             for folder in folders:
                 folder.mkdir(parents=True, exist_ok=True)
-            for item, target in files:
-                if target.exists():
-                    raise OSError(_("Файл уже существует: {path}").format(path=target))
-                client.download_file(
-                    item.path,
-                    target,
-                    progress=(lambda count, t=task, m=manager: m.advance_external(t, byte_count=count, name=item.name))
-                    if manager is not None and task is not None else None,
-                    checkpoint=(lambda t=task, m=manager: m.checkpoint(t))
-                    if manager is not None and task is not None else None,
-                )
-                if manager is not None and task is not None:
-                    manager.advance_external(task, file_completed=True, name=item.name)
+            download_files(
+                client, files,
+                progress=(lambda item, count, completed: manager.advance_external(
+                    task, byte_count=count, file_completed=completed, name=item.name
+                )) if manager is not None and task is not None else None,
+                checkpoint=(lambda: manager.checkpoint(task))
+                if manager is not None and task is not None else None,
+            )
             if move:
                 for remote in remotes:
+                    if manager is not None and task is not None:
+                        manager.checkpoint(task)
                     client.delete(remote.path)
 
         title = _("Перемещение из Яндекс.Диска") if move else _("Копирование из Яндекс.Диска")

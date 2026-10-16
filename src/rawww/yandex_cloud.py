@@ -7,11 +7,80 @@ from __future__ import annotations
 
 import hashlib
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event, Lock
+from typing import Callable
 
 from PySide6.QtGui import QImage
 
 from .yandex_disk import YandexDiskClient, YandexDiskError, YandexDiskItem
+from .i18n import gettext as _
+
+
+def download_files(
+    client: YandexDiskClient,
+    files: list[tuple[YandexDiskItem, Path]],
+    *,
+    progress: Callable[[YandexDiskItem, int, bool], None] | None = None,
+    checkpoint: Callable[[], None] | None = None,
+) -> None:
+    """Скачивает до восьми файлов; при сбое ждёт очистки всех активных загрузок.
+
+    Рабочие потоки сами берут следующий файл, поэтому очередь не растёт с папкой.
+    Прогресс сериализован: координатор получает согласованные суммарные счётчики.
+    """
+    targets: set[Path] = set()
+    for _item, target in files:
+        if target in targets or target.exists():
+            raise FileExistsError(_("Файл уже существует: {path}").format(path=target))
+        targets.add(target)
+    remaining = iter(files)
+    lock = Lock()
+    stopped = Event()
+    errors: list[Exception] = []
+
+    def check() -> None:
+        if stopped.is_set():
+            raise RuntimeError("Загрузка остановлена после ошибки другого файла")
+        if checkpoint is not None:
+            checkpoint()
+
+    def report(item: YandexDiskItem, count: int = 0, completed: bool = False) -> None:
+        if progress is not None:
+            with lock:
+                progress(item, count, completed)
+
+    def worker() -> None:
+        try:
+            while not stopped.is_set():
+                check()
+                with lock:
+                    entry = next(remaining, None)
+                if entry is None:
+                    return
+                item, target = entry
+                if target.exists():
+                    raise FileExistsError(_("Файл уже существует: {path}").format(path=target))
+                client.download_file(
+                    item.path, target,
+                    progress=lambda count: report(item, count),
+                    checkpoint=check,
+                )
+                report(item, completed=True)
+        except Exception as exc:
+            with lock:
+                if not errors:
+                    errors.append(exc)
+                stopped.set()
+
+    if files:
+        with ThreadPoolExecutor(max_workers=min(8, len(files)), thread_name_prefix="yandex-download") as pool:
+            futures = [pool.submit(worker) for _ in range(min(8, len(files)))]
+            for future in futures:
+                future.result()
+    if errors:
+        raise errors[0]
 
 
 class YandexPreviewCache:
